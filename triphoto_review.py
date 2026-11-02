@@ -36,6 +36,8 @@ COLOR_FAMILIES = [('Rouges', 15), ('Oranges', 45), ('Jaunes', 70), ('Verts', 165
 FAMILY_COLORS = {'Rouges': '#c8392f', 'Oranges': '#d9772b', 'Jaunes': '#dcc02e', 'Verts': '#3ea04a', 'Turquoises': '#2fa8a8',
                  'Bleus': '#3560c8', 'Violets': '#8a44c0', 'Roses': '#d05a98', 'Neutres': '#8c8c8c'}
 ROW_HEIGHT, WALL_WIDTH = 210, 62
+# Decoded previews a page may hold at full sharpness; the rest of the 256 Mio stays for smaller ones.
+LARGE_BUDGET = 180*1024*1024
 
 
 def analyse_photo(path):
@@ -401,6 +403,24 @@ class Surface(QWidget):
             self.update()
             self.review.sync_bar()
 
+    def request_tiles(self, wanted):
+        """Ask for the previews of what is on screen, (photo, pixels), within what memory can hold.
+
+        Beyond it, each image loaded would push out another one still on screen, itself
+        then asked for again, and the loading would never end.
+        """
+        large = [max(2000, pixels) for _, pixels in wanted if pixels > 1100]
+        total = sum(pixels*pixels*2.67 for pixels in large)
+        factor = min(1., math.sqrt(LARGE_BUDGET/total)) if total else 1.
+        self.window_.large_keep = max(6, len(large))
+        self.window_.drop_requests({str(photo.path) for photo, _ in wanted})
+        for photo, pixels in wanted:
+            if pixels > 1100 and max(2000, pixels)*factor < 2000:
+                pixels = 1000
+            elif pixels > 1100:
+                pixels *= factor
+            self.window_.request_for(photo, pixels, 5)
+
     def schedule_requests(self):
         if not self.request_timer.isActive():
             self.request_timer.start(50)
@@ -694,8 +714,7 @@ class WallView(Surface):
 
     def request_images(self):
         ratio = self.devicePixelRatioF()
-        for rect, photo in self.visible_tiles():
-            self.window_.request_for(photo, max(rect.width(), rect.height())*ratio, 5)
+        self.request_tiles([(photo, max(rect.width(), rect.height())*ratio) for rect, photo in self.visible_tiles()])
 
     def resizeEvent(self, event):
         side = 14 if self.by_color else 9
@@ -992,9 +1011,8 @@ class ToileView(Surface):
 
     def request_images(self):
         ratio = self.devicePixelRatioF()
-        for photo in self.visible():
-            rect = self.tile_rect(photo)
-            self.window_.request_for(photo, max(rect.width(), rect.height())*self.scale_*ratio, 5)
+        tiles = [(photo, self.tile_rect(photo)) for photo in self.visible()]
+        self.request_tiles([(photo, max(rect.width(), rect.height())*self.scale_*ratio) for photo, rect in tiles])
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -1012,8 +1030,6 @@ class ToileView(Surface):
             if not self.straight:
                 painter.rotate(self.positions[photo.relative_path][2])
             local = QRectF(-rect.width()/2, -rect.height()/2, rect.width(), rect.height())
-            for grow, alpha in ((7, 14), (4, 22), (2, 34)):
-                painter.fillRect(local.adjusted(-grow+2, -grow+4, grow+2, grow+5), QColor(0, 0, 0, alpha))
             self.paint_photo(painter, local, photo)
             self.paint_badges(painter, local, photo)
             if photo.relative_path in selected:
@@ -1212,6 +1228,7 @@ class SwipeView(Surface):
 
     def request_images(self):
         ratio = self.devicePixelRatioF()
+        self.window_.large_keep = 6
         photo = self.current()
         pixels = max(self.card_area().width(), self.card_area().height())*ratio*max(1., self.zoom_level)
         if photo:
@@ -1988,7 +2005,11 @@ class ReviewPage(QWidget):
 
     def aspect(self, photo):
         info = self.info.get(photo.relative_path)
-        return max(.3, min(4., info['aspect'])) if info else 1.5
+        if info:
+            return max(.3, min(4., info['aspect']))
+        # Not analysed yet: a preview already loaded knows the format.
+        image = self.window.best_image(photo)
+        return max(.3, min(4., image.width()/image.height())) if image is not None else 1.5
 
     def start_analysis(self):
         self.stop_analysis()

@@ -442,6 +442,70 @@ class _Wheel:
         pass
 
 
+def test_toile_loading(base):
+    clear_settings()
+    root = base/'toile_loading'
+    root.mkdir()
+    for index in range(20):
+        Image.new('RGB', (2600, 1733) if index % 4 else (1733, 2600), COLORS[index % len(COLORS)]).save(root/f'photo_{index:03d}.jpg', quality=80)
+    window = open_window(root)
+    window.resize(3000, 1800)
+    wait(100)
+    for photo in window.session.photos:
+        photo.stars = 5
+    window.apply_filters()
+    window.set_review(True)
+    review = window.review
+    review.set_mode('toile')
+    toile = review.view()
+    # Before the analysis, the format comes from the preview once it is loaded.
+    portrait = next(p for p in window.photos if p.relative_path == 'photo_000.jpg')
+    window.request(portrait, 1000, 20)
+    settle(window, lambda: window.best_image(portrait) is not None)
+    settle(window, lambda: len(review.info) == 20)
+    kept = review.info.pop(portrait.relative_path)
+    assert review.aspect(portrait) < 1
+    review.info[portrait.relative_path] = kept
+    review.set_columns(4)
+    toile.zoom(2.2)
+    assert len(toile.visible()) > 6
+    # Many large photos at once: the loading ends, with every photo on screen shown.
+    settle(window, lambda: not window.pending and all(window.best_image(p) is not None for p in toile.visible()), 20000)
+    # Only the page counts here, not the preloading of the disk cache in the background.
+    window.preload_timer.stop()
+    settle(window, lambda: not window.pending, 20000)
+    started = []
+    real = triphoto_qt.Loader
+
+    class Counting(real):
+        def __init__(self, *args):
+            started.append(args[0])
+            super().__init__(*args)
+    triphoto_qt.Loader = Counting
+    try:
+        toile.request_images()
+        settle(window, lambda: not window.pending, 20000)
+        started.clear()
+        for _ in range(4):
+            toile.update()
+            toile.request_images()
+            wait(200)
+        assert not started, started
+    finally:
+        triphoto_qt.Loader = real
+    # What was queued for photos out of sight gives way to those on screen.
+    window.pool.setMaxThreadCount(1)
+    far = [p for p in window.photos if not any(k[0] == str(p.path) and k[1] == 3000 for k in window.cache)][:6]
+    for photo in far:
+        window.request(photo, 3000, 1)
+    window.drop_requests({str(far[0].path)})
+    window.pool.setMaxThreadCount(3)
+    assert not any(key[0] == str(far[-1].path) for key in window.pending)
+    settle(window, lambda: not window.pending, 20000)
+    window.close()
+    clear_settings()
+
+
 def test_tri_zoom(base):
     clear_settings()
     root = make_project(base/'tri_zoom', 4)
@@ -839,7 +903,7 @@ def main():
     app.setStyleSheet(triphoto_qt.STYLE)
     base = Path(tempfile.mkdtemp(prefix='triphoto-tests-'))
     tests = [test_legacy_session, test_nested_session_ignored, test_dominant_color, test_recents, test_shortcuts,
-             test_window_rating_and_undo, test_review_modes, test_grid, test_tri_zoom, test_like, test_export, test_themed_dialog, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle]
+             test_window_rating_and_undo, test_review_modes, test_grid, test_toile_loading, test_tri_zoom, test_like, test_export, test_themed_dialog, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle]
     failures = 0
     try:
         for test in tests:

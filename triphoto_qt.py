@@ -739,6 +739,8 @@ class Window(QMainWindow):
         self.pages.addWidget(splitter)
         self.pages.addWidget(self.review)
         layout.addWidget(self.pages, 1)
+        # How many large previews stay in memory: more when a page shows more of them at once.
+        self.large_keep = 6
         self.export_job = None
         self.export_pool = QThreadPool(self)
         self.export_pool.setMaxThreadCount(1)
@@ -923,6 +925,7 @@ class Window(QMainWindow):
         if changed and active:
             self.review.enter()
         elif changed:
+            self.large_keep = 6
             self.show_current()
 
     def open_review_mode(self, mode):
@@ -990,6 +993,12 @@ class Window(QMainWindow):
             if side > 1000 and image is None:
                 self.request(photo, 1000, priority+1)
             self.request(photo, side, priority)
+
+    def drop_requests(self, wanted):
+        """Forget what was queued for photos no longer on screen, so that it does not delay those that are."""
+        for key, job in list(self.pending.items()):
+            if not job.background and key[0] not in wanted and self.pool.tryTake(job):
+                del self.pending[key]
 
     def fill_project_menu(self):
         menu = self.project_menu
@@ -1256,7 +1265,7 @@ class Window(QMainWindow):
                 self.cache.move_to_end((path, side))
                 # Keep large previews bounded separately from lightweight thumbnails.
                 large = [key for key in self.cache if key[1] > 1000]
-                for key in large[:-6]:
+                for key in large[:-self.large_keep]:
                     self.cache.pop(key, None)
                 # Also bound actual decoded bytes, especially on large monitors.
                 total = sum(item.sizeInBytes() for item in self.cache.values())
