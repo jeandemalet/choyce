@@ -442,6 +442,40 @@ class _Wheel:
         pass
 
 
+def test_tri_zoom(base):
+    clear_settings()
+    root = make_project(base/'tri_zoom', 4)
+    window = open_window(root)
+    viewer = window.viewer
+    settle(window, lambda: not viewer.image.isNull())
+    # The wheel zooms from the center of the view, wherever the mouse is.
+    viewer.wheelEvent(_Wheel(120))
+    assert viewer.zoom > 1 and viewer.pan == QPointF()
+    # The image can be grabbed at any zoom, even when it fits or is smaller.
+    for factor in (1, 1/1.15, 1/1.15):
+        viewer.zoom_from_center(factor)
+        start = QPointF(viewer.pan)
+        QTest.mousePress(viewer, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPointF(300, 300).toPoint())
+        QTest.mouseMove(viewer, QPointF(340, 310).toPoint())
+        QTest.mouseRelease(viewer, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPointF(340, 310).toPoint())
+        assert viewer.pan == start+QPointF(40, 10)
+    assert viewer.zoom < 1
+    # Zooming keeps what was moved in the same place of the view.
+    pan, zoom = QPointF(viewer.pan), viewer.zoom
+    viewer.wheelEvent(_Wheel(120))
+    assert abs(viewer.pan.x()-pan.x()*viewer.zoom/zoom) < .01
+    # The next photo keeps both the zoom and the framing.
+    pan, zoom = QPointF(viewer.pan), viewer.zoom
+    window.navigate(1)
+    settle(window, lambda: not viewer.image.isNull())
+    assert viewer.pan == pan and viewer.zoom == zoom
+    # Fit recenters.
+    viewer.set_zoom(1)
+    assert viewer.zoom == 1 and viewer.pan == QPointF()
+    window.close()
+    clear_settings()
+
+
 def test_like(base):
     clear_settings()
     root = make_project(base/'like', 8)
@@ -805,7 +839,7 @@ def main():
     app.setStyleSheet(triphoto_qt.STYLE)
     base = Path(tempfile.mkdtemp(prefix='triphoto-tests-'))
     tests = [test_legacy_session, test_nested_session_ignored, test_dominant_color, test_recents, test_shortcuts,
-             test_window_rating_and_undo, test_review_modes, test_grid, test_like, test_export, test_themed_dialog, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle]
+             test_window_rating_and_undo, test_review_modes, test_grid, test_tri_zoom, test_like, test_export, test_themed_dialog, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle]
     failures = 0
     try:
         for test in tests:

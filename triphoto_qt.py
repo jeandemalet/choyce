@@ -280,16 +280,24 @@ class Viewer(QWidget):
         self.zoomChanged.emit(self.zoom)
         self.update()
 
+    def zoom_from_center(self, factor):
+        """What is in the middle of the view stays there, wherever the mouse is."""
+        previous = self.zoom
+        self.zoom = max(.1, min(8., previous*factor))
+        self.pan *= self.zoom/previous
+        self.zoomChanged.emit(self.zoom)
+        self.update()
+
     def wheelEvent(self, event):
         delta = event.angleDelta().y()
         if delta:
-            self.set_zoom(self.zoom * (1.15 if delta > 0 else 1/1.15), event.position())
+            self.zoom_from_center(1.15 if delta > 0 else 1/1.15)
         event.accept()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.on_heart(event.position()):
             self.heartClicked.emit()
-        elif event.button() == Qt.MouseButton.LeftButton and self.zoom > 1:
+        elif event.button() == Qt.MouseButton.LeftButton and not self.image.isNull():
             self.drag = event.position()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
@@ -904,7 +912,7 @@ class Window(QMainWindow):
         if self.review_active:
             self.review.zoom(factor)
         else:
-            self.viewer.set_zoom(self.viewer.zoom*factor)
+            self.viewer.zoom_from_center(factor)
 
     def set_review(self, active):
         if not (self.session and self.session.photos):
@@ -1334,7 +1342,6 @@ class Window(QMainWindow):
 
     def show_current(self, *args):
         self.viewer.image = QImage()
-        self.viewer.pan = QPointF()
         self.viewer.message = 'Préparation de l’aperçu…' if self.photos else 'Aucune photo pour ces filtres'
         self.viewer.update()
         row = self.list.currentRow()

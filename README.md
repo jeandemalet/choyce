@@ -16,7 +16,7 @@ Sous Windows, double-cliquez ensuite sur `Lancer TriPhoto.bat`. Ailleurs, lancez
 
 Le menu **Projet** ouvre un dossier, liste les projets récents et retrouve les anciens projets d'un disque. L'accueil les présente aussi sous forme de cartes. Un projet dont le disque est débranché reste dans la liste.
 
-Le bandeau du haut trie les photos. Au mouvement de la souris sur la photo, une gélule en haut filtre par note et par marqueur, comme dans la page Révision, et une petite barre en bas donne accès aux étoiles, au marqueur et à la couleur du fond : cinq gris ou n'importe quelle autre couleur avec le bouton +. Le clic droit et la touche `B` changent aussi le fond.
+Le bandeau du haut trie les photos. Au mouvement de la souris sur la photo, une gélule en haut filtre par note et par marqueur, comme dans la page Révision, et une petite barre en bas donne accès aux étoiles, au marqueur et à la couleur du fond : cinq gris ou n'importe quelle autre couleur avec le bouton +. Le clic droit et la touche `B` changent aussi le fond. La molette zoome depuis le centre de la vue, et on attrape l'image à la souris pour la déplacer, quel que soit le zoom. Le zoom et le déplacement restent d'une photo à l'autre, et `0` recentre et revient à l'ajustement.
 
 ## La page Révision
 
