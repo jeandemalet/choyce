@@ -641,11 +641,10 @@ class Window(QMainWindow):
             'zoom_in': lambda: self.zoom_by(1.15), 'zoom_out': lambda: self.zoom_by(1/1.15),
             'background': self.cycle_background, 'review': lambda: self.set_review(not self.review_active),
             'shuffle': lambda: self.review.shuffle() if self.review_active else None,
-            'mirror': lambda: self.review.toggle_mirror() if self.review_active else None,
             'mono': lambda: self.review.toggle_mono() if self.review_active else None,
             'refresh': self.refresh, 'open': self.open_folder, 'close': self.close_project, 'preferences': self.open_preferences,
             **{f'rate{value}': (lambda stars=value: self.rate(stars)) for value in range(6)},
-            **{f'mode_{mode}': (lambda value=mode: self.open_review_mode(value)) for mode in ('toile', 'swipe', 'color', 'wall', 'duel')}}
+            **{f'mode_{mode}': (lambda value=mode: self.open_review_mode(value)) for mode in ('toile', 'swipe', 'color', 'wall')}}
         mapping = shortcut_map(self.settings)
         taken = {QKeySequence(key).toString() for keys in mapping.values() for key in keys}
         for name, keys in mapping.items():
@@ -686,7 +685,7 @@ class Window(QMainWindow):
             menu.addAction('Les retenues', lambda: self.export('picks'))
         self.export_button.setMenu(menu)
         self.export_button.setText('Exporter' if menu else 'Exporter les 5 étoiles')
-        self.review.apply_default_swipe_rule()
+        self.review.refresh_marker_options()
 
     def toast(self, text, duration=2600):
         self.toast_label.setText(text)
@@ -875,8 +874,11 @@ class Window(QMainWindow):
         (self.review_button if self.review_active else self.tri_button).setChecked(True)
         self.export_button.setVisible(has_photos)
         # Nothing to filter or switch on the welcome screen.
-        for control in (self.stars, self.flags, self.sort, self.segments, self.counter):
+        for control in (self.sort, self.segments, self.counter):
             control.setVisible(has_photos)
+        # In Revoir, these two filters live in the page's own top bar.
+        for control in (self.stars, self.flags):
+            control.setVisible(has_photos and not self.review_active)
         name = project_label(self.project_path) if self.project_path else ''
         self.setWindowTitle(f'TriPhoto · {name}' if self.session else 'TriPhoto')
 

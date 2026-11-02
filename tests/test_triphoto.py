@@ -209,10 +209,16 @@ def test_review_modes(base):
     window.stars.setCurrentIndex(window.stars.findData('ge4'))
     assert len(review.view().tiles) == 1
     window.stars.setCurrentIndex(0)
+    # The review's own filter bar drives the same filter.
+    review.note_filter.buttons[5].click()
+    assert window.stars.currentData() == 5 and len(window.photos) == 1
+    review.note_filter.buttons['all'].click()
+    assert len(window.photos) == 24
     # Swipe keeps its deck through decisions, and undo returns to the card.
     review.set_mode('swipe')
     swipe = review.view()
-    review.swipe_rule.setCurrentIndex(review.swipe_rule.findData('pick'))
+    review.swipe_left.setCurrentIndex(review.swipe_left.findData('reject'))
+    review.swipe_right.setCurrentIndex(review.swipe_right.findData('select'))
     window.flags.setCurrentIndex(window.flags.findData('unrejected'))
     deck = list(swipe.deck)
     first = swipe.current()
@@ -227,7 +233,7 @@ def test_review_modes(base):
     settle(window, lambda: swipe.index == 0)
     assert first.pick == triphoto.PICK_NEUTRAL
     window.flags.setCurrentIndex(0)
-    # Dragging far enough decides, a short drag springs back.
+    # Dragging far enough decides, a short drag springs back. Actions are free to choose.
     swipe = review.view()
     swipe.resize(1200, 800)
     start = swipe.index
@@ -236,41 +242,37 @@ def test_review_modes(base):
     swipe.mouseReleaseEvent(_Event())
     wait(260)
     assert swipe.index == start and swipe.offset.x() == 0
+    review.swipe_right.setCurrentIndex(review.swipe_right.findData('star4'))
+    target = swipe.current()
     swipe.press = QPointF(600, 400)
     swipe.offset = QPointF(500, 0)
     swipe.mouseReleaseEvent(_Event())
     settle(window, lambda: swipe.index == start+1)
-    # Duel: the kept photo meets the next one, to the end.
-    review.set_mode('duel')
-    duel = review.view()
-    deck = list(duel.deck)
-    window.navigate(1)
-    assert duel.deck[duel.champion] is deck[1] and duel.challenger == 2
-    window.navigate(-1)
-    assert duel.deck[duel.champion] is deck[1] and duel.challenger == 3
-    review.skip(-1)
-    assert duel.challenger == 2
-    while not duel.finished():
-        window.navigate(-1)
-    assert duel.current() is deck[1]
-    # Toile: positions survive a note, shuffle moves them.
+    assert target.stars == 4
+    # Toile: a limited hand; a note keeps it in place, shuffle deals again, straight is a display choice.
     review.set_mode('toile')
     toile = review.view()
-    assert len(toile.positions) == 24
+    toile.set_limit(12)
+    assert len(toile.stack) == 12 and len(toile.positions) == 12
     key = toile.stack[0].relative_path
     position = list(toile.positions[key])
     window.select_photo(toile.stack[0])
     window.rate(2)
-    assert toile.positions[key] == position
+    assert toile.positions[key] == position and len(toile.stack) == 12
+    toile.set_straight(True)
+    wait(40)
+    toile.grab()
     review.shuffle()
-    assert toile.positions[key] != position
-    # Background, mirror and black and white.
+    assert toile.positions.get(key) != position
+    toile.set_limit(0)
+    assert len(toile.stack) == 24
+    # Background and black and white.
     window.set_background('#ffffff')
     assert window.viewer.background == '#ffffff' and any(s.isChecked() for s in review.picker.swatches)
     review.toggle_mono()
-    review.toggle_mirror()
     wait(80)
     toile.grab()
+    review.toggle_mono()
     window.set_review(False)
     assert window.pages.currentIndex() == 1
     window.close()
@@ -280,6 +282,74 @@ def test_review_modes(base):
 class _Event:
     def position(self):
         return QPointF(0, 0)
+
+
+def test_mosaic(base):
+    clear_settings()
+    root = make_project(base/'mosaic', 40)
+    window = open_window(root)
+    window.set_review(True)
+    review = window.review
+    settle(window, lambda: len(review.info) == 40)
+    review.set_mode('wall')
+    wall = review.view()
+    wall.resize(1400, 850)
+    def no_overlap():
+        rects = [rect for rect, _ in wall.tiles]
+        return all(not a.adjusted(1, 1, -1, -1).intersects(b.adjusted(1, 1, -1, -1)) for i, a in enumerate(rects) for b in rects[i+1:])
+    for layout in ('staggered', 'rows'):
+        for emphasis in ('equal', 'landscape', 'portrait'):
+            review.set_wall_layout(layout)
+            review.set_wall_emphasis(emphasis)
+            assert len(wall.tiles) == 40 and len({p.relative_path for _, p in wall.tiles}) == 40
+            assert no_overlap(), (layout, emphasis)
+            assert all(r.height() <= wall.height() for r, _ in wall.tiles)
+            ratio = {p.relative_path: r.width()/r.height() for r, p in wall.tiles}
+            assert all(abs(ratio[p.relative_path]-review.aspect(p)) < .02 for p in window.photos), 'photos must not be cropped'
+    review.set_wall_layout('rows')
+    review.set_wall_emphasis('landscape')
+    sizes = {o: sum(r.width()*r.height() for r, p in wall.tiles if (review.aspect(p) >= 1) == o) / max(1, sum((review.aspect(p) >= 1) == o for _, p in wall.tiles)) for o in (True, False)}
+    assert sizes[True] > sizes[False]*1.5
+    # Narrowing the central panel leaves margins, and the layout follows.
+    review.set_wall_layout('staggered')
+    review.set_wall_emphasis('equal')
+    review.set_wall_width(50)
+    assert max(r.right() for r, _ in wall.tiles)-min(r.left() for r, _ in wall.tiles) <= wall.width()*.52
+    assert review.width_slider.value() == 50
+    # Shuffle changes the order, without losing a photo.
+    before = [p.relative_path for _, p in wall.tiles]
+    review.shuffle()
+    after = [p.relative_path for _, p in wall.tiles]
+    assert before != after and sorted(before) == sorted(after)
+    # Dragging a photo out applies the chosen action and takes it out of the mosaic.
+    review.drop_action.setCurrentIndex(review.drop_action.findData('star1'))
+    wall.bar.setValue(0)
+    rect, photo = wall.visible_tiles()[0]
+    center = rect.center().toPoint()-wall.bar.value()*QPointF(0, 1).toPoint()
+    QTest.mousePress(wall, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, center)
+    QTest.mouseMove(wall, center+QPointF(40, 0).toPoint())
+    assert wall.dragging and not review.bar.isVisible()
+    wall.grab()
+    QTest.mouseMove(wall, QPointF(10, 400).toPoint())
+    QTest.mouseRelease(wall, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPointF(10, 400).toPoint())
+    assert not wall.dragging and review.bar.isVisible()
+    assert photo.stars == 1 and len(wall.tiles) == 39 and photo.relative_path in wall.set_aside
+    assert review.restore_button.isVisibleTo(review.options['wall'][1])
+    window.undo()
+    assert photo.stars == 0 and len(wall.tiles) == 40
+    # Released inside the mosaic, nothing happens.
+    rect, photo = wall.visible_tiles()[0]
+    center = rect.center().toPoint()
+    QTest.mousePress(wall, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, center)
+    QTest.mouseMove(wall, center+QPointF(30, 30).toPoint())
+    QTest.mouseRelease(wall, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, center+QPointF(30, 30).toPoint())
+    assert len(wall.tiles) == 40 and photo.stars == 0
+    # Options belong to their mode, at the bottom.
+    assert review.options['wall'][0].isVisibleTo(review) and not review.options['toile'][1].isVisibleTo(review)
+    review.set_mode('color')
+    assert review.options['color'][1].isVisibleTo(review) and not review.views['color'].show_strip
+    window.close()
+    clear_settings()
 
 
 def test_background_color(base):
@@ -346,7 +416,7 @@ def main():
     app.setStyleSheet(triphoto_qt.STYLE)
     base = Path(tempfile.mkdtemp(prefix='triphoto-tests-'))
     tests = [test_legacy_session, test_nested_session_ignored, test_dominant_color, test_recents, test_shortcuts,
-             test_window_rating_and_undo, test_review_modes, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle]
+             test_window_rating_and_undo, test_review_modes, test_mosaic, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle]
     failures = 0
     try:
         for test in tests:

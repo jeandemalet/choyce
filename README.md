@@ -20,15 +20,16 @@ Le bandeau du haut filtre par note et par marqueur, et trie les photos. Au mouve
 
 ## La page Revoir
 
-La touche `G` bascule entre Tri et Revoir. Les filtres du bandeau restent actifs : choisissez par exemple « 4 étoiles et plus » pour ne revoir que le haut du panier. Dans tous les modes, on peut noter au clavier ou avec la barre du bas, changer le fond, annuler avec `Ctrl+Z` et passer en miroir (`M`) ou en noir et blanc (`N`), deux façons classiques de poser un regard neuf sur une image. Un double-clic ouvre la photo dans la page Tri.
+La touche `G` bascule entre Tri et Revoir. La barre du haut regroupe ce qui vaut pour tous les modes : le mode, le filtre par note (par exemple « 5 ★ », ou « 3 ★ » et « et + »), le filtre par marqueur, le noir et blanc pour juger les contrastes et la couleur du fond. La barre du bas donne la note de la photo et, autour d'elle, les réglages propres au mode. On annule avec `Ctrl+Z`, et un double-clic ouvre la photo dans la page Tri.
 
-| Mode | Principe |
-| --- | --- |
-| **Toile** | Les photos sont éparpillées comme des tirages sur une table, et les mieux notées sont plus grandes. On les déplace à la souris, on navigue en glissant le fond et on zoome à la molette. `R` mélange. |
-| **Swipe** | Une photo à la fois : glissez-la à droite ou à gauche, ou utilisez les touches précédente et suivante. La règle se choisit dans la barre du haut. Espace passe sans décider, Retour arrière revient en arrière. |
-| **Couleur** | Un mur de photos rangées en dégradé selon leur couleur dominante, les images neutres et le noir et blanc à la fin. |
-| **Mosaïque** | Un mur de photos en rangées justifiées. `Ctrl` + molette change la taille. |
-| **Duel** | Deux photos côte à côte : celle que vous gardez affronte la suivante, jusqu'à la gagnante. |
+| Mode | Principe | Réglages en bas |
+| --- | --- | --- |
+| **Toile** | Quelques tirages tirés au hasard et posés sur une table, les mieux notés plus grands. On les déplace à la souris, on navigue en glissant le fond et on zoome à la molette. | Mélanger (nouveau tirage, touche `R`), photos droites ou penchées, nombre de photos |
+| **Swipe** | Une photo à la fois : glissez-la à droite ou à gauche, ou utilisez les touches précédente et suivante. Espace passe sans décider, Retour arrière revient en arrière. | Action à gauche, action à droite |
+| **Couleur** | Un mur de photos rangées en dégradé selon leur couleur dominante, les images neutres et le noir et blanc à la fin. | Bandeau de couleur dominante, activé ou non |
+| **Mosaïque** | Une grille décalée, comme une galerie éditoriale, ou des rangées régulières. Tirez une photo hors de la grille, sur un côté ou en bas, pour la sortir de la sélection. `Ctrl` + molette change la taille. | Disposition, formats mis en avant, largeur du panneau central, mélange, action de sortie |
+
+Une photo sortie de la mosaïque reçoit l'action choisie. « Réafficher » remet les photos sorties à l'écran sans toucher à leurs notes, et `Ctrl+Z` annule la dernière sortie, note comprise.
 
 ## Marquage
 
@@ -46,7 +47,7 @@ Tous les raccourcis se changent dans **Préférences** (`Ctrl+,`). Les touches e
 | `P`, `X`, `U` | Retenir, rejeter, neutre |
 | `Ctrl+Z` | Annuler la dernière note |
 | `G`, Échap | Basculer vers Revoir, revenir au Tri |
-| `Ctrl+1` à `Ctrl+5` | Modes de Revoir |
+| `Ctrl+1` à `Ctrl+4` | Modes de Revoir |
 | `B` | Couleur de fond suivante |
 | `0`, `+`, `-` | Ajuster, zoomer, dézoomer |
 | `F5`, `Ctrl+O`, `Ctrl+W` | Actualiser, ouvrir, fermer le projet |
@@ -70,6 +71,7 @@ Formats pris en charge : JPEG, PNG, TIFF, WebP et BMP. Les fichiers RAW ne sont 
 - `triphoto.py` : session, couleurs, export et ancienne interface Tk ;
 - `triphoto_qt.py` : fenêtre principale et page Tri ;
 - `triphoto_review.py` : page Revoir et analyse des couleurs ;
+- `assets/staggered_modules.json` : proportions des modules de la grille décalée ;
 - `triphoto_prefs.py` : projets récents, raccourcis et préférences ;
 - `triphoto_theme.py` : palette, feuille de style et icônes vectorielles.
 

@@ -9,18 +9,23 @@ import json
 import math
 import random
 import threading
+import zlib
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QObject, QPointF, QRectF, QRunnable, QThreadPool, QTimer, QVariantAnimation, QEasingCurve, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QColorDialog, QComboBox, QFrame, QHBoxLayout, QLabel,
-    QMenu, QPushButton, QScrollBar, QStackedWidget, QWidget)
+    QPushButton, QScrollBar, QSlider, QStackedWidget, QWidget)
 from PIL import Image
 from triphoto import PICK_NEUTRAL, PICK_REJECT, PICK_SELECT
-from triphoto_theme import ACCENT, BACKGROUNDS, FAINT, MUTED, REJECT, SELECT, TEXT, contrast_on, draw_check, draw_cross, draw_flag, draw_stars
+from triphoto_theme import ACCENT, ASSETS, BACKGROUNDS, FAINT, MUTED, REJECT, SELECT, TEXT, contrast_on, draw_check, draw_cross, draw_flag, draw_stars
 
-MODES = [('toile', 'Toile'), ('swipe', 'Swipe'), ('color', 'Couleur'), ('wall', 'Mosaïque'), ('duel', 'Duel')]
-SWIPE_RULES = {'pick': 'Droite : retenir · Gauche : rejeter', 'stars': 'Droite : +1 étoile · Gauche : -1 étoile',
-               'five': 'Droite : 5 étoiles · Gauche : 0 étoile'}
+MODES = [('toile', 'Toile'), ('swipe', 'Swipe'), ('color', 'Couleur'), ('wall', 'Mosaïque')]
+# What a swipe or a drag out of the mosaic does to a photo. Offered in both places.
+ACTIONS = [('none', 'Ne rien changer'), ('select', 'Retenir'), ('reject', 'Rejeter'), ('neutral', 'Neutre'),
+           ('minus', 'Retirer une étoile'), ('plus', 'Ajouter une étoile'), ('star5', '5 étoiles'), ('star4', '4 étoiles'),
+           ('star3', '3 étoiles'), ('star2', '2 étoiles'), ('star1', '1 étoile'), ('star0', '0 étoile')]
+STAGGERED_MODULES = json.loads((ASSETS/'staggered_modules.json').read_text(encoding='utf-8'))
 TOP_CLEARANCE, BOTTOM_CLEARANCE = 66, 76
 ANALYSIS_FILE = 'colors.json'
 
@@ -60,6 +65,55 @@ def analyse_photo(path):
     best = max(bins, key=lambda slot: slot[0])
     return {'aspect': width/max(1, height), 'neutral': False, 'hue': best[1]/best[0]*360/256, 'light': lightness,
             'rgb': [int(best[2]/best[0]), int(best[3]/best[0]), int(best[4]/best[0])]}
+
+
+def staggered_plan(keys, ratios, emphasis='equal'):
+    """Choose a stable sequence of modules from the photographs' proportions.
+
+    Same logic as the editorial galleries of the website: a rhythm of solos, pairs
+    and diagonals, without a repeated shape. ratios are height / width.
+    emphasis gives the favored orientation a solo module as often as possible.
+    """
+    def fingerprint(value):
+        return zlib.crc32(value.encode())
+    seed = fingerprint('|'.join(keys))
+    plan, history = [], []
+    index = since_solo = since_diagonal = balance = 0
+    next_solo = 2+seed % 3
+    while index < len(keys):
+        ratio, remaining = ratios[index], len(keys)-index
+        token = fingerprint(f'{keys[index]}:{seed}:{index}')
+        favored = (emphasis == 'landscape' and ratio < .9) or (emphasis == 'portrait' and ratio >= 1)
+        interval = next_solo+3 if emphasis != 'equal' else next_solo
+        solo = (remaining == 1 or (index == 0 and (ratio < .9 or token % 4 == 0)) or since_solo >= interval
+                or (ratio < .53 and since_solo > 0) or (favored and since_solo > 0))
+        kind = ('wide' if ratio < .9 else 'solo') if solo else 'diagonal' if since_diagonal >= 6+token % 4 else 'pair'
+        candidates = [m for m in STAGGERED_MODULES if m['kind'] == kind and len(m['frames']) <= remaining]
+        candidates = candidates or [m for m in STAGGERED_MODULES if len(m['frames']) <= remaining]
+        best, best_score = None, math.inf
+        for module in candidates:
+            frames = module['frames']
+            score = sum(abs(math.log(ratios[index+n]/f[2])) for n, f in enumerate(frames))
+            main = max(range(len(frames)), key=lambda n: frames[n][1])
+            side = 0 if len(frames) == 1 else -1 if frames[main][0]+frames[main][1]/2 < .5 else 1
+            shape = f"{module['kind']}:{module['mode']}:"+'|'.join(f'{round(f[0]*100)},{round(f[1]*100)}' for f in frames)
+            if history and history[-1] == shape:
+                score += 2.5
+            if shape in history[-3:]:
+                score += .8
+            score += max(0, balance*side)*.3
+            score += (fingerprint(f"{token}:{module['id']}") % 1000)/4000
+            if score < best_score:
+                best, best_score, best_shape, best_side = module, score, shape, side
+        plan.append(best)
+        history.append(best_shape)
+        balance = max(-3, min(3, balance+best_side))
+        index += len(best['frames'])
+        since_solo = 0 if solo else since_solo+1
+        since_diagonal = 0 if kind == 'diagonal' else since_diagonal+1
+        if solo:
+            next_solo = 2+token % 3
+    return plan
 
 
 def color_key(info):
@@ -273,11 +327,8 @@ class Surface(QWidget):
     def hint_color(self):
         return QColor(contrast_on(self.window_.viewer.background))
 
-    def paint_photo(self, painter, rect, photo, align=0):
-        """Draw a photo contained in rect; a color block holds its place while loading.
-
-        align pushes it against the right (1) or left (-1) side of rect.
-        """
+    def paint_photo(self, painter, rect, photo):
+        """Draw a photo contained in rect; a color block holds its place while loading."""
         image = self.window_.best_image(photo)
         if image is None:
             info = self.review.info.get(photo.relative_path)
@@ -285,14 +336,10 @@ class Surface(QWidget):
             return
         scale = min(rect.width()/image.width(), rect.height()/image.height())
         width, height = image.width()*scale, image.height()*scale
-        x = {0: rect.center().x()-width/2, 1: rect.right()-width, -1: rect.left()}[align]
-        target = QRectF(x, rect.center().y()-height/2, width, height)
+        target = QRectF(rect.center().x()-width/2, rect.center().y()-height/2, width, height)
         image = self.review.transformed(image)
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        if self.review.mirror:
-            painter.translate(target.center().x()*2, 0)
-            painter.scale(-1, 1)
         painter.drawImage(target, image)
         painter.restore()
         if photo.pick == PICK_REJECT:
@@ -331,15 +378,25 @@ class Surface(QWidget):
 
 
 class WallView(Surface):
-    """Justified rows. Couleur uses the same wall, sorted by dominant color."""
+    """Mosaic of photos. Couleur uses the same wall, sorted by dominant color."""
 
     def __init__(self, review, by_color=False):
         super().__init__(review)
         self.by_color = by_color
+        settings = review.settings
         self.row_height = 210
+        self.layout_kind = 'rows' if by_color else settings.value('wall_layout', 'staggered')
+        self.width_percent = 100 if by_color else int(settings.value('wall_width', 62))
+        self.emphasis = 'equal' if by_color else settings.value('wall_emphasis', 'equal')
+        self.show_strip = settings.value('color_strip', False, type=bool)
+        self.order_seed = None
+        self.set_aside = set()
         self.tiles = []
         self.content_height = 0
         self.ordered = []
+        self.press = None
+        self.dragging = False
+        self.drag_position = QPointF()
         self.bar = QScrollBar(Qt.Orientation.Vertical, self)
         self.bar.valueChanged.connect(self.on_scroll)
 
@@ -348,10 +405,24 @@ class WallView(Surface):
         self.schedule_requests()
 
     def rebuild(self):
-        self.ordered = list(self.window_.photos)
+        self.ordered = [p for p in self.window_.photos if p.relative_path not in self.set_aside]
         if self.by_color:
             self.ordered.sort(key=lambda p: color_key(self.review.info.get(p.relative_path)))
+        elif self.order_seed is not None:
+            # Hashed, so that removing one photo leaves the others where they are.
+            self.ordered.sort(key=lambda p: zlib.crc32(f'{self.order_seed}|{p.relative_path}'.encode()))
         self.relayout()
+
+    def shuffle(self):
+        if not self.by_color:
+            self.order_seed = random.randrange(1 << 30)
+            self.bar.setValue(0)
+            self.rebuild()
+
+    def content_box(self):
+        available = max(200, self.width()-2*18-10)
+        width = available*self.width_percent/100
+        return (self.width()-10-width)/2, width
 
     def relayout(self):
         # Anchor on the first visible photo, so that a late aspect ratio or a
@@ -359,30 +430,13 @@ class WallView(Surface):
         anchor = self.first_visible()
         offset = self.tiles[anchor][0].top()-self.bar.value() if anchor is not None and anchor < len(self.tiles) else 0
         anchor_key = self.tiles[anchor][1].relative_path if anchor is not None and anchor < len(self.tiles) else None
-        margin, gap = 18, 6
-        width = max(200, self.width()-2*margin-10)
+        left, width = self.content_box()
         self.tiles = []
-        row, row_ratio, y = [], 0., float(TOP_CLEARANCE)
-
-        def flush(last):
-            nonlocal row, row_ratio, y
-            height = min(self.row_height*1.15, (width-gap*(len(row)-1))/row_ratio) if not last else min(self.row_height, (width-gap*(len(row)-1))/row_ratio)
-            x = float(margin)
-            for photo, ratio in row:
-                self.tiles.append((QRectF(x, y, ratio*height, height), photo))
-                x += ratio*height+gap
-            y += height+gap
-            row, row_ratio = [], 0.
-
-        for photo in self.ordered:
-            ratio = self.review.aspect(photo)
-            row.append((photo, ratio))
-            row_ratio += ratio
-            if row_ratio*self.row_height >= width:
-                flush(False)
-        if row:
-            flush(True)
-        self.content_height = y+BOTTOM_CLEARANCE
+        if self.layout_kind == 'staggered':
+            bottom = self.layout_staggered(left, width)
+        else:
+            bottom = self.layout_rows(left, width)
+        self.content_height = bottom+BOTTOM_CLEARANCE
         self.bar.setPageStep(self.height())
         self.bar.setSingleStep(90)
         self.bar.setRange(0, max(0, int(self.content_height-self.height())))
@@ -393,6 +447,76 @@ class WallView(Surface):
                     break
         self.update()
         self.schedule_requests()
+
+    def layout_rows(self, left, width):
+        gap = 6
+        y = float(TOP_CLEARANCE)
+
+        def place(row, target):
+            nonlocal y
+            total = sum(self.review.aspect(p) for p in row)
+            height = min(target*1.15, (width-gap*(len(row)-1))/total)
+            x = left
+            for photo in row:
+                tile = self.review.aspect(photo)*height
+                self.tiles.append((QRectF(x, y, tile, height), photo))
+                x += tile+gap
+            y += height+gap
+
+        def take(queue, target):
+            row, total = [], 0.
+            while queue and total*target < width:
+                row.append(queue.pop(0))
+                total += self.review.aspect(row[-1])
+            return row
+
+        if self.emphasis == 'equal':
+            queues = [(list(self.ordered), self.row_height)]
+        else:
+            # Large rows of the favored orientation alternate with small rows of the
+            # other: both stay uncropped, and the difference of size does the work.
+            landscape = self.emphasis == 'landscape'
+            favored = [p for p in self.ordered if (self.review.aspect(p) >= 1) == landscape]
+            others = [p for p in self.ordered if (self.review.aspect(p) >= 1) != landscape]
+            queues = [(favored, self.row_height*1.5), (others, self.row_height*.72)]
+        while any(queue for queue, _ in queues):
+            for queue, target in queues:
+                if queue:
+                    place(take(queue, target), target)
+        return y
+
+    def layout_staggered(self, left, width):
+        if not self.ordered:
+            return float(TOP_CLEARANCE)
+        ratios = [1/self.review.aspect(p) for p in self.ordered]
+        plan = staggered_plan([p.relative_path for p in self.ordered], ratios, self.emphasis)
+        # On the website a tall photo may exceed the screen; to judge it here, it must not.
+        tallest = max(240, self.height()-TOP_CLEARANCE-BOTTOM_CLEARANCE)
+        cursor, index = float(TOP_CLEARANCE), 0
+        for module in plan:
+            cursor += module.get('before', 0)*width
+            panels = []
+            for n, frame in enumerate(module['frames']):
+                frame_width, ratio = frame[1]*width, ratios[index+n]
+                tile = min(frame_width, tallest/ratio)
+                panels.append([left+frame[0]*width+(frame_width-tile)/2, tile, tile*ratio, 0.])
+            if module['mode'] == 'sequence':
+                offset = 0.
+                order = [n for n in module.get('order', range(len(panels))) if n < len(panels)]
+                for position, n in enumerate(order):
+                    panels[n][3] = offset
+                    offset += panels[n][2]+(module.get('gap', 0)*width if position < len(order)-1 else 0)
+                row_height = offset
+            else:
+                row_height = max(panel[2] for panel in panels)
+                if module['mode'] == 'center':
+                    for panel in panels:
+                        panel[3] = (row_height-panel[2])/2
+            for n, panel in enumerate(panels):
+                self.tiles.append((QRectF(panel[0], cursor+panel[3], panel[1], panel[2]), self.ordered[index+n]))
+            cursor += row_height+module.get('after', 0)*width+(10 if not module.get('after') else 0)
+            index += len(panels)
+        return cursor
 
     def visible_tiles(self):
         top, bottom = self.bar.value(), self.bar.value()+self.height()
@@ -422,7 +546,7 @@ class WallView(Surface):
         selected = {p.relative_path for p in self.window_.selected_photos()}
         for rect, photo in self.visible_tiles():
             self.paint_photo(painter, rect, photo)
-            if self.by_color:
+            if self.by_color and self.show_strip:
                 info = self.review.info.get(photo.relative_path)
                 if info:
                     painter.fillRect(QRectF(rect.left(), rect.bottom()-4, rect.width(), 4), QColor(*info['rgb']))
@@ -434,6 +558,38 @@ class WallView(Surface):
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawRect(rect.adjusted(-1.5, -1.5, 1.5, 1.5))
                 painter.restore()
+        if self.dragging:
+            painter.resetTransform()
+            self.paint_drag(painter)
+
+    def drop_zones(self):
+        left, width = self.content_box()
+        side = max(96., left-6)
+        return [QRectF(0, TOP_CLEARANCE, side, self.height()-TOP_CLEARANCE),
+                QRectF(self.width()-side-10, TOP_CLEARANCE, side+10, self.height()-TOP_CLEARANCE),
+                QRectF(0, self.height()-92, self.width(), 92)]
+
+    def zone_at(self, position):
+        return any(zone.contains(position) for zone in self.drop_zones())
+
+    def paint_drag(self, painter):
+        label = self.review.drop_label()
+        hovered = self.zone_at(self.drag_position)
+        painter.save()
+        for zone in self.drop_zones():
+            active = hovered and zone.contains(self.drag_position)
+            painter.fillRect(zone, QColor(217, 184, 114, 225) if active else QColor(15, 15, 16, 190))
+            painter.setPen(QColor('#131314' if active else TEXT))
+            painter.drawText(zone.adjusted(10, 0, -10, 0), Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, label)
+        photo = self.press[0]
+        image = self.window_.best_image(photo)
+        if image is not None:
+            ratio = self.review.aspect(photo)
+            width, height = (220, 220/ratio) if ratio >= 1 else (220*ratio, 220)
+            painter.setOpacity(.88)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            painter.drawImage(QRectF(self.drag_position.x()-width/2, self.drag_position.y()-height/2, width, height), self.review.transformed(image))
+        painter.restore()
 
     def tile_at(self, position):
         point = position+QPointF(0, self.bar.value())
@@ -447,15 +603,41 @@ class WallView(Surface):
         event.accept()
 
     def zoom(self, factor):
-        self.row_height = max(90, min(560, self.row_height*factor))
-        self.relayout()
+        if self.layout_kind == 'staggered':
+            self.review.set_wall_width(self.width_percent*(1.06 if factor > 1 else 1/1.06))
+        else:
+            self.row_height = max(90, min(560, self.row_height*factor))
+            self.relayout()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             photo = self.tile_at(event.position())
             if photo:
-                self.window_.select_photo(photo, bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier))
+                extend = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                self.window_.select_photo(photo, extend)
+                self.press = (photo, event.position()) if not extend and not self.by_color else None
                 self.update()
+
+    def mouseMoveEvent(self, event):
+        if self.press is None:
+            return
+        if not self.dragging and (event.position()-self.press[1]).manhattanLength() > 14:
+            self.dragging = True
+            self.review.set_bottom_visible(False)
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        if self.dragging:
+            self.drag_position = event.position()
+            self.update()
+
+    def mouseReleaseEvent(self, event):
+        press, dragging = self.press, self.dragging
+        self.press, self.dragging = None, False
+        if dragging:
+            self.unsetCursor()
+            self.review.set_bottom_visible(True)
+            self.update()
+            if self.zone_at(event.position()):
+                self.review.drop_out(press[0])
 
     def mouseDoubleClickEvent(self, event):
         photo = self.tile_at(event.position())
@@ -478,65 +660,87 @@ class WallView(Surface):
 
 
 class ToileView(Surface):
-    """Prints scattered on a table. Better-rated photos are laid out larger."""
+    """A handful of prints laid on a table, drawn from the filtered photos.
+
+    Mélanger deals a new hand. Better-rated photos are laid out larger.
+    """
+    CELL_WIDTH, CELL_HEIGHT = 440, 390
 
     def __init__(self, review):
         super().__init__(review)
         self.positions = {}
         self.stack = []
+        self.dealt = []
+        self.available = set()
+        self.limit = int(review.settings.value('toile_limit', 24))
+        self.straight = review.settings.value('toile_straight', False, type=bool)
         self.scale_ = .6
         self.pan = QPointF()
         self.drag = None
-        self.seed = random.randrange(1 << 30)
         self.fresh = True
 
     def rebuild(self):
-        photos = self.window_.photos
-        keys = {p.relative_path for p in photos}
-        self.stack = [p for p in self.stack if p.relative_path in keys]
-        known = {p.relative_path for p in self.stack}
-        new = [p for p in photos if p.relative_path not in known]
-        if new:
-            self.place(new)
+        keys = {p.relative_path for p in self.window_.photos}
+        if keys != self.available:
+            self.available = keys
+            self.deal()
         self.update()
         self.schedule_requests()
 
-    def place(self, photos):
-        rng = random.Random(self.seed)
-        total = len(self.stack)+len(photos)
-        columns = max(2, math.ceil(math.sqrt(total*1.5)))
-        cell_w, cell_h = 380, 300
-        taken = len(self.positions)
-        cells = list(range(max(total, taken+len(photos))))
-        rng.shuffle(cells)
-        free = [c for c in cells if c >= taken] or cells
-        for index, photo in enumerate(photos):
-            cell = free[index % len(free)]
-            x = (cell % columns-columns/2+.5)*cell_w+rng.uniform(-95, 95)
-            y = (cell//columns-(total//columns+1)/2+.5)*cell_h+rng.uniform(-80, 80)
-            self.positions.setdefault(photo.relative_path, [x, y, rng.uniform(-3.5, 3.5)])
-            self.stack.append(photo)
-        rng.shuffle(self.stack)
-        if self.fresh and self.width() > 10:
-            self.fit()
+    def photos_changed(self):
+        # A note may take a photo out of the filter; the hand stays the same otherwise.
+        keys = {p.relative_path for p in self.window_.photos}
+        self.available = keys
+        shown = {p.relative_path for p in self.stack}
+        self.stack = [p for p in self.stack if p.relative_path in keys]+[
+            p for p in self.dealt if p.relative_path in keys and p.relative_path not in shown]
+        self.update()
+
+    def deal(self):
+        photos = self.window_.photos
+        count = min(self.limit, len(photos)) if self.limit else len(photos)
+        self.dealt = random.sample(photos, count)
+        self.stack = list(self.dealt)
+        self.positions = {}
+        if count:
+            ratio = max(.5, self.width()/max(1, self.height()-TOP_CLEARANCE-BOTTOM_CLEARANCE))
+            columns = max(1, round(math.sqrt(count*ratio*self.CELL_HEIGHT/self.CELL_WIDTH)))
+            rows = math.ceil(count/columns)
+            cells = list(range(count))
+            random.shuffle(cells)
+            for photo, cell in zip(self.dealt, cells):
+                x = (cell % columns-(columns-1)/2)*self.CELL_WIDTH+random.uniform(-55, 55)
+                y = (cell//columns-(rows-1)/2)*self.CELL_HEIGHT+random.uniform(-45, 45)
+                self.positions[photo.relative_path] = [x, y, random.uniform(-4, 4)]
+            self.window_.select_photo(self.dealt[0])
+        self.fresh = True
+        self.fit()
 
     def fit(self):
-        if not self.positions:
+        if not self.positions or self.width() < 10:
             return
         xs = [p[0] for p in self.positions.values()]
         ys = [p[1] for p in self.positions.values()]
-        span_w, span_h = max(xs)-min(xs)+460, max(ys)-min(ys)+420
-        # Very large sets start readable rather than fully visible: panning does the rest.
-        self.scale_ = max(.3, min(1., min(self.width()/span_w, (self.height()-TOP_CLEARANCE-BOTTOM_CLEARANCE)/span_h)))
-        self.pan = QPointF(-(max(xs)+min(xs))/2*self.scale_, -(max(ys)+min(ys))/2*self.scale_)
+        span_w, span_h = max(xs)-min(xs)+460, max(ys)-min(ys)+430
+        area_h = self.height()-TOP_CLEARANCE-BOTTOM_CLEARANCE
+        self.scale_ = max(.2, min(1.3, min(self.width()/span_w, area_h/span_h)))
+        # Centered between the top and bottom bars rather than in the whole page.
+        shift = (TOP_CLEARANCE-BOTTOM_CLEARANCE)/2
+        self.pan = QPointF(-(max(xs)+min(xs))/2*self.scale_, shift-(max(ys)+min(ys))/2*self.scale_)
         self.fresh = False
 
     def shuffle(self):
-        self.seed = random.randrange(1 << 30)
-        self.positions.clear()
-        self.stack.clear()
-        self.fresh = True
-        self.rebuild()
+        self.deal()
+        self.update()
+        self.schedule_requests()
+
+    def set_straight(self, value):
+        self.straight = value
+        self.update()
+
+    def set_limit(self, value):
+        self.limit = value
+        self.shuffle()
 
     def resizeEvent(self, event):
         if self.fresh and self.stack:
@@ -578,7 +782,8 @@ class ToileView(Surface):
             rect = self.tile_rect(photo)
             painter.save()
             painter.translate(rect.center())
-            painter.rotate(self.positions[photo.relative_path][2])
+            if not self.straight:
+                painter.rotate(self.positions[photo.relative_path][2])
             local = QRectF(-rect.width()/2, -rect.height()/2, rect.width(), rect.height())
             for grow, alpha in ((7, 14), (4, 22), (2, 34)):
                 painter.fillRect(local.adjusted(-grow+2, -grow+4, grow+2, grow+5), QColor(0, 0, 0, alpha))
@@ -649,7 +854,7 @@ class ToileView(Surface):
         self.schedule_requests()
 
     def navigate(self, delta):
-        photos = self.window_.photos
+        photos = [p for p in self.dealt if p in self.stack]
         if not photos:
             return
         current = self.window_.current_photo()
@@ -733,10 +938,7 @@ class SwipeView(Surface):
             return
         photo = self.current()
         if photo is None:
-            kept = sum(p.pick == PICK_SELECT for p in self.deck)
-            dropped = sum(p.pick == PICK_REJECT for p in self.deck)
-            self.paint_empty(painter, f'Toutes les photos sont passées : {kept} retenues, {dropped} rejetées.\n'
-                                      'Retour arrière pour revenir, R pour mélanger et recommencer.')
+            self.paint_empty(painter, 'Toutes les photos sont passées.\nRetour arrière pour revenir, R pour mélanger et recommencer.')
             return
         area = self.card_area()
         following = self.deck[self.index+1] if self.index+1 < len(self.deck) else None
@@ -756,7 +958,6 @@ class SwipeView(Surface):
         self.paint_photo(painter, local, photo)
         label = self.review.swipe_labels()[1 if self.offset.x() > 0 else 0]
         if travel > .06:
-            color = QColor(SELECT if self.offset.x() > 0 else REJECT)
             painter.setOpacity(min(1., travel*1.6))
             painter.setFont(QFont(self.font().family(), 15, QFont.Weight.DemiBold))
             box = QRectF(-110, local.top()+22, 220, 44)
@@ -764,7 +965,7 @@ class SwipeView(Surface):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(15, 15, 16, 215))
             painter.drawRoundedRect(box, 9, 9)
-            painter.setPen(color)
+            painter.setPen(QColor(TEXT))
             painter.drawText(box, Qt.AlignmentFlag.AlignCenter, label)
         painter.restore()
         painter.setPen(self.hint_color())
@@ -850,127 +1051,47 @@ class SwipeView(Surface):
         self.settle()
 
 
-class DuelView(Surface):
-    """Two photos at once: the preferred one stays and meets the next."""
-    fixed_deck = True
+class NoteFilter(QFrame):
+    """Quick choice of the notes shown, driving the same filter as the Tri page."""
 
-    def __init__(self, review):
-        super().__init__(review)
-        self.deck = []
-        self.champion = 0
-        self.challenger = 1
-        self.history = []
-        self.hover = 0
+    def __init__(self, window):
+        super().__init__()
+        self.window = window
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(1)
+        self.group = QButtonGroup(self)
+        self.buttons = {}
+        for key, label in [('all', 'Toutes'), (5, '5 ★'), (4, '4 ★'), (3, '3 ★'), (2, '2 ★'), (1, '1 ★'), (0, '0 ★')]:
+            button = QPushButton(label, objectName='seg', checkable=True)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.clicked.connect(self.apply)
+            self.group.addButton(button)
+            self.buttons[key] = button
+            row.addWidget(button)
+        self.and_more = QPushButton('et +', objectName='seg', checkable=True)
+        self.and_more.setToolTip('Inclure aussi les notes supérieures')
+        self.and_more.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.and_more.clicked.connect(self.apply)
+        row.addWidget(self.and_more)
+        self.sync()
 
-    def rebuild(self):
-        self.deck = list(self.window_.photos)
-        self.restart()
+    def apply(self, *args):
+        key = next(key for key, button in self.buttons.items() if button.isChecked())
+        if self.and_more.isChecked() and key in (1, 2, 3, 4):
+            key = f'ge{key}'
+        combo = self.window.stars
+        combo.setCurrentIndex(combo.findData(key))
 
-    def photos_changed(self):
-        self.update()
-
-    def restart(self):
-        self.champion, self.challenger, self.history = 0, 1, []
-        self.hover = 0
-        self.update()
-        self.request_images()
-
-    def shuffle(self):
-        random.shuffle(self.deck)
-        self.restart()
-
-    def finished(self):
-        return self.challenger >= len(self.deck)
-
-    def current(self):
-        if not self.deck:
-            return None
-        return self.deck[self.challenger if self.hover == 1 and not self.finished() else self.champion]
-
-    def targets(self):
-        photo = self.current()
-        return [photo] if photo else []
-
-    def panels(self):
-        area = QRectF(16, TOP_CLEARANCE, max(1, self.width()-32), max(1, self.height()-TOP_CLEARANCE-BOTTOM_CLEARANCE))
-        if self.finished():
-            return [area]
-        half = (area.width()-14)/2
-        return [QRectF(area.left(), area.top(), half, area.height()), QRectF(area.left()+half+14, area.top(), half, area.height())]
-
-    def shown(self):
-        return [self.deck[self.champion]] if self.finished() else [self.deck[self.champion], self.deck[self.challenger]]
-
-    def request_images(self):
-        if not self.deck:
-            return
-        ratio = self.devicePixelRatioF()
-        for photo, panel in zip(self.shown(), self.panels()):
-            self.window_.request_for(photo, max(panel.width(), panel.height())*ratio, 15)
-        for following in self.deck[self.challenger+1:self.challenger+3]:
-            self.window_.request_for(following, 1000, 4)
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        self.paint_background(painter)
-        if len(self.deck) < 2:
-            self.paint_empty(painter, 'Il faut au moins deux photos pour ces filtres')
-            return
-        panels = self.panels()
-        # Side by side and touching the gap: the eye compares without travelling.
-        for photo, panel, align in zip(self.shown(), panels, (0, -1) if self.finished() else (1, -1)):
-            self.paint_photo(painter, panel, photo, align)
-        painter.setPen(self.hint_color())
-        painter.setFont(QFont(self.font().family(), 9))
-        if self.finished():
-            text = 'Photo gagnante. R pour relancer un duel.'
-        else:
-            text = f'Duel {self.challenger} sur {len(self.deck)-1} · cliquez sur la photo à garder'
-        painter.drawText(QRectF(18, self.height()-44, max(0, self.width()/2-self.review.bar.width()/2-30), 24), Qt.AlignmentFlag.AlignVCenter, text)
-
-    def side_at(self, position):
-        for side, panel in enumerate(self.panels()):
-            if panel.contains(position):
-                return side
-        return None
-
-    def mouseMoveEvent(self, event):
-        side = self.side_at(event.position())
-        if side is not None and side != self.hover:
-            self.hover = side
-            self.window_.select_photo(self.current())
-            self.review.bar.update()
-
-    def choose(self, side):
-        if len(self.deck) < 2 or self.finished():
-            return
-        self.history.append((self.champion, self.challenger))
-        if side == 1:
-            self.champion = self.challenger
-        self.challenger += 1
-        self.hover = 0
-        self.window_.select_photo(self.current())
-        self.review.bar.update()
-        self.update()
-        self.request_images()
-
-    def mouseReleaseEvent(self, event):
-        side = self.side_at(event.position())
-        if event.button() == Qt.MouseButton.LeftButton and side is not None:
-            self.choose(side)
-
-    def navigate(self, delta):
-        self.choose(1 if delta > 0 else 0)
-
-    def skip(self, delta=1):
-        if delta < 0 and self.history:
-            self.champion, self.challenger = self.history.pop()
-            self.update()
-            self.request_images()
-        elif delta > 0 and not self.finished():
-            self.challenger += 1
-            self.update()
-            self.request_images()
+    def sync(self):
+        data = self.window.stars.currentData()
+        data = 'all' if data is None else data
+        wider = isinstance(data, str) and data.startswith('ge')
+        self.buttons[int(data[2:]) if wider else data].setChecked(True)
+        if wider:
+            self.and_more.setChecked(True)
+        elif data in (1, 2, 3, 4):
+            self.and_more.setChecked(False)
 
 
 class ReviewPage(QWidget):
@@ -979,7 +1100,6 @@ class ReviewPage(QWidget):
         self.setObjectName('page')
         self.window = window
         self.settings = window.settings
-        self.mirror = False
         self.mono = False
         self.mono_cache = {}
         self.info = {}
@@ -987,9 +1107,9 @@ class ReviewPage(QWidget):
         self.analysis_token = 0
         self.analysis_pool = QThreadPool(self)
         self.analysis_pool.setMaxThreadCount(1)
+        self.bottom_visible = True
         self.stack = QStackedWidget(self)
-        self.views = {'toile': ToileView(self), 'swipe': SwipeView(self), 'color': WallView(self, True),
-                      'wall': WallView(self), 'duel': DuelView(self)}
+        self.views = {'toile': ToileView(self), 'swipe': SwipeView(self), 'color': WallView(self, True), 'wall': WallView(self)}
         for view in self.views.values():
             self.stack.addWidget(view)
         saved = self.settings.value('review_mode', 'toile')
@@ -1001,14 +1121,17 @@ class ReviewPage(QWidget):
         self.progress = QLabel(self, objectName='faint')
         self.progress.hide()
         self.build_toolbar()
+        self.build_options()
         self.relayout_timer = QTimer(self)
         self.relayout_timer.setSingleShot(True)
         self.relayout_timer.timeout.connect(self.apply_analysis)
         self.repaint_timer = QTimer(self)
         self.repaint_timer.setSingleShot(True)
         self.repaint_timer.timeout.connect(self.update_view)
+        self.sync_toolbar()
 
     def build_toolbar(self):
+        """Top bar: what applies to every mode. Options of a mode sit at the bottom."""
         self.pill = QFrame(self, objectName='pill')
         row = QHBoxLayout(self.pill)
         row.setContentsMargins(8, 6, 12, 6)
@@ -1023,39 +1146,143 @@ class ReviewPage(QWidget):
             self.mode_group.addButton(button)
             self.mode_buttons[key] = button
             row.addWidget(button)
+        row.addSpacing(12)
+        self.note_filter = NoteFilter(self.window)
+        row.addWidget(self.note_filter)
+        row.addSpacing(6)
+        self.marker_filter = QComboBox()
+        self.marker_filter.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.marker_filter.setFixedWidth(150)
+        self.marker_filter.currentIndexChanged.connect(lambda index: self.window.flags.setCurrentIndex(index))
+        row.addWidget(self.marker_filter)
         row.addSpacing(10)
-        self.swipe_rule = QComboBox()
-        for key, label in SWIPE_RULES.items():
-            self.swipe_rule.addItem(label, key)
-        self.apply_default_swipe_rule()
-        self.swipe_rule.currentIndexChanged.connect(lambda *_: self.settings.setValue('swipe_rule', self.swipe_rule.currentData()))
-        self.swipe_rule.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        row.addWidget(self.swipe_rule)
-        self.shuffle_button = QPushButton('Mélanger', objectName='ghost')
-        self.shuffle_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.shuffle_button.clicked.connect(self.shuffle)
-        row.addWidget(self.shuffle_button)
-        self.mirror_button = QPushButton('Miroir', objectName='seg', checkable=True)
         self.mono_button = QPushButton('N&&B', objectName='seg', checkable=True)
-        for button, slot in ((self.mirror_button, self.toggle_mirror), (self.mono_button, self.toggle_mono)):
-            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            button.clicked.connect(slot)
-            row.addWidget(button)
+        self.mono_button.setToolTip('Noir et blanc, pour juger les contrastes')
+        self.mono_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.mono_button.clicked.connect(self.toggle_mono)
+        row.addWidget(self.mono_button)
         row.addSpacing(8)
         self.picker = BackgroundPicker(self.window)
         row.addWidget(self.picker)
-        self.sync_toolbar()
 
-    def apply_default_swipe_rule(self):
-        # Without an explicit choice, the rule follows the marking system.
-        default = 'pick' if self.window.marker == 'pick' else 'stars'
-        self.swipe_rule.blockSignals(True)
-        self.swipe_rule.setCurrentIndex(max(0, self.swipe_rule.findData(self.settings.value('swipe_rule', default))))
-        self.swipe_rule.blockSignals(False)
+    def option_pill(self):
+        pill = QFrame(self, objectName='pill')
+        pill.setFixedHeight(46)
+        row = QHBoxLayout(pill)
+        row.setContentsMargins(12, 0, 12, 0)
+        row.setSpacing(8)
+        pill.hide()
+        return pill, row
+
+    def option_combo(self, row, values, setting, default, width, slot):
+        combo = QComboBox()
+        combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        combo.setFixedWidth(width)
+        for key, label in values:
+            combo.addItem(label, key)
+        # Settings come back as text after a restart, whatever the type stored.
+        saved = str(self.settings.value(setting, default))
+        combo.setCurrentIndex(max(0, next((i for i in range(combo.count()) if str(combo.itemData(i)) == saved), 0)))
+
+        def changed(*args):
+            self.settings.setValue(setting, combo.currentData())
+            slot(combo.currentData())
+        combo.currentIndexChanged.connect(changed)
+        row.addWidget(combo)
+        return combo
+
+    def option_button(self, row, text, slot, checkable=False, checked=False):
+        button = QPushButton(text, objectName='seg' if checkable else 'ghost', checkable=checkable)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        button.setChecked(checked)
+        button.clicked.connect(slot)
+        row.addWidget(button)
+        return button
+
+    def build_options(self):
+        """Bottom bar, around the note of the photo: left and right groups per mode."""
+        toile, wall, color = self.views['toile'], self.views['wall'], self.views['color']
+        self.action_combos = []
+        toile_pill, row = self.option_pill()
+        self.option_button(row, 'Mélanger', self.shuffle)
+        self.straight_button = self.option_button(row, 'Photos droites', toile.set_straight, True, toile.straight)
+        self.option_combo(row, [(12, '12 photos'), (24, '24 photos'), (48, '48 photos'), (0, 'Toutes')], 'toile_limit', 24, 110,
+                          lambda value: (toile.set_limit(int(value)), self.bar.update()))
+        swipe_left, row = self.option_pill()
+        row.addWidget(QLabel('À gauche', objectName='muted'))
+        self.swipe_left = self.action_combo(row, 'swipe_left')
+        swipe_right, row = self.option_pill()
+        row.addWidget(QLabel('À droite', objectName='muted'))
+        self.swipe_right = self.action_combo(row, 'swipe_right')
+        color_pill, row = self.option_pill()
+        self.strip_button = self.option_button(row, 'Bandeau de couleur', self.set_strip, True, color.show_strip)
+        wall_left, row = self.option_pill()
+        self.option_combo(row, [('staggered', 'Décalée'), ('rows', 'Rangées')], 'wall_layout', 'staggered', 100, self.set_wall_layout)
+        self.option_combo(row, [('equal', 'Formats égaux'), ('landscape', 'Horizontales en avant'), ('portrait', 'Verticales en avant')],
+                          'wall_emphasis', 'equal', 172, self.set_wall_emphasis)
+        row.addWidget(QLabel('Largeur', objectName='muted'))
+        self.width_slider = QSlider(Qt.Orientation.Horizontal)
+        self.width_slider.setRange(35, 100)
+        self.width_slider.setFixedWidth(90)
+        self.width_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.width_slider.setValue(wall.width_percent)
+        self.width_slider.valueChanged.connect(self.set_wall_width)
+        row.addWidget(self.width_slider)
+        self.option_button(row, 'Mélanger', self.shuffle)
+        wall_right, row = self.option_pill()
+        row.addWidget(QLabel('Sortie', objectName='muted'))
+        self.drop_action = self.action_combo(row, 'drop_action')
+        self.restore_button = self.option_button(row, '', self.restore_set_aside)
+        self.restore_button.setToolTip("Réaffiche les photos sorties de la mosaïque. Leurs notes ne changent pas : Ctrl+Z annule une note.")
+        self.restore_button.hide()
+        self.options = {'toile': (None, toile_pill), 'swipe': (swipe_left, swipe_right), 'color': (None, color_pill), 'wall': (wall_left, wall_right)}
+        self.refresh_marker_options()
+
+    def action_combo(self, row, setting):
+        combo = QComboBox()
+        combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        combo.setFixedWidth(150)
+        combo.currentIndexChanged.connect(lambda *_: self.settings.setValue(setting, combo.currentData()) if combo.currentData() else None)
+        combo.setProperty('setting', setting)
+        row.addWidget(combo)
+        self.action_combos.append(combo)
+        return combo
+
+    def refresh_marker_options(self):
+        """Offer the actions and filters of the current marking system."""
+        picks = self.window.marker == 'pick'
+        defaults = {'swipe_left': 'reject' if picks else 'minus', 'swipe_right': 'select' if picks else 'none',
+                    'drop_action': 'reject' if picks else 'minus'}
+        hidden = () if picks else ('reject', 'neutral')
+        for combo in self.action_combos:
+            setting = combo.property('setting')
+            combo.blockSignals(True)
+            combo.clear()
+            for key, label in ACTIONS:
+                if key not in hidden:
+                    if key == 'select' and not picks:
+                        label = 'Mettre un drapeau'
+                    if key == 'none' and setting == 'drop_action':
+                        label = 'Sortir de la vue seulement'
+                    combo.addItem(label, key)
+            wanted = combo.findData(self.settings.value(setting, defaults[setting]))
+            combo.setCurrentIndex(wanted if wanted >= 0 else max(0, combo.findData(defaults[setting])))
+            combo.blockSignals(False)
+        self.sync_filters()
+        self.bar.relayout()
+        self.place_overlays()
+
+    def sync_filters(self):
+        self.note_filter.sync()
+        flags = self.window.flags
+        self.marker_filter.blockSignals(True)
+        self.marker_filter.clear()
+        for index in range(flags.count()):
+            self.marker_filter.addItem(flags.itemText(index), flags.itemData(index))
+        self.marker_filter.setCurrentIndex(flags.currentIndex())
+        self.marker_filter.blockSignals(False)
 
     def sync_toolbar(self):
-        self.swipe_rule.setVisible(self.mode == 'swipe')
-        self.shuffle_button.setVisible(self.mode in ('toile', 'swipe', 'duel'))
         self.picker.sync()
         self.pill.adjustSize()
         self.place_overlays()
@@ -1063,9 +1290,44 @@ class ReviewPage(QWidget):
     def background_menu(self):
         return self.window.viewer.background_menu(self)
 
+    def set_bottom_visible(self, visible):
+        """The bottom drop zone of the mosaic needs the room while a photo is dragged."""
+        self.bottom_visible = visible
+        self.place_overlays()
+
     def place_overlays(self):
         self.pill.move(max(8, (self.width()-self.pill.width())//2), 12)
-        self.bar.move((self.width()-self.bar.width())//2, self.height()-self.bar.height()-14)
+        options = getattr(self, 'options', {})
+        for mode, group in options.items():
+            for pill in group:
+                if pill is not None:
+                    pill.setVisible(mode == self.mode and self.bottom_visible)
+        self.bar.setVisible(self.bottom_visible)
+        left, right = options.get(self.mode, (None, None))
+        for pill in (left, right):
+            if pill is not None:
+                pill.adjustSize()
+        y = self.height()-self.bar.height()-14
+        sides = [pill.width() for pill in (left, right) if pill is not None]
+        total = self.bar.width()+sum(sides)+8*len(sides)
+        if total <= self.width()-24:
+            x = (self.width()-total)//2
+            if left is not None:
+                left.move(x, y)
+                x += left.width()+8
+            self.bar.move(x, y)
+            if right is not None:
+                right.move(x+self.bar.width()+8, y)
+        else:
+            # Too narrow for one line: the options go just above the note.
+            self.bar.move((self.width()-self.bar.width())//2, y)
+            above = y-54
+            width = sum(sides)+8*(len(sides)-1)
+            x = max(8, (self.width()-width)//2)
+            for pill in (left, right):
+                if pill is not None:
+                    pill.move(x, above)
+                    x += pill.width()+8
         self.progress.adjustSize()
         self.progress.move(self.width()-self.progress.width()-22, self.height()-34)
 
@@ -1087,6 +1349,7 @@ class ReviewPage(QWidget):
 
     def rebuild(self):
         self.mono_cache.clear()
+        self.sync_filters()
         self.view().rebuild()
         self.bar.relayout()
         self.place_overlays()
@@ -1114,7 +1377,7 @@ class ReviewPage(QWidget):
         self.view().navigate(delta)
         self.bar.update()
 
-    def shuffle(self):
+    def shuffle(self, *args):
         self.view().shuffle()
         self.bar.update()
 
@@ -1133,27 +1396,76 @@ class ReviewPage(QWidget):
             self.mono_cache[key] = grey
         return grey
 
-    def toggle_mirror(self):
-        self.mirror = not self.mirror
-        self.mirror_button.setChecked(self.mirror)
-        self.update_view()
-
-    def toggle_mono(self):
+    def toggle_mono(self, *args):
         self.mono = not self.mono
         self.mono_button.setChecked(self.mono)
         self.update_view()
 
+    def set_strip(self, value):
+        self.views['color'].show_strip = value
+        self.settings.setValue('color_strip', value)
+        self.update_view()
+
+    def set_wall_layout(self, value):
+        self.views['wall'].layout_kind = value
+        self.views['wall'].relayout()
+
+    def set_wall_emphasis(self, value):
+        self.views['wall'].emphasis = value
+        self.views['wall'].relayout()
+
+    def set_wall_width(self, value):
+        wall = self.views['wall']
+        wall.width_percent = max(35, min(100, int(value)))
+        self.settings.setValue('wall_width', wall.width_percent)
+        self.width_slider.blockSignals(True)
+        self.width_slider.setValue(wall.width_percent)
+        self.width_slider.blockSignals(False)
+        wall.relayout()
+
+    def apply_action(self, photo, action):
+        if action == 'minus':
+            self.window.change([photo], stars=max(0, photo.stars-1))
+        elif action == 'plus':
+            self.window.change([photo], stars=min(5, photo.stars+1))
+        elif action.startswith('star'):
+            self.window.change([photo], stars=int(action[4:]))
+        elif action in (PICK_SELECT, PICK_REJECT, PICK_NEUTRAL):
+            self.window.change([photo], pick=action)
+        else:
+            # Nothing to change, but still a step that Ctrl+Z can take back.
+            self.window.change([photo])
+
     def swipe_labels(self):
-        return {'pick': ('Rejetée', 'Retenue'), 'stars': ('-1 étoile', '+1 étoile'), 'five': ('0 étoile', '5 étoiles')}[self.swipe_rule.currentData()]
+        return self.swipe_left.currentText(), self.swipe_right.currentText()
 
     def apply_swipe(self, photo, direction):
-        rule = self.swipe_rule.currentData()
-        if rule == 'pick':
-            self.window.change([photo], pick=PICK_SELECT if direction > 0 else PICK_REJECT)
-        elif rule == 'five':
-            self.window.change([photo], stars=5 if direction > 0 else 0)
-        else:
-            self.window.change([photo], stars=max(0, min(5, photo.stars+direction)))
+        self.apply_action(photo, (self.swipe_right if direction > 0 else self.swipe_left).currentData())
+
+    def drop_label(self):
+        return self.drop_action.currentText()
+
+    def drop_out(self, photo):
+        """A photo dragged out of the mosaic: apply the chosen action and take it away."""
+        wall = self.views['wall']
+        index = next((i for i, (_, p) in enumerate(wall.tiles) if p is photo), 0)
+        wall.set_aside.add(photo.relative_path)
+        self.apply_action(photo, self.drop_action.currentData())
+        wall.rebuild()
+        if wall.tiles:
+            self.window.select_photo(wall.tiles[min(index, len(wall.tiles)-1)][1])
+        self.update_restore()
+
+    def update_restore(self):
+        count = len(self.views['wall'].set_aside)
+        self.restore_button.setText(f'Réafficher ({count})')
+        self.restore_button.setVisible(count > 0)
+        self.place_overlays()
+
+    def restore_set_aside(self, *args):
+        self.views['wall'].set_aside.clear()
+        self.views['wall'].rebuild()
+        self.update_restore()
 
     def after_mark(self, pick):
         """A marker set from the keyboard is a decision in Swipe: move on."""
@@ -1161,12 +1473,16 @@ class ReviewPage(QWidget):
             self.views['swipe'].fly(1 if pick == PICK_SELECT else -1)
 
     def after_undo(self, photos):
-        view = self.view()
+        wall = self.views['wall']
+        if wall.set_aside & {photo.relative_path for photo in photos}:
+            wall.set_aside -= {photo.relative_path for photo in photos}
+            wall.rebuild()
+            self.update_restore()
         if self.mode == 'swipe' and photos:
-            view.show_photo(photos[0])
+            self.view().show_photo(photos[0])
 
     def skip(self, delta):
-        if self.mode in ('swipe', 'duel'):
+        if self.mode == 'swipe':
             self.view().skip(delta)
             self.bar.update()
 
@@ -1246,12 +1562,11 @@ class ReviewPage(QWidget):
         self.stop_analysis()
         self.info = {}
         self.mono_cache.clear()
-        for view in self.views.values():
-            if isinstance(view, ToileView):
-                view.positions.clear()
-                view.stack.clear()
-                view.fresh = True
-            elif hasattr(view, 'deck'):
-                view.deck = []
-            elif isinstance(view, WallView):
-                view.ordered, view.tiles = [], []
+        toile, swipe = self.views['toile'], self.views['swipe']
+        toile.positions, toile.stack, toile.dealt, toile.available = {}, [], [], set()
+        toile.fresh = True
+        swipe.deck = []
+        for wall in (self.views['wall'], self.views['color']):
+            wall.ordered, wall.tiles = [], []
+            wall.set_aside = set()
+        self.update_restore()
