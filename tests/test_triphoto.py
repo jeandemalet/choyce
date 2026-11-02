@@ -337,7 +337,8 @@ def test_mosaic(base):
     assert review.restore_button.isVisibleTo(review.options['wall'][1])
     window.undo()
     assert photo.stars == 0 and len(wall.tiles) == 40
-    # Released inside the mosaic, nothing happens.
+    # Released inside the mosaic, nothing happens. Undo may have moved the scroll position.
+    wall.bar.setValue(0)
     rect, photo = wall.visible_tiles()[0]
     center = rect.center().toPoint()
     QTest.mousePress(wall, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, center)
