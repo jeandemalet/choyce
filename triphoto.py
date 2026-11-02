@@ -73,6 +73,7 @@ class Photo:
     relative_path: str
     stars: int = 0
     pick: str = PICK_NEUTRAL
+    liked: bool = False
 
     # The historical flag is the "select" state of the three-state marker.
     @property
@@ -265,6 +266,7 @@ class PhotoSession:
                     "stars": int(item.get("stars", 0)),
                     "pick": item.get("pick") if item.get("pick") in PICK_VALUES
                         else (PICK_SELECT if item.get("flagged", False) else PICK_NEUTRAL),
+                    "liked": bool(item.get("liked", False)),
                 }
                 for item in data.get("photos", [])
             }
@@ -272,6 +274,7 @@ class PhotoSession:
                 state = saved.get(photo.relative_path, {})
                 photo.stars = max(0, min(5, state.get("stars", 0)))
                 photo.pick = state.get("pick", PICK_NEUTRAL)
+                photo.liked = state.get("liked", False)
             self.photos = sort_photos(self.photos, self.sort_mode)
             self.created_at = data.get("created_at", self.created_at)
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
@@ -291,7 +294,7 @@ class PhotoSession:
             "photos": [
                 # "flagged" stays written so that older versions can read the file.
                 {"relative_path": photo.relative_path, "stars": photo.stars,
-                 "flagged": photo.flagged, "pick": photo.pick}
+                 "flagged": photo.flagged, "pick": photo.pick, "liked": photo.liked}
                 for photo in self.photos
             ],
         }

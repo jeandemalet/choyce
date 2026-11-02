@@ -24,10 +24,10 @@ La touche `G` bascule entre Tri et Révision. Le haut de la page porte deux gél
 
 | Mode | Principe | Réglages en bas |
 | --- | --- | --- |
-| **Toile** | Toutes les photos du filtre posées sur une table, les mieux notées plus grandes. La table tient en largeur et continue vers le bas. On déplace les photos à la souris, la molette monte et descend, et le zoom se règle en haut ou avec `Ctrl` + molette. | Mélanger (touche `R`), photos droites ou penchées, nombre de photos en largeur |
-| **Swipe** | Une photo à la fois : glissez-la à droite ou à gauche, ou utilisez les touches précédente et suivante. Espace passe sans décider, Retour arrière revient en arrière. La molette zoome et le zoom se conserve d'une photo à l'autre, comme dans le Tri. Zoomé au-delà de 100 %, glisser déplace la photo et ce sont les touches qui décident. | Action à gauche, action à droite |
-| **Couleur** | Un mur de photos rangées selon leur couleur dominante, les images neutres et le noir et blanc à la fin. Les blocs de couleur séparent les rouges, oranges, jaunes, etc., chacun sous son titre. Le curseur de défilement prend la couleur des photos au milieu de la page. | Disposition décalée ou en rangées, blocs de couleur, tri par couleur ou par contraste (ici la clarté) et son sens |
 | **Grille** | Une grille décalée, comme une galerie éditoriale, ou des rangées. Formats égaux cale les rangées sur l'orientation majoritaire, Horizontales en avant sur la hauteur des horizontales, Verticales en avant sur celle des verticales, sans changer l'ordre des photos. Tirez une photo hors de la grille, sur un côté ou en bas, pour la sortir de la sélection. `Ctrl` + molette change la taille. | Disposition, formats mis en avant (rangées seulement), largeur du panneau central, mélange, action de sortie |
+| **Toile** | Toutes les photos du filtre posées sur une table, les mieux notées plus grandes. La table tient en largeur et continue vers le bas ; on glisse le fond pour s'y promener. On déplace les photos à la souris, la molette monte et descend, et le zoom se règle en haut ou avec `Ctrl` + molette. | Mélanger (touche `R`), photos droites ou penchées, curseur de 2 à 16 photos en largeur |
+| **Couleur** | Un mur de photos rangées selon leur couleur dominante, les images neutres et le noir et blanc à la fin. Les blocs de couleur séparent les rouges, oranges, jaunes, etc., chacun sous son titre. Le curseur de défilement prend la couleur des photos au milieu de la page. | Disposition décalée ou en rangées, blocs de couleur, tri par couleur ou par contraste (ici la clarté) et son sens |
+| **Swipe** | Une photo à la fois : glissez-la à droite ou à gauche, ou utilisez les touches précédente et suivante. Espace passe sans décider, Retour arrière revient en arrière. La molette zoome et le zoom se conserve d'une photo à l'autre, comme dans le Tri. Zoomé au-delà de 100 %, glisser déplace la photo et ce sont les touches qui décident. | Action à gauche, action à droite |
 
 Une photo sortie de la grille reçoit l'action choisie. « Réafficher » remet les photos sorties à l'écran sans toucher à leurs notes, et `Ctrl+Z` annule la dernière sortie, note comprise.
 
@@ -38,6 +38,14 @@ Une photo qui quitte la Grille ou Couleur laisse sa place vide, pour ne pas dép
 ## Retirer les étoiles
 
 Partout où une photo affiche ses étoiles, une étoile vide et barrée à gauche la remet à zéro d'un clic : sur les photos de Toile, Couleur et Grille, dans la barre de note et dans le ruban du Tri. Avec un filtre « 5 ★ », la photo quitte aussitôt la vue, ce qui permet de resserrer une sélection très vite. `Ctrl+Z` la rétablit.
+
+## J'aime
+
+Un petit cœur en haut à droite de chaque photo se remplit d'un clic ou avec la touche `L`. `Ctrl+Z` l'annule, et il est enregistré avec les notes.
+
+## Export
+
+Une barre de progression suit l'export, et Annuler l'interrompt sans rien laisser. Si un export existe déjà, TriPhoto demande s'il faut le remplacer ou ranger le nouveau dans un sous-dossier daté, qu'un remplacement ultérieur ne touche pas. Les copies passent par un dossier de travail : un export interrompu laisse le précédent intact.
 
 ## Marquage
 
@@ -51,7 +59,7 @@ Tous les raccourcis se changent dans **Préférences** (`Ctrl+,`). Les touches e
 | --- | --- |
 | `C`, gauche / `V`, droite | Photo précédente / suivante |
 | `1` à `5`, `Maj+C`, `Maj+V` | Note, zéro étoile, cinq étoiles |
-| `F` | Drapeau |
+| `F`, `L` | Drapeau, j'aime |
 | `P`, `X`, `U` | Retenir, rejeter, neutre |
 | `Ctrl+Z` | Annuler la dernière note |
 | `G`, Échap | Basculer vers Révision, revenir au Tri |

@@ -8,8 +8,8 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QObject, QRunnable, Signal
 from PySide6.QtGui import QKeySequence
-from PySide6.QtWidgets import (QButtonGroup, QDialog, QDialogButtonBox, QHBoxLayout, QHeaderView, QKeySequenceEdit,
-    QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton, QTableWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QHeaderView, QKeySequenceEdit,
+    QLabel, QLineEdit, QPushButton, QRadioButton, QTableWidget, QVBoxLayout, QWidget)
 from triphoto import SESSION_DIR_NAME, SESSION_FILE_NAME
 
 MAX_RECENTS = 30
@@ -27,6 +27,7 @@ ACTIONS = [
     ('rate4', '4 étoiles', ['4']),
     ('rate5', '5 étoiles', ['5', 'Shift+V']),
     ('flag', 'Drapeau', ['F']),
+    ('like', "J'aime", ['L']),
     ('select', 'Retenir', ['P']),
     ('reject', 'Rejeter', ['X']),
     ('neutral', 'Neutre', ['U']),
@@ -38,10 +39,10 @@ ACTIONS = [
     ('review', 'Basculer entre Tri et Révision', ['G']),
     ('shuffle', 'Révision : mélanger', ['R']),
     ('mono', 'Révision : noir et blanc', ['N']),
-    ('mode_toile', 'Révision : Toile', ['Ctrl+1']),
-    ('mode_swipe', 'Révision : Swipe', ['Ctrl+2']),
+    ('mode_wall', 'Révision : Grille', ['Ctrl+1']),
+    ('mode_toile', 'Révision : Toile', ['Ctrl+2']),
     ('mode_color', 'Révision : Couleur', ['Ctrl+3']),
-    ('mode_wall', 'Révision : Grille', ['Ctrl+4']),
+    ('mode_swipe', 'Révision : Swipe', ['Ctrl+4']),
     ('refresh', 'Actualiser le dossier', ['F5']),
     ('open', 'Ouvrir un projet', ['Ctrl+O']),
     ('close', 'Fermer le projet', ['Ctrl+W']),
@@ -49,6 +50,53 @@ ACTIONS = [
 ]
 # Not listed in the dialog: Shift held after rating must still navigate.
 ALIASES = {'prev': ['Shift+Left'], 'next': ['Shift+Right']}
+
+
+class ThemedDialog(QDialog):
+    """A message in the design of the program, rather than the system's."""
+
+    def __init__(self, parent, title, text, buttons):
+        super().__init__(parent)
+        self.choice = None
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        frame = QFrame(objectName='dialog')
+        outer.addWidget(frame)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(24, 22, 24, 18)
+        layout.setSpacing(12)
+        layout.addWidget(QLabel(title, objectName='dialogTitle'))
+        # A long path may only wrap where it is allowed to.
+        message = QLabel(text.replace('\\', '\\\u200b'))
+        message.setWordWrap(True)
+        message.setFixedWidth(440)
+        layout.addWidget(message)
+        layout.addSpacing(6)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        for key, label, primary in buttons:
+            button = QPushButton(label, objectName='primary' if primary else 'ghost')
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.clicked.connect(lambda checked=False, value=key: self.choose(value))
+            row.addWidget(button)
+        layout.addLayout(row)
+
+    def choose(self, value):
+        self.choice = value
+        self.accept()
+
+
+def ask(parent, title, text, buttons):
+    """The key of the button chosen, or None when closed with Escape."""
+    dialog = ThemedDialog(parent, title, text, buttons)
+    dialog.exec()
+    return dialog.choice
+
+
+def inform(parent, title, text):
+    ask(parent, title, text, [('close', 'Fermer', True)])
 
 
 def shortcut_map(settings):
@@ -255,7 +303,7 @@ class PreferencesDialog(QDialog):
         clashes = conflicts(self.mapping())
         if clashes:
             text = '\n'.join(f"{key} : {' et '.join(names)}" for key, names in clashes.items())
-            QMessageBox.warning(self, 'Raccourcis en conflit', 'Une même touche ne peut servir à deux commandes.\n\n'+text)
+            inform(self, 'Raccourcis en conflit', 'Une même touche ne peut servir à deux commandes.\n\n'+text)
             return
         save_shortcut_map(self.settings, self.mapping())
         self.settings.setValue('marker', self.marker.checkedButton().property('key'))

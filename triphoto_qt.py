@@ -5,30 +5,109 @@ import argparse
 import ctypes
 import hashlib
 import os
+import re
+import shutil
 import sys
 import math
+import threading
 import time
 from io import BytesIO
 from pathlib import Path
 from collections import OrderedDict
 
-from PySide6.QtCore import Qt, QSize, QRectF, QPointF, Signal, Slot, QObject, QRunnable, QThreadPool, QTimer, QItemSelectionModel, QSettings
-from PySide6.QtGui import QIcon, QImage, QPainter, QPainterPath, QColor, QFont, QShortcut, QKeySequence, QColorSpace, QPen
+from PySide6.QtCore import Qt, QSize, QRectF, QPointF, Signal, Slot, QObject, QRunnable, QThreadPool, QTimer, QItemSelectionModel, QSettings, QUrl
+from PySide6.QtGui import QDesktopServices, QIcon, QImage, QPainter, QPainterPath, QColor, QFont, QShortcut, QKeySequence, QColorSpace, QPen
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QComboBox, QSplitter, QListWidget, QListWidgetItem, QFrame, QScrollArea, QButtonGroup,
-    QStackedWidget, QAbstractItemView, QFileDialog, QMessageBox, QStyledItemDelegate, QStyle, QMenu, QColorDialog)
+    QStackedWidget, QAbstractItemView, QFileDialog, QProgressBar, QStyledItemDelegate, QStyle, QMenu, QColorDialog)
 from PIL import Image, ImageCms, ImageWin
 from triphoto import (PhotoSession, sort_photos, SORT_OPTIONS, load_screen_preview, original_inventory,
     export_original_copy, EXPORT_DIR_NAME, PICK_NEUTRAL, PICK_REJECT, PICK_SELECT)
-from triphoto_prefs import (ALIASES, PreferencesDialog, Recents, ScanJob, age_label, path_key, shortcut_map)
+from triphoto_prefs import (ALIASES, PreferencesDialog, Recents, ScanJob, age_label, ask, inform, path_key, shortcut_map)
 from triphoto_review import BackgroundPicker, MarkerFilter, NoteFilter, RatingBar, ReviewPage
 from triphoto_theme import (ACCENT, ASSETS, BACKGROUNDS, FAINT, INK, RAISED, REJECT, SELECT, STYLE, TEXT,
-    contrast_on, draw_check, draw_clear_star, draw_cross, draw_flag, draw_stars)
+    contrast_on, draw_check, draw_clear_star, draw_cross, draw_flag, draw_heart, draw_stars)
 
 # Tests point this to a separate store, so that they never touch the user's settings.
 SETTINGS_SCOPE = os.environ.get('TRIPHOTO_SETTINGS', 'TriPhoto')
 ROW_HEIGHT = 152
 EXPORT_PICKS_DIR_NAME = 'Export_Retenues'
+EXPORT_WORK_DIR_NAME = 'Export_en_cours'
+DATED_EXPORT = re.compile(r'^Export_\d{4}-\d{2}-\d{2}_\d{2}h\d{2}(-\d+)?$')
+
+
+def previous_export_count(base):
+    """Files of the main export; the dated subfolders are separate exports, kept apart."""
+    if not base.is_dir():
+        return 0
+    count = 0
+    for child in base.iterdir():
+        if child.is_dir():
+            if not DATED_EXPORT.match(child.name):
+                count += sum(1 for item in child.rglob('*') if item.is_file())
+        else:
+            count += 1
+    return count
+
+
+class ExportSignals(QObject):
+    progress = Signal(int, int)
+    checking = Signal()
+    finished = Signal(str, str)
+
+
+class ExportJob(QRunnable):
+    """Copy to a work folder first: an interrupted export leaves the previous one intact."""
+
+    def __init__(self, root, baseline, photos, base, replace):
+        super().__init__()
+        self.root, self.baseline, self.photos, self.base, self.replace = root, baseline, photos, base, replace
+        self.signals = ExportSignals()
+        self.cancelled = threading.Event()
+
+    def publish(self, work):
+        self.base.mkdir(parents=True, exist_ok=True)
+        if not self.replace:
+            stamp = time.strftime('%Y-%m-%d_%Hh%M')
+            folder, suffix = self.base/f'Export_{stamp}', 2
+            while folder.exists():
+                folder, suffix = self.base/f'Export_{stamp}-{suffix}', suffix+1
+            os.replace(work, folder)
+            return folder
+        for child in self.base.iterdir():
+            if child.is_dir():
+                if not DATED_EXPORT.match(child.name):
+                    shutil.rmtree(child)
+            else:
+                child.unlink()
+        for child in work.iterdir():
+            os.replace(child, self.base/child.name)
+        work.rmdir()
+        return self.base
+
+    def run(self):
+        work = self.base.parent/EXPORT_WORK_DIR_NAME
+        try:
+            shutil.rmtree(work, ignore_errors=True)
+            self.signals.checking.emit()
+            if original_inventory(self.root) != self.baseline:
+                raise RuntimeError('Le dossier a changé depuis son ouverture. Rouvrez-le avant l’export.')
+            total = len(self.photos)
+            for done, (path, relative) in enumerate(self.photos):
+                if self.cancelled.is_set():
+                    shutil.rmtree(work, ignore_errors=True)
+                    self.signals.finished.emit('', '')
+                    return
+                self.signals.progress.emit(done, total)
+                export_original_copy(path, work/relative)
+            self.signals.progress.emit(total, total)
+            self.signals.checking.emit()
+            if original_inventory(self.root) != self.baseline:
+                raise RuntimeError('Le dossier des originaux a changé pendant l’export.')
+            self.signals.finished.emit(str(self.publish(work)), '')
+        except Exception as error:
+            shutil.rmtree(work, ignore_errors=True)
+            self.signals.finished.emit('', str(error))
 STAR_FILTERS = {'all': 'Toutes les notes', 'ge4': '4 étoiles et plus', 'ge3': '3 étoiles et plus', 'ge2': '2 étoiles et plus',
     'ge1': '1 étoile et plus', 5: '5 étoiles', 4: '4 étoiles', 3: '3 étoiles', 2: '2 étoiles', 1: '1 étoile', 0: '0 étoile'}
 FLAG_FILTERS = {'all': 'Tous les drapeaux', 'select': 'Drapeaux uniquement', 'unflagged': 'Sans drapeau'}
@@ -137,10 +216,13 @@ class Viewer(QWidget):
     resized = Signal()
     activity = Signal()
     backgroundChanged = Signal()
+    heartClicked = Signal()
 
     def __init__(self):
         super().__init__()
         self.image = QImage()
+        self.liked = lambda: None
+        self.above = None
         self.zoom = 1.0
         self.pan = QPointF()
         self.drag = None
@@ -158,10 +240,27 @@ class Viewer(QWidget):
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.message)
             return
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.drawImage(self.image_rect(), self.image)
+        liked = self.liked()
+        if liked is not None:
+            draw_heart(painter, self.heart_rect(), liked)
+
+    def image_rect(self):
         fit = min(max(1, self.width()-24)/self.image.width(), max(1, self.height()-24)/self.image.height())
         width, height = self.image.width()*fit*self.zoom, self.image.height()*fit*self.zoom
-        target = QRectF((self.width()-width)/2+self.pan.x(), (self.height()-height)/2+self.pan.y(), width, height)
-        painter.drawImage(target, self.image)
+        return QRectF((self.width()-width)/2+self.pan.x(), (self.height()-height)/2+self.pan.y(), width, height)
+
+    def heart_rect(self):
+        # Zoomed in, the corner of the photo may be out of sight: stay in the corner of what is seen.
+        shown = self.image_rect().intersected(QRectF(self.rect()))
+        heart = QRectF(shown.right()-23, shown.top()+8, 15, 14)
+        # The filters float over the top of a tall photo: the heart must stay within reach.
+        if self.above is not None and self.above.isVisible() and QRectF(self.above.geometry()).intersects(heart):
+            heart.moveTop(self.above.geometry().bottom()+8)
+        return heart
+
+    def on_heart(self, position):
+        return not self.image.isNull() and self.liked() is not None and self.heart_rect().adjusted(-4, -4, 4, 4).contains(position)
 
     def resizeEvent(self, event):
         self.resized.emit()
@@ -188,7 +287,9 @@ class Viewer(QWidget):
         event.accept()
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self.zoom > 1:
+        if event.button() == Qt.MouseButton.LeftButton and self.on_heart(event.position()):
+            self.heartClicked.emit()
+        elif event.button() == Qt.MouseButton.LeftButton and self.zoom > 1:
             self.drag = event.position()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
@@ -205,7 +306,9 @@ class Viewer(QWidget):
         self.unsetCursor()
 
     def mouseDoubleClickEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and not self.image.isNull():
+        if event.button() == Qt.MouseButton.LeftButton and self.on_heart(event.position()):
+            self.heartClicked.emit()
+        elif event.button() == Qt.MouseButton.LeftButton and not self.image.isNull():
             self.drag = None
             self.unsetCursor()
             if math.isclose(self.zoom, 2.0, abs_tol=1e-6):
@@ -255,6 +358,9 @@ class PhotoDelegate(QStyledItemDelegate):
     def card(self, option):
         return QRectF(option.rect.adjusted(7, 3, -7, -3))
 
+    def heart(self, thumb):
+        return QRectF(thumb.right()-19, thumb.top()+6, 13, 12)
+
     def paint(self, painter, option, index):
         photo = index.data(Qt.ItemDataRole.UserRole)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
@@ -280,6 +386,7 @@ class PhotoDelegate(QStyledItemDelegate):
             painter.setPen(QPen(QColor(ACCENT), 1.6))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(thumb.adjusted(.8, .8, -.8, -.8), 5, 5)
+        draw_heart(painter, self.heart(thumb), photo.liked)
         middle = rect.bottom()-13
         draw_clear_star(painter, rect.x()+8, middle, 5.5, TEXT if photo.stars else '#4a4a4c')
         draw_stars(painter, rect.x()+24, middle, photo.stars, 5.5, 14.0)
@@ -299,6 +406,10 @@ class PhotoDelegate(QStyledItemDelegate):
         if event.type() == event.Type.MouseButtonRelease:
             rect = self.card(option)
             x, y = event.position().x(), event.position().y()
+            if self.heart(rect).adjusted(-4, -4, 4, 4).contains(event.position()):
+                photo = index.data(Qt.ItemDataRole.UserRole)
+                self.window.change([photo], liked=not photo.liked)
+                return True
             if y >= rect.bottom()-26:
                 if x >= rect.right()-30:
                     self.window.toggle_flag(index.row())
@@ -580,6 +691,8 @@ class Window(QMainWindow):
         splitter = QSplitter()
         self.viewer = Viewer()
         self.viewer.backgroundChanged.connect(self.background_changed)
+        self.viewer.liked = lambda: self.current_photo().liked if self.current_photo() else None
+        self.viewer.heartClicked.connect(self.toggle_like)
         splitter.addWidget(self.viewer)
         self.list = QListWidget()
         self.list.setMinimumWidth(250)
@@ -606,6 +719,7 @@ class Window(QMainWindow):
         filter_row.addSpacing(6)
         filter_row.addWidget(self.marker_filter)
         self.viewer_filters.hide()
+        self.viewer.above = self.viewer_filters
         self.viewer_bar_timer = QTimer(self)
         self.viewer_bar_timer.setSingleShot(True)
         self.viewer_bar_timer.timeout.connect(self.hide_viewer_bar)
@@ -617,6 +731,22 @@ class Window(QMainWindow):
         self.pages.addWidget(splitter)
         self.pages.addWidget(self.review)
         layout.addWidget(self.pages, 1)
+        self.export_job = None
+        self.export_pool = QThreadPool(self)
+        self.export_pool.setMaxThreadCount(1)
+        self.export_panel = QFrame(self, objectName='pill')
+        export_row = QHBoxLayout(self.export_panel)
+        export_row.setContentsMargins(16, 10, 10, 10)
+        export_row.setSpacing(12)
+        self.export_label = QLabel()
+        self.export_label.setMinimumWidth(190)
+        export_row.addWidget(self.export_label)
+        self.export_bar = QProgressBar()
+        self.export_bar.setFixedSize(260, 6)
+        self.export_bar.setTextVisible(False)
+        export_row.addWidget(self.export_bar)
+        self.button(export_row, 'Annuler', self.cancel_export, 'ghost')
+        self.export_panel.hide()
         self.toast_frame = QFrame(self, objectName='toast')
         toast_row = QHBoxLayout(self.toast_frame)
         toast_row.setContentsMargins(14, 8, 14, 8)
@@ -663,7 +793,7 @@ class Window(QMainWindow):
         self.shortcuts = []
         commands = {
             'prev': lambda: self.navigate(-1), 'next': lambda: self.navigate(1),
-            'flag': self.toggle_flag, 'select': lambda: self.set_pick(PICK_SELECT),
+            'flag': self.toggle_flag, 'like': self.toggle_like, 'select': lambda: self.set_pick(PICK_SELECT),
             'reject': lambda: self.set_pick(PICK_REJECT), 'neutral': lambda: self.set_pick(PICK_NEUTRAL),
             'undo': self.undo, 'fit': lambda: self.review.zoom_reset() if self.review_active else self.viewer.set_zoom(1),
             'zoom_in': lambda: self.zoom_by(1.15), 'zoom_out': lambda: self.zoom_by(1/1.15),
@@ -727,6 +857,7 @@ class Window(QMainWindow):
         if self.session:
             self.viewer_filters.show()
             self.viewer_filters.raise_()
+            self.viewer.update()
         self.viewer_bar_timer.start(1700)
         self.place_viewer_bar()
         if self.viewer.image.isNull():
@@ -744,6 +875,7 @@ class Window(QMainWindow):
             self.viewer_picker.hide()
             # With no photo left, this is the only way back from the filter.
             self.viewer_filters.setVisible(bool(self.session and not self.photos))
+            self.viewer.update()
 
     def place_viewer_bar(self):
         self.viewer_picker.adjustSize()
@@ -869,7 +1001,7 @@ class Window(QMainWindow):
 
     def open_recent(self, path):
         if not Path(path).is_dir():
-            QMessageBox.information(self, 'Projet introuvable', f'Ce dossier est introuvable pour le moment :\n{path}\n\nSi le disque est débranché, rebranchez-le puis réessayez.')
+            inform(self, 'Projet introuvable', f'Ce dossier est introuvable pour le moment :\n{path}\n\nSi le disque est débranché, rebranchez-le puis réessayez.')
             return
         self.set_folder(Path(path))
 
@@ -928,6 +1060,7 @@ class Window(QMainWindow):
             self.toast(f'Enregistrement impossible : {error}', 6000)
 
     def close_project(self):
+        self.stop_export()
         if self.session:
             self.save_session()
             self.recents.add(self.project_path, self.session.photos)
@@ -994,7 +1127,7 @@ class Window(QMainWindow):
         try:
             session = PhotoSession(path)
         except Exception as error:
-            QMessageBox.critical(self, 'Ouverture impossible', str(error))
+            inform(self, 'Ouverture impossible', str(error))
             return
         self.close_project()
         self.session = session
@@ -1079,6 +1212,7 @@ class Window(QMainWindow):
         elif self.session and not self.photos:
             self.show_viewer_bar()
         self.viewer_bar.update()
+        self.viewer.update()
 
     def request(self, photo, side, priority=0):
         if self.closing:
@@ -1276,17 +1410,19 @@ class Window(QMainWindow):
             self.counter.setText('Aucune photo')
             self.name_label.clear()
 
-    def change(self, photos, stars=None, pick=None):
+    def change(self, photos, stars=None, pick=None, liked=None):
         """Single entry point for notes and markers: it is what makes them undoable."""
         if not self.session or not photos:
             return
-        self.undo_stack.append([(photo, photo.stars, photo.pick) for photo in photos])
+        self.undo_stack.append([(photo, photo.stars, photo.pick, photo.liked) for photo in photos])
         del self.undo_stack[:-300]
         for photo in photos:
             if stars is not None:
                 photo.stars = stars
             if pick is not None:
                 photo.pick = pick
+            if liked is not None:
+                photo.liked = liked
         self.apply_filters()
 
     def undo(self):
@@ -1294,8 +1430,8 @@ class Window(QMainWindow):
             self.toast('Rien à annuler')
             return
         states = self.undo_stack.pop()
-        for photo, stars, pick in states:
-            photo.stars, photo.pick = stars, pick
+        for photo, stars, pick, liked in states:
+            photo.stars, photo.pick, photo.liked = stars, pick, liked
         self.apply_filters()
         if self.review_active:
             self.review.after_undo([state[0] for state in states])
@@ -1303,6 +1439,11 @@ class Window(QMainWindow):
 
     def rate(self, stars):
         self.change(self.target_photos(), stars=stars)
+
+    def toggle_like(self):
+        photos = self.target_photos()
+        if photos:
+            self.change(photos, liked=not photos[0].liked)
 
     def set_pick(self, pick):
         if self.marker != 'pick' and pick == PICK_REJECT:
@@ -1339,10 +1480,7 @@ class Window(QMainWindow):
                 self.review.rebuild()
 
     def export(self, kind='stars'):
-        if not self.session:
-            return
-        if original_inventory(self.session.root) != self.baseline:
-            QMessageBox.warning(self, 'Export interrompu', 'Le dossier a changé depuis son ouverture. Rouvrez-le avant l’export.')
+        if not self.session or self.export_job:
             return
         if kind == 'picks':
             photos = [p for p in self.photos if p.pick == PICK_SELECT]
@@ -1352,19 +1490,79 @@ class Window(QMainWindow):
             photos = [p for p in self.photos if p.stars == 5 and p.pick != PICK_REJECT]
             destination, empty = self.session.session_dir / EXPORT_DIR_NAME, 'Aucune photo à cinq étoiles dans la sélection filtrée.'
         if not photos:
-            QMessageBox.information(self, 'Export', empty)
+            inform(self, 'Export', empty)
             return
-        try:
-            for photo in photos:
-                export_original_copy(photo.path, destination/photo.relative_path)
-            if original_inventory(self.session.root) != self.baseline:
-                raise RuntimeError('Le dossier des originaux a changé pendant l’export.')
-            QMessageBox.information(self, 'Export terminé', f'{len(photos)} originaux copiés sans conversion.\n{destination}')
-        except Exception as error:
-            QMessageBox.warning(self, 'Export incomplet', str(error))
+        previous = previous_export_count(destination)
+        replace = True
+        if previous:
+            choice = ask(self, 'Un export existe déjà',
+                         f'Ce dossier contient déjà {previous} photo{"s" if previous > 1 else ""} :\n{destination}\n\n'
+                         f'Remplacer efface ces photos une fois les {len(photos)} nouvelles copiées. '
+                         'Un nouveau sous-dossier les garde et range cet export à part, à son nom et à sa date.',
+                         [('cancel', 'Annuler', False), ('replace', 'Remplacer', False), ('new', 'Nouveau sous-dossier', True)])
+            if choice not in ('replace', 'new'):
+                return
+            replace = choice == 'replace'
+        job = ExportJob(self.session.root, self.baseline, [(p.path, p.relative_path) for p in photos], destination, replace)
+        job.signals.progress.connect(self.export_progress, Qt.ConnectionType.QueuedConnection)
+        job.signals.checking.connect(self.export_checking, Qt.ConnectionType.QueuedConnection)
+        job.signals.finished.connect(lambda folder, error, count=len(photos): self.export_done(job, folder, error, count), Qt.ConnectionType.QueuedConnection)
+        self.export_job = job
+        self.export_button.setEnabled(False)
+        self.export_checking()
+        self.export_pool.start(job)
+
+    def place_export_panel(self):
+        self.export_panel.adjustSize()
+        self.export_panel.move((self.width()-self.export_panel.width())//2, self.height()-self.export_panel.height()-84)
+        self.export_panel.raise_()
+
+    def resizeEvent(self, event):
+        self.place_export_panel()
+        super().resizeEvent(event)
+
+    def export_checking(self):
+        self.export_label.setText('Vérification des originaux…')
+        self.export_bar.setRange(0, 0)
+        self.place_export_panel()
+        self.export_panel.show()
+
+    def export_progress(self, done, total):
+        self.export_label.setText(f'Export : {done} sur {total} photos')
+        self.export_bar.setRange(0, total)
+        self.export_bar.setValue(done)
+
+    def cancel_export(self):
+        if self.export_job:
+            self.export_job.cancelled.set()
+            self.export_label.setText('Annulation…')
+
+    def stop_export(self):
+        """Closing a project or the program: nothing half done stays behind."""
+        if self.export_job:
+            self.cancel_export()
+            self.export_pool.waitForDone()
+            self.export_job = None
+        self.export_panel.hide()
+        self.export_button.setEnabled(True)
+
+    def export_done(self, job, folder, error, count):
+        if job is not self.export_job:
+            return
+        self.export_job = None
+        self.export_panel.hide()
+        self.export_button.setEnabled(True)
+        if error:
+            inform(self, 'Export incomplet', f'{error}\n\nL’export précédent est resté tel quel.')
+        elif folder:
+            choice = ask(self, 'Export terminé', f'{count} originaux copiés sans conversion.\n{folder}',
+                         [('close', 'Fermer', False), ('open', 'Ouvrir le dossier', True)])
+            if choice == 'open':
+                QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
 
     def closeEvent(self, event):
         self.closing = True
+        self.stop_export()
         self.detail_timer.stop()
         self.visible_timer.stop()
         self.preload_timer.stop()

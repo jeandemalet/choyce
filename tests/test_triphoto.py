@@ -442,6 +442,123 @@ class _Wheel:
         pass
 
 
+def test_like(base):
+    clear_settings()
+    root = make_project(base/'like', 8)
+    window = open_window(root)
+    window.set_review(True)
+    review = window.review
+    settle(window, lambda: len(review.info) == 8)
+    review.set_mode('wall')
+    wall = review.view()
+    wall.resize(1400, 850)
+    rect, photo = wall.visible_tiles()[0]
+    QTest.mouseClick(wall, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, wall.heart_rect(rect).center().toPoint())
+    assert photo.liked and not wall.targets()
+    window.undo()
+    assert not photo.liked
+    # In Swipe, on the photo itself, and from the keyboard.
+    review.set_mode('swipe')
+    swipe = review.view()
+    swipe.resize(1200, 800)
+    card = swipe.current()
+    QTest.mouseClick(swipe, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, swipe.swipe_heart().center().toPoint())
+    assert card.liked and swipe.current() is card
+    swipe.grab()
+    window.toggle_like()
+    assert not card.liked
+    window.toggle_like()
+    # On the Tri page.
+    window.set_review(False)
+    viewer = window.viewer
+    settle(window, lambda: not viewer.image.isNull())
+    current = window.current_photo()
+    state = current.liked
+    QTest.mouseClick(viewer, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, viewer.heart_rect().center().toPoint())
+    assert current.liked != state
+    # The floating filters never cover it.
+    window.show_viewer_bar()
+    assert not QRectF(window.viewer_filters.geometry()).intersects(viewer.heart_rect())
+    viewer.grab()
+    if not current.liked:
+        window.toggle_like()
+    # It survives closing the project; older sessions simply have none.
+    liked = {p.relative_path for p in window.session.photos if p.liked}
+    assert liked
+    window.close()
+    window = open_window(root)
+    assert {p.relative_path for p in window.session.photos if p.liked} == liked
+    window.close()
+    clear_settings()
+
+
+def test_export(base):
+    clear_settings()
+    root = make_project(base/'export', 6)
+    window = open_window(root)
+    calls = []
+    answers = []
+    real_ask, real_inform = triphoto_qt.ask, triphoto_qt.inform
+    def fake_ask(parent, title, text, buttons):
+        calls.append(title)
+        return answers.pop(0)
+    triphoto_qt.ask, triphoto_qt.inform = fake_ask, lambda parent, title, text: calls.append(title)
+    try:
+        folder = root/'TriPhoto_Session'/triphoto.EXPORT_DIR_NAME
+        window.export()
+        assert calls == ['Export']
+        calls.clear()
+        for photo in window.photos[:2]:
+            photo.stars = 5
+        # A first export asks nothing but where it ended, and shows its progress meanwhile.
+        answers[:] = ['close']
+        window.export()
+        assert window.export_panel.isVisible() and not window.export_button.isEnabled()
+        settle(window, lambda: window.export_job is None)
+        assert calls == ['Export terminé'] and len(list(folder.iterdir())) == 2 and not window.export_panel.isVisible()
+        assert window.export_button.isEnabled()
+        calls.clear()
+        # A new subfolder keeps the previous export.
+        window.photos[2].stars = 5
+        answers[:] = ['new', 'close']
+        window.export()
+        settle(window, lambda: window.export_job is None)
+        dated = [child for child in folder.iterdir() if child.is_dir()]
+        assert calls == ['Un export existe déjà', 'Export terminé']
+        assert len(dated) == 1 and len(list(dated[0].iterdir())) == 3 and len(list(folder.glob('*.jpg'))) == 2
+        # Replacing refreshes the main export and leaves dated ones alone.
+        answers[:] = ['replace', 'close']
+        window.photos[0].stars = 0
+        window.export()
+        settle(window, lambda: window.export_job is None)
+        assert len(list(folder.glob('*.jpg'))) == 2 and not (folder/window.photos[0].relative_path).exists()
+        assert len(list(dated[0].iterdir())) == 3
+        # Declining the choice exports nothing.
+        answers[:] = [None]
+        window.export()
+        assert window.export_job is None
+        # Cancelling leaves the previous export and no work folder.
+        before = sorted(p.name for p in folder.glob('*.jpg'))
+        answers[:] = ['replace']
+        window.export()
+        window.cancel_export()
+        settle(window, lambda: window.export_job is None)
+        assert sorted(p.name for p in folder.glob('*.jpg')) == before
+        assert not (root/'TriPhoto_Session'/triphoto_qt.EXPORT_WORK_DIR_NAME).exists()
+    finally:
+        triphoto_qt.ask, triphoto_qt.inform = real_ask, real_inform
+    window.close()
+    clear_settings()
+
+
+def test_themed_dialog(base):
+    dialog = triphoto_prefs.ThemedDialog(None, 'Titre', 'Texte\nC:\\un\\chemin', [('a', 'Non', False), ('b', 'Oui', True)])
+    buttons = dialog.findChildren(triphoto_prefs.QPushButton)
+    assert [b.text() for b in buttons] == ['Non', 'Oui']
+    buttons[1].click()
+    assert dialog.choice == 'b'
+
+
 def test_tri_filters(base):
     clear_settings()
     root = make_project(base/'tri_filters', 6)
@@ -525,7 +642,7 @@ def test_clear_stars(base):
     center = button.center()
     world = rect.center()+QPointF(center.x()*math.cos(angle)-center.y()*math.sin(angle), center.x()*math.sin(angle)+center.y()*math.cos(angle))
     screen = QPointF(toile.width()/2, toile.height()/2)+toile.pan+world*toile.scale_
-    assert toile.clear_hit(screen) is top
+    assert toile.badge_hit(screen) == (top, 'clear')
     # The note bar has the same button, on the Tri page and in Revoir.
     review.set_mode('swipe')
     swipe = review.view()
@@ -688,7 +805,7 @@ def main():
     app.setStyleSheet(triphoto_qt.STYLE)
     base = Path(tempfile.mkdtemp(prefix='triphoto-tests-'))
     tests = [test_legacy_session, test_nested_session_ignored, test_dominant_color, test_recents, test_shortcuts,
-             test_window_rating_and_undo, test_review_modes, test_grid, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle]
+             test_window_rating_and_undo, test_review_modes, test_grid, test_like, test_export, test_themed_dialog, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle]
     failures = 0
     try:
         for test in tests:

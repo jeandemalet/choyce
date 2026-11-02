@@ -22,7 +22,8 @@ LINE = '#343436'
 TEXT = '#ececec'
 MUTED = '#9a9a9d'
 FAINT = '#69696c'
-ACCENT = '#d9b872'
+# Neutral on purpose: no touch of color may disturb the reading of a photograph.
+ACCENT = '#f2f2f2'
 SELECT = '#8fc493'
 REJECT = '#d9766a'
 
@@ -58,9 +59,13 @@ QPushButton#seg:hover {{ color: {TEXT}; }}
 QPushButton#seg:checked {{ background: {HOVER}; color: {TEXT}; }}
 QPushButton#mainseg {{ background: transparent; color: {MUTED}; border-radius: 6px; padding: 6px 24px; font-weight: 600; }}
 QPushButton#mainseg:hover {{ color: {TEXT}; }}
-QPushButton#mainseg:checked {{ background: {ACCENT}; color: {INK}; }}
+QPushButton#mainseg:checked {{ background: {HOVER}; color: {TEXT}; }}
 QFrame#segments {{ background: {RAISED}; border-radius: 8px; }}
 QFrame#pill {{ background: rgba(22, 22, 23, 232); border: 1px solid rgba(255, 255, 255, 22); border-radius: 11px; }}
+QFrame#dialog {{ background: {RAISED}; border: 1px solid {LINE}; border-radius: 12px; }}
+QLabel#dialogTitle {{ font-size: 15px; font-weight: 600; }}
+QProgressBar {{ background: {HOVER}; border: none; border-radius: 3px; }}
+QProgressBar::chunk {{ background: {TEXT}; border-radius: 3px; }}
 QFrame#toast {{ background: rgba(22, 22, 23, 240); border: 1px solid rgba(255, 255, 255, 30); border-radius: 9px; }}
 
 QComboBox {{ background: {CONTROL}; border: none; border-radius: 7px; padding: 7px 6px 7px 11px; }}
@@ -106,13 +111,13 @@ def star_polygon(center, radius):
     return points
 
 
-def draw_stars(painter, x, y, stars, radius=6.0, gap=15.0, off=FAINT):
+def draw_stars(painter, x, y, stars, radius=6.0, gap=15.0):
     """Vector stars stay sharp at every display scale. (x, y) is the first center."""
     painter.save()
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     for star in range(5):
         lit = star < stars
-        painter.setPen(QPen(QColor(ACCENT if lit else off), 1.0))
+        painter.setPen(QPen(QColor(ACCENT) if lit else QColor(255, 255, 255, 120), 1.0))
         painter.setBrush(QColor(ACCENT) if lit else Qt.BrushStyle.NoBrush)
         painter.drawPolygon(star_polygon(QPointF(x+star*gap, y), radius))
     painter.restore()
@@ -127,6 +132,24 @@ def draw_clear_star(painter, x, y, radius, color):
     painter.drawPolygon(star_polygon(QPointF(x, y), radius))
     painter.setPen(QPen(QColor(color), 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
     painter.drawLine(QPointF(x-radius, y+radius), QPointF(x+radius, y-radius))
+    painter.restore()
+
+
+def draw_heart(painter, rect, filled):
+    """White outline, filled when liked. A thin dark edge keeps it readable on a light photo."""
+    r = QRectF(rect)
+    x, y, w, h = r.x(), r.y(), r.width(), r.height()
+    path = QPainterPath(QPointF(x+w/2, y+h))
+    path.cubicTo(x-w*.2, y+h*.5, x+w*.08, y-h*.14, x+w/2, y+h*.24)
+    path.cubicTo(x+w*.92, y-h*.14, x+w*1.2, y+h*.5, x+w/2, y+h)
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.setPen(QPen(QColor(0, 0, 0, 110), 2.6))
+    painter.drawPath(path)
+    painter.setBrush(QColor(255, 255, 255) if filled else Qt.BrushStyle.NoBrush)
+    painter.setPen(QPen(QColor(255, 255, 255), 1.2))
+    painter.drawPath(path)
     painter.restore()
 
 

@@ -19,9 +19,9 @@ from PySide6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup, QCol
     QPushButton, QScrollBar, QSlider, QStackedWidget, QWidget)
 from PIL import Image
 from triphoto import PICK_NEUTRAL, PICK_REJECT, PICK_SELECT
-from triphoto_theme import ACCENT, ASSETS, BACKGROUNDS, FAINT, MUTED, REJECT, SELECT, TEXT, contrast_on, draw_check, draw_clear_star, draw_cross, draw_flag, draw_stars
+from triphoto_theme import ACCENT, ASSETS, BACKGROUNDS, FAINT, MUTED, REJECT, SELECT, TEXT, contrast_on, draw_check, draw_clear_star, draw_cross, draw_flag, draw_heart, draw_stars
 
-MODES = [('toile', 'Toile'), ('swipe', 'Swipe'), ('color', 'Couleur'), ('wall', 'Grille')]
+MODES = [('wall', 'Grille'), ('toile', 'Toile'), ('color', 'Couleur'), ('swipe', 'Swipe')]
 # What a swipe or a drag out of the grid does to a photo. Offered in both places.
 ACTIONS = [('none', 'Ne rien changer'), ('select', 'Retenir'), ('reject', 'Rejeter'), ('neutral', 'Neutre'),
            ('minus', 'Retirer une étoile'), ('plus', 'Ajouter une étoile'), ('star5', '5 étoiles'), ('star4', '4 étoiles'),
@@ -347,15 +347,29 @@ class Surface(QWidget):
     def zoom_text(self):
         return '100 %'
 
-    def clear_hit(self, position):
-        """The photo whose zero-star button lies under this point of the widget."""
+    def badge_hit(self, position):
+        """The photo whose button lies under this point of the widget, and which button."""
         return None
 
-    def clear_click(self, position):
-        photo = self.clear_hit(position)
-        if photo is None:
+    def badge_at(self, rect, photo, point, margin=4):
+        """Which button of a tile holds this point, in the coordinates of the tile."""
+        button = self.badge_layout(rect, photo)[0]
+        if button is not None and button.adjusted(-margin, -margin, margin, margin).contains(point):
+            return photo, 'clear'
+        heart = self.heart_rect(rect)
+        if heart is not None and heart.adjusted(-margin, -margin, margin, margin).contains(point):
+            return photo, 'heart'
+        return None
+
+    def badge_click(self, position):
+        hit = self.badge_hit(position)
+        if hit is None:
             return False
-        self.window_.change([photo], stars=0)
+        photo, kind = hit
+        if kind == 'heart':
+            self.window_.change([photo], liked=not photo.liked)
+        else:
+            self.window_.change([photo], stars=0)
         self.last_clear = time.monotonic()
         return True
 
@@ -363,10 +377,10 @@ class Surface(QWidget):
         """Clearing fast reads as a double click, which must not leave for the Tri page."""
         return time.monotonic()-self.last_clear < QApplication.doubleClickInterval()/1000
 
-    def hover_clear(self, position):
-        hit = self.clear_hit(position) is not None
+    def hover_badge(self, position):
+        hit = self.badge_hit(position)
         self.setCursor(Qt.CursorShape.PointingHandCursor) if hit else self.unsetCursor()
-        self.setToolTip('Retirer les étoiles' if hit else '')
+        self.setToolTip({'clear': 'Retirer les étoiles', 'heart': "J'aime"}[hit[1]] if hit else '')
 
     def targets(self):
         return self.window_.selected_photos() if self.active else []
@@ -426,8 +440,23 @@ class Surface(QWidget):
             return None, None
         return button, plate
 
+    def heart_rect(self, rect):
+        if rect.width() < 44 or rect.height() < 34:
+            return None
+        return QRectF(rect.right()-21, rect.top()+7, 14, 13)
+
+    def photo_rect(self, rect, photo):
+        """The photo itself inside the rect it is contained in."""
+        image = self.window_.best_image(photo)
+        aspect = image.width()/image.height() if image is not None else self.review.aspect(photo)
+        scale = min(rect.width()/aspect, rect.height())
+        return QRectF(rect.center().x()-scale*aspect/2, rect.center().y()-scale/2, scale*aspect, scale)
+
     def paint_badges(self, painter, rect, photo):
         """Stars and marker on a small dark plate, readable on any photo or background."""
+        heart = self.heart_rect(rect)
+        if heart is not None:
+            draw_heart(painter, heart, photo.liked)
         button, plate = self.badge_layout(rect, photo)
         if plate is None:
             return
@@ -442,7 +471,7 @@ class Surface(QWidget):
             draw_clear_star(painter, button.center().x(), button.center().y(), 5.5, TEXT)
         x = plate.left()+9
         if photo.stars:
-            draw_stars(painter, x, plate.center().y(), photo.stars, 4.5, 11.0, '#6a6a6d')
+            draw_stars(painter, x, plate.center().y(), photo.stars, 4.5, 11.0)
             x += 5*11
         icon = QRectF(x-3, plate.top()+5, 9, 9)
         if photo.pick == PICK_SELECT:
@@ -731,7 +760,7 @@ class WallView(Surface):
         painter.save()
         for zone in self.drop_zones():
             active = hovered and zone.contains(self.drag_position)
-            painter.fillRect(zone, QColor(217, 184, 114, 225) if active else QColor(15, 15, 16, 190))
+            painter.fillRect(zone, QColor(242, 242, 242, 225) if active else QColor(15, 15, 16, 190))
             painter.setPen(QColor('#131314' if active else TEXT))
             painter.drawText(zone.adjusted(10, 0, -10, 0), Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, label)
         photo = self.press[0]
@@ -782,17 +811,17 @@ class WallView(Surface):
     def zoom_text(self):
         return f'{self.width_percent} %' if self.layout_kind == 'staggered' else f'{round(self.row_height/ROW_HEIGHT*100)} %'
 
-    def clear_hit(self, position):
+    def badge_hit(self, position):
         point = position+QPointF(0, self.bar.value())
         for rect, photo in self.visible_tiles():
-            button = self.badge_layout(rect, photo)[0]
-            if button is not None and button.adjusted(-4, -4, 4, 4).contains(point):
-                return photo
+            hit = self.badge_at(rect, photo, point)
+            if hit:
+                return hit
         return None
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            if self.clear_click(event.position()):
+            if self.badge_click(event.position()):
                 return
             photo = self.tile_at(event.position())
             if photo:
@@ -804,7 +833,7 @@ class WallView(Surface):
 
     def mouseMoveEvent(self, event):
         if self.press is None:
-            self.hover_clear(event.position())
+            self.hover_badge(event.position())
             return
         if not self.dragging and (event.position()-self.press[1]).manhattanLength() > 14:
             self.dragging = True
@@ -825,7 +854,7 @@ class WallView(Surface):
                 self.review.drop_out(press[0])
 
     def mouseDoubleClickEvent(self, event):
-        if self.clear_click(event.position()) or self.just_cleared():
+        if self.badge_click(event.position()) or self.just_cleared():
             return
         photo = self.tile_at(event.position())
         if photo:
@@ -860,7 +889,8 @@ class ToileView(Surface):
         self.stack = []
         self.dealt = []
         self.available = set()
-        self.columns = int(review.settings.value('toile_columns', 8))
+        self.columns = max(2, min(16, int(review.settings.value('toile_columns', 8))))
+        self.loose = {}
         self.moved = False
         self.straight = review.settings.value('toile_straight', False, type=bool)
         self.scale_ = .6
@@ -887,22 +917,24 @@ class ToileView(Surface):
 
     def deal(self):
         photos = self.window_.photos
-        count = len(photos)
-        self.dealt = random.sample(photos, count)
+        self.dealt = random.sample(photos, len(photos))
         self.stack = list(self.dealt)
-        self.positions = {}
+        self.loose = {p.relative_path: (random.uniform(-55, 55), random.uniform(-45, 45), random.uniform(-4, 4)) for p in self.dealt}
         self.active = False
-        if count:
-            columns = min(self.columns, count)
-            rows = math.ceil(count/columns)
-            cells = list(range(count))
-            random.shuffle(cells)
-            for photo, cell in zip(self.dealt, cells):
-                x = (cell % columns-(columns-1)/2)*self.CELL_WIDTH+random.uniform(-55, 55)
-                y = (cell//columns-(rows-1)/2)*self.CELL_HEIGHT+random.uniform(-45, 45)
-                self.positions[photo.relative_path] = [x, y, random.uniform(-4, 4)]
+        self.arrange()
         self.fresh = True
         self.fit()
+
+    def arrange(self):
+        """Same order and same slight disorder, so changing the width does not deal again."""
+        self.positions = {}
+        if self.dealt:
+            columns = min(self.columns, len(self.dealt))
+            rows = math.ceil(len(self.dealt)/columns)
+            for cell, photo in enumerate(self.dealt):
+                dx, dy, angle = self.loose[photo.relative_path]
+                self.positions[photo.relative_path] = [(cell % columns-(columns-1)/2)*self.CELL_WIDTH+dx,
+                                                       (cell//columns-(rows-1)/2)*self.CELL_HEIGHT+dy, angle]
 
     def fit(self):
         if not self.positions or self.width() < 10:
@@ -912,7 +944,7 @@ class ToileView(Surface):
         span_w, span_h = max(xs)-min(xs)+460, max(ys)-min(ys)+430
         area_h = self.height()-TOP_CLEARANCE-BOTTOM_CLEARANCE
         # The whole width fits; what does not fit in height continues below.
-        self.scale_ = max(.06, min(1.3, (self.width()-36)/span_w))
+        self.scale_ = max(.06, min(3., (self.width()-36)/span_w))
         if span_h*self.scale_ <= area_h:
             y = (TOP_CLEARANCE-BOTTOM_CLEARANCE)/2-(max(ys)+min(ys))/2*self.scale_
         else:
@@ -931,7 +963,11 @@ class ToileView(Surface):
 
     def set_columns(self, value):
         self.columns = value
-        self.shuffle()
+        self.arrange()
+        self.fresh = True
+        self.fit()
+        self.update()
+        self.schedule_requests()
 
     def resizeEvent(self, event):
         if self.fresh and self.stack:
@@ -986,7 +1022,7 @@ class ToileView(Surface):
                 painter.drawRect(local.adjusted(-2, -2, 2, 2))
             painter.restore()
 
-    def clear_hit(self, position):
+    def badge_hit(self, position):
         # Tiles are tilted and scaled: work in the coordinates of each tile, top one first.
         world = self.to_world(position)
         margin = min(30., 4/self.scale_)
@@ -997,9 +1033,9 @@ class ToileView(Surface):
             if not self.straight:
                 angle = math.radians(-self.positions[photo.relative_path][2])
                 point = QPointF(point.x()*math.cos(angle)-point.y()*math.sin(angle), point.x()*math.sin(angle)+point.y()*math.cos(angle))
-            button = self.badge_layout(local, photo)[0]
-            if button is not None and button.adjusted(-margin, -margin, margin, margin).contains(point):
-                return photo
+            hit = self.badge_at(local, photo, point, margin)
+            if hit:
+                return hit
             if local.contains(point):
                 return None
         return None
@@ -1015,7 +1051,7 @@ class ToileView(Surface):
         self.stack = [p for p in self.stack if p is not photo]+[photo]
 
     def mousePressEvent(self, event):
-        if event.button() != Qt.MouseButton.LeftButton or self.clear_click(event.position()):
+        if event.button() != Qt.MouseButton.LeftButton or self.badge_click(event.position()):
             return
         photo = self.tile_at(event.position())
         self.drag = (photo, event.position())
@@ -1028,7 +1064,7 @@ class ToileView(Surface):
 
     def mouseMoveEvent(self, event):
         if self.drag is None:
-            self.hover_clear(event.position())
+            self.hover_badge(event.position())
             return
         photo, last = self.drag
         delta = event.position()-last
@@ -1051,7 +1087,7 @@ class ToileView(Surface):
         self.unsetCursor()
 
     def mouseDoubleClickEvent(self, event):
-        if self.clear_click(event.position()) or self.just_cleared():
+        if self.badge_click(event.position()) or self.just_cleared():
             return
         photo = self.tile_at(event.position())
         if photo:
@@ -1186,6 +1222,21 @@ class SwipeView(Surface):
     def card_area(self):
         return QRectF(40, TOP_CLEARANCE, max(1, self.width()-80), max(1, self.height()-TOP_CLEARANCE-BOTTOM_CLEARANCE))
 
+    def swipe_heart(self):
+        """In widget coordinates, in the corner of what is seen of the photo."""
+        photo = self.current()
+        if photo is None:
+            return None
+        area = self.card_area()
+        local = QRectF(-area.width()/2, -area.height()/2, area.width(), area.height())
+        shown = self.photo_rect(self.framed(local), photo).translated(area.center())
+        shown = shown.intersected(QRectF(0, TOP_CLEARANCE, self.width(), self.height()-TOP_CLEARANCE-BOTTOM_CLEARANCE))
+        return QRectF(shown.right()-23, shown.top()+8, 15, 14)
+
+    def on_heart(self, position):
+        heart = self.swipe_heart()
+        return heart is not None and heart.adjusted(-4, -4, 4, 4).contains(position)
+
     def framed(self, local):
         """Where a photo goes inside its card, once zoomed and moved."""
         width, height = local.width()*self.zoom_level, local.height()*self.zoom_level
@@ -1257,6 +1308,8 @@ class SwipeView(Surface):
             painter.setPen(QColor(TEXT))
             painter.drawText(box, Qt.AlignmentFlag.AlignCenter, label)
         painter.restore()
+        if self.offset.isNull():
+            draw_heart(painter, self.swipe_heart(), photo.liked)
         painter.setPen(self.hint_color())
         painter.setFont(QFont(self.font().family(), 9))
         painter.drawText(QRectF(18, self.height()-44, 120, 24), Qt.AlignmentFlag.AlignVCenter, f'{self.index+1} / {len(self.deck)}')
@@ -1264,6 +1317,9 @@ class SwipeView(Surface):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.current():
             self.finish_animation()
+            if self.on_heart(event.position()):
+                self.window_.toggle_like()
+                return
             # Zoomed in, dragging moves the photo as on the Tri page; the keys still decide.
             if self.zoom_level > 1:
                 self.pan_drag = event.position()
@@ -1276,7 +1332,9 @@ class SwipeView(Surface):
             self.pan += event.position()-self.pan_drag
             self.pan_drag = event.position()
             self.update()
-        elif self.press is not None:
+        elif self.press is None:
+            self.setCursor(Qt.CursorShape.PointingHandCursor) if self.on_heart(event.position()) else self.unsetCursor()
+        else:
             self.offset = QPointF(event.position().x()-self.press.x(), (event.position().y()-self.press.y())*.25)
             self.update()
 
@@ -1294,7 +1352,9 @@ class SwipeView(Surface):
             self.animate_to(QPointF(), 0)
 
     def mouseDoubleClickEvent(self, event):
-        if self.current():
+        if self.on_heart(event.position()):
+            self.window_.toggle_like()
+        elif self.current():
             self.window_.open_in_tri(self.current())
 
     def animate_to(self, destination, flying):
@@ -1434,8 +1494,8 @@ class ReviewPage(QWidget):
         self.views = {'toile': ToileView(self), 'swipe': SwipeView(self), 'color': WallView(self, True), 'wall': WallView(self)}
         for view in self.views.values():
             self.stack.addWidget(view)
-        saved = self.settings.value('review_mode', 'toile')
-        self.mode = saved if saved in self.views else 'toile'
+        saved = self.settings.value('review_mode', 'wall')
+        self.mode = saved if saved in self.views else 'wall'
         self.stack.setCurrentWidget(self.views[self.mode])
         self.bar = RatingBar(window, self)
         self.bar.rated.connect(window.rate)
@@ -1541,8 +1601,16 @@ class ReviewPage(QWidget):
         self.option_button(row, 'Mélanger', self.shuffle)
         self.straight_button = self.option_button(row, 'Photos droites', toile.set_straight, True, toile.straight)
         row.addWidget(QLabel('En largeur', objectName='muted'))
-        self.option_combo(row, [(n, f'{n} photos') for n in (4, 6, 8, 10, 12, 16)], 'toile_columns', 8, 100,
-                          lambda value: (toile.set_columns(int(value)), self.sync_bar()))
+        self.columns_slider = QSlider(Qt.Orientation.Horizontal)
+        self.columns_slider.setRange(2, 16)
+        self.columns_slider.setFixedWidth(110)
+        self.columns_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.columns_slider.setValue(toile.columns)
+        self.columns_slider.valueChanged.connect(self.set_columns)
+        row.addWidget(self.columns_slider)
+        self.columns_label = QLabel(str(toile.columns))
+        self.columns_label.setFixedWidth(18)
+        row.addWidget(self.columns_label)
         swipe_left, row = self.option_pill()
         row.addWidget(QLabel('À gauche', objectName='muted'))
         self.swipe_left = self.action_combo(row, 'swipe_left')
@@ -1772,6 +1840,11 @@ class ReviewPage(QWidget):
         self.mono = not self.mono
         self.mono_button.setChecked(self.mono)
         self.update_view()
+
+    def set_columns(self, value):
+        self.settings.setValue('toile_columns', value)
+        self.columns_label.setText(str(value))
+        self.views['toile'].set_columns(value)
 
     def set_color_layout(self, value):
         self.views['color'].layout_kind = value
