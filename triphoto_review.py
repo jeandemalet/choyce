@@ -180,9 +180,50 @@ class Swatch(QAbstractButton):
         painter.setBrush(QColor(self.color) if self.color else Qt.BrushStyle.NoBrush)
         painter.drawEllipse(QRectF(2, 2, 16, 16))
         if not self.color:
+            # The free choice shows the plus sign until a custom color is active.
             painter.setPen(QPen(QColor(MUTED), 1.3))
             painter.drawLine(QPointF(10, 6.5), QPointF(10, 13.5))
             painter.drawLine(QPointF(6.5, 10), QPointF(13.5, 10))
+
+
+class BackgroundPicker(QFrame):
+    """Preset greys and any other color, shared by the Tri and Revoir pages."""
+
+    def __init__(self, window, parent=None, floating=False):
+        super().__init__(parent)
+        self.window = window
+        self.custom_tip = 'Autre couleur…'
+        row = QHBoxLayout(self)
+        row.setContentsMargins(12, 0, 12, 0) if floating else row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        if floating:
+            self.setObjectName('pill')
+            self.setFixedHeight(46)
+        self.swatches = []
+        for label, color in BACKGROUNDS:
+            swatch = Swatch(color, label)
+            swatch.clicked.connect(lambda checked=False, value=color: self.window.set_background(value))
+            self.swatches.append(swatch)
+            row.addWidget(swatch)
+        self.custom = Swatch('', self.custom_tip)
+        self.custom.clicked.connect(self.pick_custom)
+        row.addWidget(self.custom)
+        self.sync()
+
+    def sync(self):
+        background = self.window.viewer.background
+        presets = [swatch.color for swatch in self.swatches]
+        for swatch in self.swatches:
+            swatch.setChecked(swatch.color == background)
+        self.custom.color = '' if background in presets else background
+        self.custom.setChecked(background not in presets)
+        self.custom.update()
+
+    def pick_custom(self):
+        color = QColorDialog.getColor(QColor(self.window.viewer.background), self.window, 'Couleur du fond')
+        if color.isValid():
+            self.window.set_background(color.name())
+        self.sync()
 
 
 class Surface(QWidget):
@@ -1001,16 +1042,8 @@ class ReviewPage(QWidget):
             button.clicked.connect(slot)
             row.addWidget(button)
         row.addSpacing(8)
-        self.swatches = []
-        for label, color in BACKGROUNDS:
-            swatch = Swatch(color, label)
-            swatch.clicked.connect(lambda checked=False, value=color: self.window.set_background(value))
-            self.swatches.append(swatch)
-            row.addWidget(swatch)
-        custom = Swatch('', 'Autre couleur…')
-        custom.clicked.connect(self.pick_custom_background)
-        self.swatches.append(custom)
-        row.addWidget(custom)
+        self.picker = BackgroundPicker(self.window)
+        row.addWidget(self.picker)
         self.sync_toolbar()
 
     def apply_default_swipe_rule(self):
@@ -1023,16 +1056,9 @@ class ReviewPage(QWidget):
     def sync_toolbar(self):
         self.swipe_rule.setVisible(self.mode == 'swipe')
         self.shuffle_button.setVisible(self.mode in ('toile', 'swipe', 'duel'))
-        for swatch in self.swatches:
-            swatch.setChecked(swatch.color == self.window.viewer.background)
+        self.picker.sync()
         self.pill.adjustSize()
         self.place_overlays()
-
-    def pick_custom_background(self):
-        color = QColorDialog.getColor(QColor(self.window.viewer.background), self, 'Couleur du fond')
-        if color.isValid():
-            self.window.set_background(color.name())
-        self.sync_toolbar()
 
     def background_menu(self):
         return self.window.viewer.background_menu(self)

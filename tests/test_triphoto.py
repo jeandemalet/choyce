@@ -266,7 +266,7 @@ def test_review_modes(base):
     assert toile.positions[key] != position
     # Background, mirror and black and white.
     window.set_background('#ffffff')
-    assert window.viewer.background == '#ffffff' and any(s.isChecked() for s in review.swatches)
+    assert window.viewer.background == '#ffffff' and any(s.isChecked() for s in review.picker.swatches)
     review.toggle_mono()
     review.toggle_mirror()
     wait(80)
@@ -280,6 +280,35 @@ def test_review_modes(base):
 class _Event:
     def position(self):
         return QPointF(0, 0)
+
+
+def test_background_color(base):
+    clear_settings()
+    root = make_project(base/'background', 4)
+    window = open_window(root)
+    # Presets and free color, from the Tri page and from the Revoir page.
+    window.viewer_picker.swatches[0].click()
+    assert window.viewer.background == '#ffffff' and window.review.picker.swatches[0].isChecked()
+    original = triphoto_review.QColorDialog.getColor
+    triphoto_review.QColorDialog.getColor = staticmethod(lambda *args, **kwargs: triphoto_review.QColor('#7a3b52'))
+    try:
+        window.viewer_picker.custom.click()
+        assert window.viewer.background == '#7a3b52'
+        assert window.viewer_picker.custom.isChecked() and window.review.picker.custom.color == '#7a3b52'
+        window.set_review(True)
+        window.review.picker.swatches[4].click()
+        assert window.viewer.background == '#000000' and not window.review.picker.custom.color
+        window.review.picker.custom.click()
+        assert window.viewer.background == '#7a3b52'
+    finally:
+        triphoto_review.QColorDialog.getColor = original
+    # The painted surfaces read the same color, and it survives a restart.
+    window.review.set_mode('wall')
+    wait(60)
+    assert window.review.view().grab().toImage().pixelColor(4, 4).name() == '#7a3b52'
+    window.close()
+    assert triphoto_qt.Viewer().background == '#7a3b52'
+    clear_settings()
 
 
 def test_broken_file_does_not_stop_preload(base):
@@ -317,7 +346,7 @@ def main():
     app.setStyleSheet(triphoto_qt.STYLE)
     base = Path(tempfile.mkdtemp(prefix='triphoto-tests-'))
     tests = [test_legacy_session, test_nested_session_ignored, test_dominant_color, test_recents, test_shortcuts,
-             test_window_rating_and_undo, test_review_modes, test_broken_file_does_not_stop_preload, test_recent_project_cycle]
+             test_window_rating_and_undo, test_review_modes, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle]
     failures = 0
     try:
         for test in tests:

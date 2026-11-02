@@ -19,7 +19,7 @@ from PIL import Image, ImageCms, ImageWin
 from triphoto import (PhotoSession, sort_photos, SORT_OPTIONS, load_screen_preview, original_inventory,
     export_original_copy, EXPORT_DIR_NAME, PICK_NEUTRAL, PICK_REJECT, PICK_SELECT)
 from triphoto_prefs import (ALIASES, PreferencesDialog, Recents, ScanJob, age_label, path_key, shortcut_map)
-from triphoto_review import RatingBar, ReviewPage
+from triphoto_review import BackgroundPicker, RatingBar, ReviewPage
 from triphoto_theme import (ACCENT, BACKGROUNDS, FAINT, INK, RAISED, REJECT, SELECT, STYLE, TEXT,
     contrast_on, draw_check, draw_cross, draw_flag, draw_stars)
 
@@ -576,6 +576,8 @@ class Window(QMainWindow):
         self.viewer_bar.rated.connect(self.rate)
         self.viewer_bar.marked.connect(self.set_pick)
         self.viewer_bar.hide()
+        self.viewer_picker = BackgroundPicker(self, self.viewer, floating=True)
+        self.viewer_picker.hide()
         self.viewer_bar_timer = QTimer(self)
         self.viewer_bar_timer.setSingleShot(True)
         self.viewer_bar_timer.timeout.connect(self.hide_viewer_bar)
@@ -700,21 +702,29 @@ class Window(QMainWindow):
         self.place_viewer_bar()
         self.viewer_bar.update()
         self.viewer_bar.show()
+        self.viewer_picker.show()
         self.viewer_bar_timer.start(1700)
 
     def hide_viewer_bar(self):
-        if self.viewer_bar.underMouse():
+        if self.viewer_bar.underMouse() or self.viewer_picker.underMouse():
             self.viewer_bar_timer.start(1000)
         else:
             self.viewer_bar.hide()
+            self.viewer_picker.hide()
 
     def place_viewer_bar(self):
-        self.viewer_bar.move((self.viewer.width()-self.viewer_bar.width())//2, self.viewer.height()-self.viewer_bar.height()-16)
+        self.viewer_picker.adjustSize()
+        x = (self.viewer.width()-self.viewer_bar.width()-self.viewer_picker.width()-8)//2
+        y = self.viewer.height()-self.viewer_bar.height()-16
+        self.viewer_bar.move(x, y)
+        self.viewer_picker.move(x+self.viewer_bar.width()+8, y)
 
     def set_background(self, color):
         self.viewer.set_background(color)
 
     def background_changed(self):
+        self.viewer_picker.sync()
+        self.place_viewer_bar()
         self.review.sync_toolbar()
         self.review.update_view()
 

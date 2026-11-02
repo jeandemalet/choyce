@@ -16,7 +16,7 @@ Sous Windows, double-cliquez ensuite sur `Lancer TriPhoto.bat`. Ailleurs, lancez
 
 Le menu **Projet** ouvre un dossier, liste les projets récents et retrouve les anciens projets d'un disque. L'accueil les présente aussi sous forme de cartes. Un projet dont le disque est débranché reste dans la liste.
 
-Le bandeau du haut filtre par note et par marqueur, et trie les photos. Au survol de la photo, une petite barre donne accès aux étoiles et au marqueur. Un clic droit change la couleur du fond.
+Le bandeau du haut filtre par note et par marqueur, et trie les photos. Au mouvement de la souris sur la photo, une petite barre donne accès aux étoiles, au marqueur et à la couleur du fond : cinq gris ou n'importe quelle autre couleur avec le bouton +. Le clic droit et la touche `B` changent aussi le fond.
 
 ## La page Revoir
 
