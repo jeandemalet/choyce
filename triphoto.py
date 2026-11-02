@@ -24,6 +24,7 @@ from PIL import Image, ImageCms, ImageOps, ImageTk
 APP_NAME = "TriPhoto"
 SESSION_DIR_NAME = "TriPhoto_Session"
 SESSION_FILE_NAME = "session.json"
+SESSION_VERSION = 2
 EXPORT_DIR_NAME = "Export_5_Etoiles"
 SUPPORTED_EXTENSIONS = {
     ".jpg",
@@ -62,12 +63,25 @@ PRELOAD_RADIUS = 2
 CANVAS_PADDING = 40
 
 
+PICK_NEUTRAL, PICK_SELECT, PICK_REJECT = "neutral", "select", "reject"
+PICK_VALUES = (PICK_NEUTRAL, PICK_SELECT, PICK_REJECT)
+
+
 @dataclass
 class Photo:
     path: Path
     relative_path: str
     stars: int = 0
-    flagged: bool = False
+    pick: str = PICK_NEUTRAL
+
+    # The historical flag is the "select" state of the three-state marker.
+    @property
+    def flagged(self) -> bool:
+        return self.pick == PICK_SELECT
+
+    @flagged.setter
+    def flagged(self, value: bool) -> None:
+        self.pick = PICK_SELECT if value else PICK_NEUTRAL
 
 
 def norm_path(path: Path) -> Path:
@@ -94,9 +108,11 @@ def discover_photos(root: Path) -> list[Photo]:
     for path in sorted(root.rglob("*"), key=lambda p: str(p).lower()):
         if not path.is_file() or path.suffix.lower() not in SUPPORTED_EXTENSIONS:
             continue
-        if is_inside(path, root / SESSION_DIR_NAME):
+        # Also skips the session folders of projects nested in this one.
+        rel_path = path.relative_to(root)
+        if SESSION_DIR_NAME.lower() in (part.lower() for part in rel_path.parts):
             continue
-        rel = path.relative_to(root).as_posix()
+        rel = rel_path.as_posix()
         photos.append(Photo(path=path, relative_path=rel))
     return photos
 
@@ -239,17 +255,23 @@ class PhotoSession:
         try:
             data = json.loads(self.session_file.read_text(encoding="utf-8"))
             self.sort_mode = data.get("sort_mode", "name_asc") if data.get("sort_mode", "name_asc") in SORT_OPTIONS else "name_asc"
+            if int(data.get("version", 1)) < SESSION_VERSION:
+                # First opening by this version: keep the older file once.
+                backup = self.session_dir / f"session.v{int(data.get('version', 1))}.bak.json"
+                if not backup.exists():
+                    shutil.copy2(self.session_file, backup)
             saved = {
                 item.get("relative_path"): {
                     "stars": int(item.get("stars", 0)),
-                    "flagged": bool(item.get("flagged", False)),
+                    "pick": item.get("pick") if item.get("pick") in PICK_VALUES
+                        else (PICK_SELECT if item.get("flagged", False) else PICK_NEUTRAL),
                 }
                 for item in data.get("photos", [])
             }
             for photo in self.photos:
                 state = saved.get(photo.relative_path, {})
                 photo.stars = max(0, min(5, state.get("stars", 0)))
-                photo.flagged = state.get("flagged", False)
+                photo.pick = state.get("pick", PICK_NEUTRAL)
             self.photos = sort_photos(self.photos, self.sort_mode)
             self.created_at = data.get("created_at", self.created_at)
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
@@ -258,7 +280,7 @@ class PhotoSession:
     def save(self) -> None:
         payload = {
             "application": APP_NAME,
-            "version": 1,
+            "version": SESSION_VERSION,
             "created_at": self.created_at,
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "root": str(self.root),
@@ -267,7 +289,9 @@ class PhotoSession:
             "originals_policy": "Original files are read-only to this application.",
             "inventory": original_inventory(self.root),
             "photos": [
-                {"relative_path": photo.relative_path, "stars": photo.stars, "flagged": photo.flagged}
+                # "flagged" stays written so that older versions can read the file.
+                {"relative_path": photo.relative_path, "stars": photo.stars,
+                 "flagged": photo.flagged, "pick": photo.pick}
                 for photo in self.photos
             ],
         }
@@ -275,12 +299,12 @@ class PhotoSession:
 
     def refresh(self) -> None:
         saved = {
-            photo.relative_path: (photo.stars, photo.flagged)
+            photo.relative_path: (photo.stars, photo.pick)
             for photo in self.photos
         }
         self.photos = sort_photos(discover_photos(self.root), self.sort_mode)
         for photo in self.photos:
-            photo.stars, photo.flagged = saved.get(photo.relative_path, (0, False))
+            photo.stars, photo.pick = saved.get(photo.relative_path, (0, PICK_NEUTRAL))
 
 
 class ImageCache:

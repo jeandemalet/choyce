@@ -6,7 +6,7 @@ if %errorlevel%==0 (
     py -3 -c "import PIL, PySide6" >nul 2>nul
     if errorlevel 1 (
         echo Pillow ou PySide6 est absent de Python 3.
-        echo Installer les dependances avec : py -3 -m pip install Pillow PySide6
+        echo Installer les dependances avec : py -3 -m pip install -r requirements.txt
         pause
         exit /b 1
     )
@@ -15,7 +15,7 @@ if %errorlevel%==0 (
     python -c "import PIL, PySide6" >nul 2>nul
     if errorlevel 1 (
         echo Pillow ou PySide6 est absent de Python.
-        echo Installer les dependances avec : python -m pip install Pillow PySide6
+        echo Installer les dependances avec : python -m pip install -r requirements.txt
         pause
         exit /b 1
     )

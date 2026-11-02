@@ -1,47 +1,61 @@
-"""High-DPI Qt interface. Original files and session format stay unchanged."""
+"""High-DPI Qt interface. Original files stay unchanged; older sessions remain readable."""
 from __future__ import annotations
 
 import argparse
 import hashlib
 import os
 import math
+import time
 from io import BytesIO
 from pathlib import Path
 from collections import OrderedDict
 
 from PySide6.QtCore import Qt, QSize, QRectF, QPointF, Signal, Slot, QObject, QRunnable, QThreadPool, QTimer, QItemSelectionModel, QSettings
-from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QFont, QShortcut, QKeySequence, QColorSpace, QPolygonF, QPen
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QComboBox, QSplitter, QListWidget, QListWidgetItem,
-    QStackedWidget, QAbstractItemView, QFileDialog, QMessageBox, QStyledItemDelegate, QStyle, QMenu)
+from PySide6.QtGui import QImage, QPainter, QPainterPath, QColor, QFont, QShortcut, QKeySequence, QColorSpace, QPen
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QLabel, QPushButton, QComboBox, QSplitter, QListWidget, QListWidgetItem, QFrame, QScrollArea, QButtonGroup,
+    QStackedWidget, QAbstractItemView, QFileDialog, QMessageBox, QStyledItemDelegate, QStyle, QMenu, QColorDialog)
 from PIL import Image, ImageCms, ImageWin
-from triphoto import (PhotoSession, sort_photos, SORT_OPTIONS, STAR_FILTER_OPTIONS,
-    FLAG_FILTER_OPTIONS, load_screen_preview, load_srgb, original_inventory,
-    export_original_copy, EXPORT_DIR_NAME)
+from triphoto import (PhotoSession, sort_photos, SORT_OPTIONS, load_screen_preview, original_inventory,
+    export_original_copy, EXPORT_DIR_NAME, PICK_NEUTRAL, PICK_REJECT, PICK_SELECT)
+from triphoto_prefs import (ALIASES, PreferencesDialog, Recents, ScanJob, age_label, path_key, shortcut_map)
+from triphoto_review import RatingBar, ReviewPage
+from triphoto_theme import (ACCENT, BACKGROUNDS, FAINT, INK, RAISED, REJECT, SELECT, STYLE, TEXT,
+    contrast_on, draw_check, draw_cross, draw_flag, draw_stars)
+
+# Tests point this to a separate store, so that they never touch the user's settings.
+SETTINGS_SCOPE = os.environ.get('TRIPHOTO_SETTINGS', 'TriPhoto')
+ROW_HEIGHT = 152
+EXPORT_PICKS_DIR_NAME = 'Export_Retenues'
+STAR_FILTERS = {'all': 'Toutes les notes', 'ge4': '4 étoiles et plus', 'ge3': '3 étoiles et plus', 'ge2': '2 étoiles et plus',
+    'ge1': '1 étoile et plus', 5: '5 étoiles', 4: '4 étoiles', 3: '3 étoiles', 2: '2 étoiles', 1: '1 étoile', 0: '0 étoile'}
+FLAG_FILTERS = {'all': 'Tous les drapeaux', 'select': 'Drapeaux uniquement', 'unflagged': 'Sans drapeau'}
+PICK_FILTERS = {'all': 'Tous les marqueurs', 'select': 'Retenues', 'neutral': 'Neutres', 'reject': 'Rejetées', 'unrejected': 'Sans les rejetées'}
 
 
-STYLE = """
-QWidget { background: #202124; color: #e4e5e7; font-family: 'Segoe UI'; font-size: 13px; }
-QMainWindow { background: #17181a; }
-QLabel#brand { font-size: 17px; font-weight: 600; }
-QLabel#muted { color: #969aa2; }
-QWidget#header, QWidget#footer { background: #242528; }
-QPushButton { background: #303236; border: 1px solid #414348; border-radius: 6px; padding: 8px 14px; }
-QPushButton:hover { background: #3b3e43; border-color: #757b84; }
-QPushButton:pressed { background: #484d54; }
-QPushButton#primary { background: #d5dbe2; color: #202124; border-color: #d5dbe2; font-weight: 600; }
-QPushButton#primary:hover { background: #eef1f5; }
-QComboBox { background: #303236; border: 1px solid #414348; border-radius: 6px; padding: 7px 10px; }
-QComboBox::drop-down { border: none; width: 22px; }
-QComboBox QAbstractItemView { background: #303236; selection-background-color: #4b525c; }
-QListWidget { background: #242528; border: none; outline: none; }
-QScrollBar:vertical { background: #242528; width: 10px; margin: 4px 0; }
-QScrollBar::handle:vertical { background: #555b64; border-radius: 4px; min-height: 35px; }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
-QSplitter::handle { background: #17181a; width: 3px; }
-QToolTip { background: #34373c; color: #eee; border: 1px solid #555; padding: 6px; }
-"""
+def app_settings():
+    return QSettings(SETTINGS_SCOPE, 'TriPhoto')
+
+
+def stars_match(photo, key):
+    if key == 'all':
+        return True
+    if isinstance(key, str):
+        return photo.stars >= int(key[2:])
+    return photo.stars == key
+
+
+def marker_matches(photo, key):
+    return {'all': True, 'select': photo.pick == PICK_SELECT, 'neutral': photo.pick == PICK_NEUTRAL,
+            'reject': photo.pick == PICK_REJECT, 'unrejected': photo.pick != PICK_REJECT,
+            'unflagged': photo.pick != PICK_SELECT}.get(key, True)
+
+
+def project_label(path):
+    """Display name of a project; "Output" says little, the folder above names the wedding."""
+    path = Path(path)
+    name = path.name or str(path)
+    return f'{path.parent.name} / {name}' if name.lower() == 'output' and path.parent.name else name
 
 
 def qt_image(image, profile=None):
@@ -73,12 +87,20 @@ class Loader(QRunnable):
             # An intermediate sRGB JPEG would clip colors from a P3 original.
             cache_path = None
             image = None
-            if self.side == 1000:
+            if self.side in (400, 1000) and self.cache_dir is not None:
                 stat = self.path.stat()
                 monitor = hashlib.sha256(self.display_profile or b'sRGB').hexdigest()
                 token = hashlib.sha256(f'qt-direct-v1|{self.path}|{stat.st_size}|{stat.st_mtime_ns}|{monitor}'.encode()).hexdigest()
                 cache_path = self.cache_dir / f'qt-{token}.png'
-                if cache_path.exists():
+                if self.side == 400 and cache_path.exists():
+                    # A persistent preview is far cheaper to reduce than the original.
+                    try:
+                        with Image.open(cache_path) as cached:
+                            image = cached.convert('RGB')
+                        image.thumbnail((400, 400), Image.Resampling.BILINEAR)
+                    except (OSError, ValueError):
+                        image = None
+                elif self.side == 1000 and cache_path.exists():
                     try:
                         with Image.open(cache_path) as cached:
                             image = cached.convert('RGB')
@@ -87,7 +109,7 @@ class Loader(QRunnable):
                         image = None
             if image is None:
                 image = load_screen_preview(self.path, self.side, target)
-                if cache_path is not None:
+                if cache_path is not None and self.side == 1000:
                     temporary = cache_path.with_suffix('.tmp')
                     image.save(temporary, format='PNG', compress_level=1,
                                icc_profile=self.display_profile or b'')
@@ -111,6 +133,8 @@ class Loader(QRunnable):
 class Viewer(QWidget):
     zoomChanged = Signal(float)
     resized = Signal()
+    activity = Signal()
+    backgroundChanged = Signal()
 
     def __init__(self):
         super().__init__()
@@ -119,15 +143,16 @@ class Viewer(QWidget):
         self.pan = QPointF()
         self.drag = None
         self.message = 'Ouvrez un dossier pour commencer'
-        self.settings = QSettings('TriPhoto', 'TriPhoto')
+        self.settings = app_settings()
         self.background = self.settings.value('background', '#808080')
         self.setMinimumSize(360, 260)
+        self.setMouseTracking(True)
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor(self.background))
         if self.image.isNull():
-            painter.setPen(QColor('#9298a1'))
+            painter.setPen(QColor(contrast_on(self.background)))
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.message)
             return
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
@@ -170,6 +195,8 @@ class Viewer(QWidget):
             self.pan += event.position()-self.drag
             self.drag = event.position()
             self.update()
+        else:
+            self.activity.emit()
 
     def mouseReleaseEvent(self, event):
         self.drag = None
@@ -191,15 +218,25 @@ class Viewer(QWidget):
         self.background = color
         self.settings.setValue('background', color)
         self.update()
+        self.backgroundChanged.emit()
 
-    def contextMenuEvent(self, event):
-        menu = QMenu(self)
-        for label, color in [('Blanc', '#ffffff'), ('Gris clair', '#bfbfbf'),
-                             ('Gris moyen', '#808080'), ('Gris foncé', '#404040'), ('Noir', '#000000')]:
+    def background_menu(self, parent):
+        menu = QMenu(parent)
+        for label, color in BACKGROUNDS:
             action = menu.addAction(label)
             action.setCheckable(True)
             action.setChecked(self.background == color)
             action.triggered.connect(lambda checked=False, value=color: self.set_background(value))
+        menu.addAction('Autre couleur…', self.pick_background)
+        return menu
+
+    def pick_background(self):
+        color = QColorDialog.getColor(QColor(self.background), self, 'Couleur du fond')
+        if color.isValid():
+            self.set_background(color.name())
+
+    def contextMenuEvent(self, event):
+        menu = self.background_menu(self)
         menu.addSeparator()
         menu.addAction('Ajuster la photo', lambda: self.set_zoom(1))
         menu.exec(event.globalPos())
@@ -211,63 +248,261 @@ class PhotoDelegate(QStyledItemDelegate):
         self.window = window
 
     def sizeHint(self, option, index):
-        return QSize(260, 114)
+        return QSize(250, ROW_HEIGHT)
+
+    def card(self, option):
+        return QRectF(option.rect.adjusted(7, 3, -7, -3))
 
     def paint(self, painter, option, index):
         photo = index.data(Qt.ItemDataRole.UserRole)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
-        rect = option.rect.adjusted(4, 2, -3, -2)
+        rect = self.card(option)
+        thumb = QRectF(rect.x(), rect.y(), rect.width(), rect.height()-28)
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QColor('#717b88') if selected else QColor('#34363b'))
-        painter.setBrush(QColor('#343940') if selected else QColor('#292b2f'))
-        painter.drawRoundedRect(rect, 7, 7)
-        thumb = QRectF(rect.x()+8, rect.y()+8, 112, 72)
-        painter.fillRect(thumb, QColor('#17181a'))
-        image = self.window.cache.get((str(photo.path), 400))
+        clip = QPainterPath()
+        clip.addRoundedRect(thumb, 5, 5)
+        painter.fillPath(clip, QColor(INK))
+        image = self.window.cache.get((str(photo.path), 400)) or self.window.best_image(photo)
         if image is not None:
-            size = image.size().scaled(QSize(112, 72)*self.window.devicePixelRatioF(), Qt.AspectRatioMode.KeepAspectRatio)
-            width, height = size.width()/self.window.devicePixelRatioF(), size.height()/self.window.devicePixelRatioF()
+            ratio = min(thumb.width()/image.width(), thumb.height()/image.height())
+            width, height = image.width()*ratio, image.height()*ratio
+            target = QRectF(thumb.center().x()-width/2, thumb.center().y()-height/2, width, height)
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-            painter.drawImage(QRectF(thumb.center().x()-width/2, thumb.center().y()-height/2, width, height), image)
-        painter.setPen(QColor('#e1e4e8'))
-        painter.drawText(QRectF(rect.x()+132, rect.y()+10, rect.width()-172, 24), str(index.row()+1).zfill(3))
-        font = QFont('Segoe UI', 9)
-        painter.setFont(font)
-        name = painter.fontMetrics().elidedText(photo.path.name, Qt.TextElideMode.ElideMiddle, max(20, rect.width()-28))
-        painter.setPen(QColor('#aeb4be'))
-        painter.drawText(QRectF(rect.x()+10, rect.bottom()-24, rect.width()-20, 20), name)
-        # Vector stars stay sharp at every display scale, with a clear gap.
-        for star in range(5):
-            center = QPointF(rect.x()+140+star*22, rect.y()+60)
-            points = QPolygonF()
-            for vertex in range(10):
-                angle = -math.pi/2+vertex*math.pi/5
-                radius = 8 if vertex % 2 == 0 else 3.5
-                points.append(center+QPointF(math.cos(angle)*radius, math.sin(angle)*radius))
-            painter.setPen(QPen(QColor('#c6b58c') if star < photo.stars else QColor('#707780'), 1.1))
-            painter.setBrush(QColor('#c6b58c') if star < photo.stars else Qt.BrushStyle.NoBrush)
-            painter.drawPolygon(points)
-        painter.setPen(QColor('#d8c493') if photo.flagged else QColor('#7e858f'))
-        painter.drawText(QRectF(rect.right()-34, rect.y()+12, 25, 24), '⚑')
+            painter.setClipPath(clip)
+            painter.drawImage(target, image)
+            if photo.pick == PICK_REJECT:
+                painter.fillRect(target, QColor(0, 0, 0, 135))
+            painter.setClipping(False)
+        if selected:
+            painter.setPen(QPen(QColor(ACCENT), 1.6))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(thumb.adjusted(.8, .8, -.8, -.8), 5, 5)
+        middle = rect.bottom()-13
+        draw_stars(painter, rect.x()+8, middle, photo.stars, 5.5, 14.0)
+        painter.setFont(QFont(option.font.family(), 8))
+        painter.setPen(QColor(TEXT if selected else FAINT))
+        painter.drawText(QRectF(rect.right()-74, middle-10, 42, 20), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, str(index.row()+1).zfill(3))
+        icon = QRectF(rect.right()-19, middle-6.5, 13, 13)
+        if photo.pick == PICK_REJECT:
+            draw_cross(painter, icon, REJECT)
+        elif self.window.marker == 'pick':
+            draw_check(painter, icon, SELECT if photo.pick == PICK_SELECT else '#4a4a4c')
+        else:
+            draw_flag(painter, icon, ACCENT if photo.flagged else '#4a4a4c')
         painter.restore()
 
     def editorEvent(self, event, model, option, index):
-        if event.type() == event.Type.MouseButtonRelease and event.position().x() >= option.rect.right()-45 and event.position().y() < option.rect.top()+44:
-            self.window.toggle_flag(index.row())
-            return True
+        if event.type() == event.Type.MouseButtonRelease:
+            rect = self.card(option)
+            x, y = event.position().x(), event.position().y()
+            if y >= rect.bottom()-26:
+                if x >= rect.right()-30:
+                    self.window.toggle_flag(index.row())
+                    return True
+                if rect.x() <= x < rect.x()+5*14+2:
+                    photo = index.data(Qt.ItemDataRole.UserRole)
+                    value = int((x-rect.x())//14)+1
+                    self.window.change([photo], stars=0 if photo.stars == value else value)
+                    return True
         return super().editorEvent(event, model, option, index)
+
+
+class CoverSignals(QObject):
+    ready = Signal(str, QImage, str)
+
+
+class CoverJob(QRunnable):
+    def __init__(self, key, root, path, profile, signals):
+        super().__init__()
+        self.key, self.root, self.path, self.profile, self.signals = key, root, path, profile, signals
+
+    def run(self):
+        # Runs off the interface thread: a sleeping or unplugged disk must not freeze it.
+        try:
+            if not self.root.exists():
+                self.signals.ready.emit(self.key, QImage(), 'missing')
+                return
+            target = ImageCms.ImageCmsProfile(BytesIO(self.profile)) if self.profile else None
+            image = qt_image(load_screen_preview(self.path, 640, target), self.profile) if self.path else QImage()
+            self.signals.ready.emit(self.key, image, '')
+        except Exception:
+            self.signals.ready.emit(self.key, QImage(), '')
+
+
+class RecentCard(QFrame):
+    def __init__(self, entry, home):
+        super().__init__(objectName='card')
+        self.entry, self.home = entry, home
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(208)
+        self.setMinimumWidth(250)
+        self.cover = QImage()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 152, 0, 8)
+        layout.setSpacing(1)
+        self.name = QLabel(project_label(entry['path']))
+        self.name.setContentsMargins(12, 0, 12, 0)
+        self.name.setToolTip(entry['path'])
+        self.meta = QLabel(self.describe(), objectName='muted')
+        self.meta.setContentsMargins(12, 0, 12, 0)
+        layout.addWidget(self.name)
+        layout.addWidget(self.meta)
+        layout.addStretch()
+
+    def describe(self):
+        parts = []
+        if 'count' in self.entry:
+            parts.append(f"{self.entry['count']} photos")
+        if self.entry.get('five'):
+            parts.append(f"{self.entry['five']} à 5 étoiles")
+        age = age_label(self.entry.get('opened'))
+        if age:
+            parts.append(age)
+        return ' · '.join(parts)
+
+    def set_missing(self):
+        self.meta.setText('Dossier ou disque introuvable')
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        area = QRectF(0, 0, self.width(), 142)
+        clip = QPainterPath()
+        clip.addRoundedRect(area.adjusted(0, 0, 0, 10), 10, 10)
+        painter.setClipPath(clip)
+        painter.fillRect(area, QColor(RAISED))
+        if not self.cover.isNull():
+            scale = max(area.width()/self.cover.width(), area.height()/self.cover.height())
+            width, height = self.cover.width()*scale, self.cover.height()*scale
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            painter.drawImage(QRectF((area.width()-width)/2, (area.height()-height)/2, width, height), self.cover)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.home.window.open_recent(self.entry['path'])
+
+    def contextMenuEvent(self, event):
+        menu = QMenu(self)
+        menu.addAction('Retirer de la liste', lambda: self.home.window.forget_recent(self.entry['path']))
+        menu.exec(event.globalPos())
+
+
+class HomePage(QWidget):
+    """Welcome screen: the recent projects, or a single centered call to action."""
+
+    def __init__(self, window):
+        super().__init__(objectName='home')
+        self.window = window
+        self.cards = {}
+        self.columns = 0
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        outer.addWidget(self.scroll)
+        self.content = QWidget(objectName='home')
+        self.scroll.setWidget(self.content)
+        self.column = QVBoxLayout(self.content)
+        self.column.setContentsMargins(56, 44, 56, 44)
+        self.column.setSpacing(0)
+        self.column.addStretch(0)
+        self.title = QLabel('Ajoutez des photos pour commencer', objectName='title')
+        self.column.addWidget(self.title)
+        self.column.addSpacing(16)
+        self.actions = QHBoxLayout()
+        self.actions.setSpacing(8)
+        self.add_button = QPushButton('Ajouter des photos', objectName='primary')
+        self.add_button.clicked.connect(lambda checked=False: window.open_folder())
+        self.find_button = QPushButton("Retrouver d'anciens projets", objectName='ghost')
+        self.find_button.clicked.connect(lambda checked=False: window.find_projects())
+        self.lead = QWidget()
+        self.trail = QWidget()
+        self.actions.addWidget(self.lead, 1)
+        self.actions.addWidget(self.add_button)
+        self.actions.addWidget(self.find_button)
+        self.actions.addWidget(self.trail, 1)
+        self.column.addLayout(self.actions)
+        self.column.addSpacing(34)
+        self.section = QLabel('RÉCENTS', objectName='section')
+        self.column.addWidget(self.section)
+        self.column.addSpacing(10)
+        self.grid_holder = QWidget(objectName='home')
+        self.grid = QGridLayout(self.grid_holder)
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setSpacing(14)
+        self.column.addWidget(self.grid_holder)
+        self.column.addStretch(1)
+        self.cover_signals = CoverSignals()
+        self.cover_signals.ready.connect(self.cover_ready, Qt.ConnectionType.QueuedConnection)
+
+    def refresh(self):
+        entries = self.window.recents.entries()
+        for card in self.cards.values():
+            self.grid.removeWidget(card)
+            card.deleteLater()
+        self.cards = {}
+        has_recents = bool(entries)
+        self.section.setVisible(has_recents)
+        self.grid_holder.setVisible(has_recents)
+        # Centered when there is nothing else to show, left-aligned above the cards.
+        self.column.setStretch(0, 0 if has_recents else 1)
+        self.lead.setVisible(not has_recents)
+        self.title.setText('Reprendre un projet' if has_recents else 'Ajoutez des photos pour commencer')
+        self.title.setAlignment(Qt.AlignmentFlag.AlignLeft if has_recents else Qt.AlignmentFlag.AlignHCenter)
+        self.add_button.setText('Ouvrir un dossier' if has_recents else 'Ajouter des photos')
+        for entry in entries:
+            self.cards[path_key(entry['path'])] = RecentCard(entry, self)
+            root = Path(entry['path'])
+            cover = root/entry['cover'] if entry.get('cover') else None
+            self.window.pool.start(CoverJob(path_key(entry['path']), root, cover, self.window.display_profile, self.cover_signals), 2)
+        self.columns = 0
+        self.arrange()
+
+    def arrange(self):
+        columns = max(2, (self.width()-112)//290)
+        if columns == self.columns:
+            return
+        self.columns = columns
+        for index, card in enumerate(self.cards.values()):
+            self.grid.addWidget(card, index//columns, index % columns)
+        for column in range(10):
+            self.grid.setColumnStretch(column, 1 if column < columns else 0)
+
+    def resizeEvent(self, event):
+        self.arrange()
+
+    def cover_ready(self, key, image, error):
+        card = self.cards.get(key)
+        if card is None:
+            return
+        if error == 'missing':
+            card.set_missing()
+        elif not image.isNull():
+            card.cover = image
+            card.update()
 
 
 class Window(QMainWindow):
     def __init__(self, folder=None):
         super().__init__()
+        self.settings = app_settings()
+        self.marker = self.settings.value('marker', 'flag')
+        self.recents = Recents(self.settings)
         self.session = None
+        self.project_path = None
         self.closing = False
+        self.review_active = False
         self.photos = []
         self.cache = OrderedDict()
         self.pending = {}
         self.prepared = set()
+        self.failed = set()
+        self.undo_stack = []
+        self.shortcuts = []
+        self.scans = []
         self.display_profile = None
         self.display_signature = None
         self.color_generation = 0
@@ -275,63 +510,101 @@ class Window(QMainWindow):
         self.pool.setMaxThreadCount(3)
         self.setWindowTitle('TriPhoto')
         self.resize(1440, 920)
-        self.setMinimumSize(980, 640)
+        self.setMinimumSize(1180, 640)
         central = QWidget()
         layout = QVBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         self.setCentralWidget(central)
         header = QWidget(objectName='header')
+        header.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         top = QHBoxLayout(header)
-        top.setContentsMargins(14, 9, 12, 9)
-        top.setSpacing(12)
+        top.setContentsMargins(16, 8, 12, 8)
+        top.setSpacing(8)
         top.addWidget(QLabel('TriPhoto', objectName='brand'))
+        top.addSpacing(6)
+        self.project_button = QPushButton('Projet', objectName='menu')
+        self.project_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.project_menu = QMenu(self)
+        self.project_menu.aboutToShow.connect(self.fill_project_menu)
+        self.project_button.setMenu(self.project_menu)
+        top.addWidget(self.project_button)
+        top.addSpacing(6)
         self.folder_label = QLabel('', objectName='muted')
         self.folder_label.hide()
-        self.counter = QLabel('Aucune photo', objectName='muted')
+        self.counter = QLabel('Aucune photo')
         top.addWidget(self.counter)
+        self.name_label = QLabel('', objectName='faint')
+        top.addWidget(self.name_label)
         top.addStretch(1)
+        self.stars = self.combo(top, 'Notes', STAR_FILTERS)
+        self.flags = self.combo(top, 'Marqueurs', FLAG_FILTERS)
         self.sort = self.combo(top, 'Tri', SORT_OPTIONS)
-        self.stars = self.combo(top, 'Notes', STAR_FILTER_OPTIONS)
-        self.flags = self.combo(top, 'Drapeaux', FLAG_FILTER_OPTIONS)
-        self.button(top, 'Ouvrir un projet', self.open_folder).setToolTip('Ouvrir un dossier de photos')
-        self.close_project_button = self.button(top, 'Fermer le projet', self.close_project)
-        self.close_project_button.setEnabled(False)
-        self.button(top, 'Exporter les 5 étoiles', self.export, 'primary')
+        top.addSpacing(6)
+        segments = QFrame(objectName='segments')
+        segment_row = QHBoxLayout(segments)
+        segment_row.setContentsMargins(3, 3, 3, 3)
+        segment_row.setSpacing(2)
+        self.tri_button = QPushButton('Tri', objectName='seg', checkable=True, checked=True)
+        self.review_button = QPushButton('Revoir', objectName='seg', checkable=True)
+        group = QButtonGroup(self)
+        for button, active in ((self.tri_button, False), (self.review_button, True)):
+            group.addButton(button)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.clicked.connect(lambda checked=False, value=active: self.set_review(value))
+            segment_row.addWidget(button)
+        top.addWidget(segments)
+        self.segments = segments
+        top.addSpacing(6)
+        self.export_button = self.button(top, 'Exporter les 5 étoiles', self.export, 'primary')
+        self.prefs_button = self.button(top, 'Préférences', self.open_preferences, 'ghost')
         layout.addWidget(header)
         splitter = QSplitter()
         self.viewer = Viewer()
+        self.viewer.backgroundChanged.connect(self.background_changed)
         splitter.addWidget(self.viewer)
         self.list = QListWidget()
-        self.list.setMinimumWidth(260)
+        self.list.setMinimumWidth(250)
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.list.setItemDelegate(PhotoDelegate(self))
         self.list.setUniformItemSizes(True)
+        self.list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         splitter.addWidget(self.list)
         splitter.setSizes([1180, 260])
+        self.viewer_bar = RatingBar(self, self.viewer, show_name=False)
+        self.viewer_bar.rated.connect(self.rate)
+        self.viewer_bar.marked.connect(self.set_pick)
+        self.viewer_bar.hide()
+        self.viewer_bar_timer = QTimer(self)
+        self.viewer_bar_timer.setSingleShot(True)
+        self.viewer_bar_timer.timeout.connect(self.hide_viewer_bar)
+        self.viewer.activity.connect(self.show_viewer_bar)
         self.pages = QStackedWidget()
-        self.empty_page = QWidget()
-        empty_layout = QVBoxLayout(self.empty_page)
-        empty_layout.addStretch()
-        empty_title = QLabel('Ajoutez des photos pour commencer')
-        empty_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        empty_layout.addWidget(empty_title)
-        self.add_photos_button = QPushButton('Ajouter des photos', objectName='primary')
-        self.add_photos_button.clicked.connect(self.open_folder)
-        empty_layout.addWidget(self.add_photos_button, 0, Qt.AlignmentFlag.AlignHCenter)
-        empty_layout.addStretch()
-        self.pages.addWidget(self.empty_page)
+        self.home = HomePage(self)
+        self.review = ReviewPage(self)
+        self.pages.addWidget(self.home)
         self.pages.addWidget(splitter)
+        self.pages.addWidget(self.review)
         layout.addWidget(self.pages, 1)
-        self.status = QLabel(self)
-        self.status.hide()
-        self.viewer.setToolTip('C / V : précédente / suivante\nMaj C / V : 0 / 5 étoiles\n1 à 5 : noter\nF : drapeau · 0 : ajuster\nClic droit : couleur du fond')
+        self.toast_frame = QFrame(self, objectName='toast')
+        toast_row = QHBoxLayout(self.toast_frame)
+        toast_row.setContentsMargins(14, 8, 14, 8)
+        self.toast_label = QLabel()
+        toast_row.addWidget(self.toast_label)
+        self.toast_frame.hide()
+        self.toast_timer = QTimer(self)
+        self.toast_timer.setSingleShot(True)
+        self.toast_timer.timeout.connect(self.toast_frame.hide)
+        self.save_timer = QTimer(self)
+        self.save_timer.setSingleShot(True)
+        self.save_timer.timeout.connect(self.save_session)
         self.list.currentRowChanged.connect(self.show_current)
         self.list.itemSelectionChanged.connect(self.update_counter)
         self.list.verticalScrollBar().valueChanged.connect(self.load_visible)
         self.viewer.zoomChanged.connect(self.zoom_changed)
         self.viewer.resized.connect(self.schedule_detail)
+        self.viewer.resized.connect(self.place_viewer_bar)
         self.detail_timer = QTimer(self)
         self.detail_timer.setSingleShot(True)
         self.detail_timer.timeout.connect(self.load_detail)
@@ -345,47 +618,289 @@ class Window(QMainWindow):
         self.screen_timer.timeout.connect(self.check_display_profile)
         self.screen_timer.start(1500)
         self.check_display_profile()
-        for key, action in [('C', lambda: self.navigate(-1)), ('Left', lambda: self.navigate(-1)),
-            ('V', lambda: self.navigate(1)), ('Right', lambda: self.navigate(1)),
-            ('Shift+Left', lambda: self.navigate(-1)), ('Shift+Right', lambda: self.navigate(1)),
-            ('Shift+C', lambda: self.rate(0)), ('Shift+V', lambda: self.rate(5)),
-            ('0', lambda: self.viewer.set_zoom(1)), ('F', self.toggle_flag),
-            ('+', lambda: self.viewer.set_zoom(self.viewer.zoom*1.15)),
-            ('-', lambda: self.viewer.set_zoom(self.viewer.zoom/1.15))]:
-            QShortcut(QKeySequence(key), self, activated=action)
-        for stars in range(1, 6):
-            QShortcut(QKeySequence(str(stars)), self, activated=lambda value=stars: self.rate(value))
-        QShortcut(QKeySequence('F5'), self, activated=self.refresh)
+        self.install_shortcuts()
+        self.apply_marker()
+        self.update_project_state()
         if folder:
             self.set_folder(Path(folder))
         if not self.session or not self.session.photos:
             QTimer.singleShot(0, self.prompt_for_photos)
-        QShortcut(QKeySequence('Ctrl+O'), self, activated=self.open_folder)
-        QShortcut(QKeySequence('Ctrl+W'), self, activated=self.close_project)
+
+    def install_shortcuts(self):
+        for shortcut in self.shortcuts:
+            shortcut.setParent(None)
+            shortcut.deleteLater()
+        self.shortcuts = []
+        commands = {
+            'prev': lambda: self.navigate(-1), 'next': lambda: self.navigate(1),
+            'flag': self.toggle_flag, 'select': lambda: self.set_pick(PICK_SELECT),
+            'reject': lambda: self.set_pick(PICK_REJECT), 'neutral': lambda: self.set_pick(PICK_NEUTRAL),
+            'undo': self.undo, 'fit': lambda: self.viewer.set_zoom(1) if not self.review_active else None,
+            'zoom_in': lambda: self.zoom_by(1.15), 'zoom_out': lambda: self.zoom_by(1/1.15),
+            'background': self.cycle_background, 'review': lambda: self.set_review(not self.review_active),
+            'shuffle': lambda: self.review.shuffle() if self.review_active else None,
+            'mirror': lambda: self.review.toggle_mirror() if self.review_active else None,
+            'mono': lambda: self.review.toggle_mono() if self.review_active else None,
+            'refresh': self.refresh, 'open': self.open_folder, 'close': self.close_project, 'preferences': self.open_preferences,
+            **{f'rate{value}': (lambda stars=value: self.rate(stars)) for value in range(6)},
+            **{f'mode_{mode}': (lambda value=mode: self.open_review_mode(value)) for mode in ('toile', 'swipe', 'color', 'wall', 'duel')}}
+        mapping = shortcut_map(self.settings)
+        taken = {QKeySequence(key).toString() for keys in mapping.values() for key in keys}
+        for name, keys in mapping.items():
+            aliases = [key for key in ALIASES.get(name, []) if QKeySequence(key).toString() not in taken]
+            for key in keys+aliases:
+                self.shortcuts.append(QShortcut(QKeySequence(key), self, activated=commands[name]))
+        for key, command in (('Escape', self.leave_review), ('Space', lambda: self.skip_card(1)), ('Backspace', lambda: self.skip_card(-1))):
+            self.shortcuts.append(QShortcut(QKeySequence(key), self, activated=command))
+        lines = [f"{' / '.join(mapping[key])} : {label}" for key, label in [('prev', 'précédente'), ('next', 'suivante')]]
+        self.viewer.setToolTip('\n'.join(lines)+'\nClic droit : couleur du fond\nPréférences : tous les raccourcis')
+
+    def open_preferences(self):
+        if PreferencesDialog(self, self.settings).exec():
+            self.install_shortcuts()
+            marker = self.settings.value('marker', 'flag')
+            if marker != self.marker:
+                self.marker = marker
+                self.apply_marker()
+                self.apply_filters()
+                self.list.viewport().update()
+
+    def apply_marker(self):
+        """Adapt the filter, the bars and the export to the chosen marking system."""
+        values = PICK_FILTERS if self.marker == 'pick' else FLAG_FILTERS
+        self.flags.blockSignals(True)
+        self.flags.clear()
+        for key, text in values.items():
+            self.flags.addItem(text, key)
+        self.flags.setToolTip('Marqueurs' if self.marker == 'pick' else 'Drapeaux')
+        self.flags.blockSignals(False)
+        self.viewer_bar.relayout()
+        self.review.bar.relayout()
+        self.review.place_overlays()
+        menu = None
+        if self.marker == 'pick':
+            menu = QMenu(self)
+            menu.addAction('Les 5 étoiles', lambda: self.export('stars'))
+            menu.addAction('Les retenues', lambda: self.export('picks'))
+        self.export_button.setMenu(menu)
+        self.export_button.setText('Exporter' if menu else 'Exporter les 5 étoiles')
+        self.review.apply_default_swipe_rule()
+
+    def toast(self, text, duration=2600):
+        self.toast_label.setText(text)
+        self.toast_frame.adjustSize()
+        self.toast_frame.move((self.width()-self.toast_frame.width())//2, 62)
+        self.toast_frame.show()
+        self.toast_frame.raise_()
+        self.toast_timer.start(duration)
+
+    def show_viewer_bar(self):
+        if self.viewer.image.isNull():
+            return
+        self.place_viewer_bar()
+        self.viewer_bar.update()
+        self.viewer_bar.show()
+        self.viewer_bar_timer.start(1700)
+
+    def hide_viewer_bar(self):
+        if self.viewer_bar.underMouse():
+            self.viewer_bar_timer.start(1000)
+        else:
+            self.viewer_bar.hide()
+
+    def place_viewer_bar(self):
+        self.viewer_bar.move((self.viewer.width()-self.viewer_bar.width())//2, self.viewer.height()-self.viewer_bar.height()-16)
+
+    def set_background(self, color):
+        self.viewer.set_background(color)
+
+    def background_changed(self):
+        self.review.sync_toolbar()
+        self.review.update_view()
+
+    def cycle_background(self):
+        colors = [color for _, color in BACKGROUNDS]
+        current = colors.index(self.viewer.background) if self.viewer.background in colors else -1
+        self.set_background(colors[(current+1) % len(colors)])
+
+    def zoom_by(self, factor):
+        if self.review_active:
+            self.review.zoom(factor)
+        else:
+            self.viewer.set_zoom(self.viewer.zoom*factor)
+
+    def set_review(self, active):
+        if not (self.session and self.session.photos):
+            active = False
+        changed = active != self.review_active
+        self.review_active = active
+        self.update_project_state()
+        if changed and active:
+            self.review.rebuild()
+        elif changed:
+            self.show_current()
+
+    def open_review_mode(self, mode):
+        self.set_review(True)
+        if self.review_active:
+            self.review.set_mode(mode)
+
+    def leave_review(self):
+        if self.review_active:
+            self.set_review(False)
+
+    def skip_card(self, delta):
+        if self.review_active:
+            self.review.skip(delta)
+
+    def open_in_tri(self, photo):
+        self.select_photo(photo)
+        self.set_review(False)
+        row = self.list.currentRow()
+        if row >= 0:
+            self.list.scrollToItem(self.list.item(row))
+
+    def current_photo(self):
+        row = self.list.currentRow()
+        return self.photos[row] if 0 <= row < len(self.photos) else None
+
+    def selected_photos(self):
+        return [item.data(Qt.ItemDataRole.UserRole) for item in self.list.selectedItems()]
+
+    def target_photos(self):
+        """Photos that the keys act on. Swipe and Duel show cards of their own."""
+        if self.review_active:
+            return self.review.targets()
+        return self.selected_photos()
+
+    def select_photo(self, photo, extend=False):
+        row = next((i for i, candidate in enumerate(self.photos) if candidate is photo), None)
+        if row is None:
+            return
+        flag = QItemSelectionModel.SelectionFlag.Toggle if extend else QItemSelectionModel.SelectionFlag.ClearAndSelect
+        self.list.setCurrentRow(row, flag)
+        self.review.bar.update()
+
+    def best_image(self, photo):
+        """Largest preview in memory, marked as recently used."""
+        path = str(photo.path)
+        for side in (6000, 5500, 5000, 4500, 4000, 3500, 3000, 2500, 2000, 1000, 400):
+            key = (path, side)
+            image = self.cache.get(key)
+            if image is not None:
+                self.cache.move_to_end(key)
+                return image
+        return None
+
+    def request_for(self, photo, pixels, priority):
+        """Ask for the smallest preview that stays sharp at this size on screen."""
+        if pixels <= 400:
+            side = 400
+        elif pixels <= 1100:
+            side = 1000
+        else:
+            side = ((min(6000, max(2000, int(pixels)))+499)//500)*500
+        image = self.best_image(photo)
+        if image is None or max(image.width(), image.height()) < side*.9 and (str(photo.path), side) not in self.cache:
+            if side > 1000 and image is None:
+                self.request(photo, 1000, priority+1)
+            self.request(photo, side, priority)
+
+    def fill_project_menu(self):
+        menu = self.project_menu
+        menu.clear()
+        menu.addAction('Ouvrir un projet…', self.open_folder)
+        recent_menu = menu.addMenu('Récents')
+        entries = self.recents.entries()
+        for entry in entries[:15]:
+            path = entry['path']
+            action = recent_menu.addAction(project_label(path).replace('&', '&&'), lambda value=path: self.open_recent(value))
+            action.setToolTip(path)
+        recent_menu.setToolTipsVisible(True)
+        recent_menu.setEnabled(bool(entries))
+        menu.addAction("Retrouver d'anciens projets…", self.find_projects)
+        menu.addSeparator()
+        menu.addAction('Fermer le projet', self.close_project).setEnabled(self.session is not None)
+
+    def open_recent(self, path):
+        if not Path(path).is_dir():
+            QMessageBox.information(self, 'Projet introuvable', f'Ce dossier est introuvable pour le moment :\n{path}\n\nSi le disque est débranché, rebranchez-le puis réessayez.')
+            return
+        self.set_folder(Path(path))
+
+    def forget_recent(self, path):
+        self.recents.remove(path)
+        self.home.refresh()
+
+    def find_projects(self):
+        chosen = QFileDialog.getExistingDirectory(self, "Dossier ou disque où chercher d'anciens projets")
+        if not chosen:
+            return
+        self.toast('Recherche des projets en cours…', 60000)
+        job = ScanJob(chosen)
+        job.signals.done.connect(self.projects_found, Qt.ConnectionType.QueuedConnection)
+        self.scans.append(job)
+        self.pool.start(job, 1)
+
+    def projects_found(self, found):
+        self.scans.clear()
+        added = self.recents.merge(found)
+        self.toast(f'{len(found)} projets trouvés, {added} ajoutés aux récents.' if found else 'Aucun ancien projet dans ce dossier.')
+        if self.pages.currentIndex() == 0:
+            self.home.refresh()
 
     def prompt_for_photos(self):
-        if not self.closing and (not self.session or not self.session.photos):
+        # With recent projects to pick from, the file dialog would only be in the way.
+        if not self.closing and (not self.session or not self.session.photos) and not self.recents.entries():
             self.open_folder()
 
     def update_project_state(self):
         has_photos = bool(self.session and self.session.photos)
-        self.pages.setCurrentIndex(1 if has_photos else 0)
-        self.close_project_button.setEnabled(self.session is not None)
-        self.setWindowTitle(f'TriPhoto · {self.session.root.name}' if self.session else 'TriPhoto')
+        page = (2 if self.review_active else 1) if has_photos else 0
+        if page == 0:
+            self.home.refresh()
+        self.pages.setCurrentIndex(page)
+        self.review_button.setEnabled(has_photos)
+        self.tri_button.setEnabled(has_photos)
+        (self.review_button if self.review_active else self.tri_button).setChecked(True)
+        self.export_button.setVisible(has_photos)
+        # Nothing to filter or switch on the welcome screen.
+        for control in (self.stars, self.flags, self.sort, self.segments, self.counter):
+            control.setVisible(has_photos)
+        name = project_label(self.project_path) if self.project_path else ''
+        self.setWindowTitle(f'TriPhoto · {name}' if self.session else 'TriPhoto')
+
+    def save_session(self):
+        # Saving takes an inventory of the folder: too slow to do on each note
+        # with a large gallery on an external disk, so notes are grouped.
+        self.save_timer.stop()
+        if not self.session:
+            return
+        try:
+            self.session.save()
+        except OSError as error:
+            self.toast(f'Enregistrement impossible : {error}', 6000)
 
     def close_project(self):
         if self.session:
-            self.session.save()
+            self.save_session()
+            self.recents.add(self.project_path, self.session.photos)
+        self.review.reset()
+        self.review_active = False
+        self.undo_stack.clear()
+        self.failed.clear()
         self.color_generation += 1
         self.pool.clear()
         self.pending.clear()
         self.detail_timer.stop()
         self.session = None
+        self.project_path = None
         self.photos = []
         self.list.clear()
         self.cache.clear()
         self.prepared.clear()
         self.folder_label.clear()
+        self.name_label.clear()
         for combo in (self.sort, self.stars, self.flags):
             combo.blockSignals(True)
             combo.setCurrentIndex(0)
@@ -400,7 +915,8 @@ class Window(QMainWindow):
 
     def button(self, layout, text, callback, name=''):
         button = QPushButton(text, objectName=name)
-        button.clicked.connect(callback)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        button.clicked.connect(lambda checked=False: callback())
         layout.addWidget(button)
         return button
 
@@ -409,8 +925,9 @@ class Window(QMainWindow):
         combo.setToolTip(label)
         for key, text in values.items():
             combo.addItem(text, key)
-        combo.setMaximumWidth({'Tri': 175, 'Notes': 145, 'Drapeaux': 165}[label])
-        combo.currentIndexChanged.connect(self.apply_filters)
+        combo.setFixedWidth({'Tri': 182, 'Notes': 146, 'Marqueurs': 156}[label])
+        combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        combo.currentIndexChanged.connect(self.filters_changed)
         layout.addWidget(combo)
         return combo
 
@@ -418,6 +935,11 @@ class Window(QMainWindow):
         chosen = QFileDialog.getExistingDirectory(self, 'Choisir le dossier de photos')
         if chosen:
             self.set_folder(Path(chosen))
+
+    def filters_changed(self, *args):
+        self.apply_filters()
+        if self.review_active:
+            self.review.rebuild()
 
     def set_folder(self, path):
         try:
@@ -427,7 +949,11 @@ class Window(QMainWindow):
             return
         self.close_project()
         self.session = session
+        self.project_path = Path(path)
         self.baseline = original_inventory(path)
+        if session.photos:
+            self.recents.add(path, session.photos, time.time())
+        self.review.start_analysis()
         self.cache_dir = session.session_dir / 'Previews'
         self.cache_dir.mkdir(exist_ok=True)
         self.cache.clear()
@@ -448,14 +974,14 @@ class Window(QMainWindow):
         self.session.sort_mode = self.sort.currentData()
         self.session.photos = sort_photos(self.session.photos, self.session.sort_mode)
         stars, flag = self.stars.currentData(), self.flags.currentData()
-        filtered = [p for p in self.session.photos if (stars == 'all' or p.stars == stars)
-            and (flag == 'all' or p.flagged == (flag == 'flagged'))]
+        filtered = [p for p in self.session.photos if stars_match(p, stars) and marker_matches(p, flag)]
         if len(filtered) == len(self.photos) and all(a is b for a, b in zip(filtered, self.photos)):
             # Ratings and flags usually change only the decoration. Rebuilding
             # the list makes Qt scroll the current item back into view.
-            self.session.save()
+            self.save_timer.start(500)
             self.list.viewport().update()
             self.update_counter()
+            self.notify_review()
             return
         scroll = self.list.verticalScrollBar().value()
         old_row = self.list.currentRow()
@@ -480,17 +1006,23 @@ class Window(QMainWindow):
             self.list.setCurrentRow(row, QItemSelectionModel.SelectionFlag.NoUpdate if surviving else QItemSelectionModel.SelectionFlag.ClearAndSelect)
         self.list.doItemsLayout()
         anchor_row = next((i for i, photo in enumerate(self.photos) if photo.relative_path == anchor), None)
-        self.list.verticalScrollBar().setValue(anchor_row*114-offset if anchor_row is not None else scroll)
+        self.list.verticalScrollBar().setValue(anchor_row*ROW_HEIGHT-offset if anchor_row is not None else scroll)
         self.list.blockSignals(False)
-        self.session.save()
+        self.save_timer.start(500)
         self.show_current()
         self.load_visible()
+        self.notify_review()
+
+    def notify_review(self):
+        if self.review_active:
+            self.review.photos_changed()
+        self.viewer_bar.update()
 
     def request(self, photo, side, priority=0):
         if self.closing:
             return
         key = (str(photo.path), side)
-        if key in self.cache or key in self.pending:
+        if key in self.cache or key in self.pending or key in self.failed:
             return
         job = Loader(photo.path, side, self.cache_dir, self.display_profile, self.color_generation)
         job.background = priority < 0
@@ -503,38 +1035,46 @@ class Window(QMainWindow):
     def loaded(self, path, side, image, error, generation):
         if generation != self.color_generation:
             return
-        self.pending.pop((path, side), None)
+        job = self.pending.pop((path, side), None)
         if self.session is None or not any(str(p.path) == path for p in self.session.photos):
             return
+        if error:
+            # Otherwise an unreadable file is requested again forever and keeps
+            # the background preloading from ever going past it.
+            self.failed.add((path, side))
         if not image.isNull():
             if side == 1000:
                 self.prepared.add(path)
-            self.cache[(path, side)] = image
-            self.cache.move_to_end((path, side))
-            while len(self.cache) > 60:
-                self.cache.popitem(last=False)
-            # Keep large previews bounded separately from lightweight thumbnails.
-            large = [key for key in self.cache if key[1] > 1000]
-            for key in large[:-4]:
-                self.cache.pop(key, None)
-            # Also bound actual decoded bytes, especially on large monitors.
-            for key in list(self.cache):
-                if sum(item.sizeInBytes() for item in self.cache.values()) <= 192*1024*1024:
-                    break
+            # Background previews only fill the disk cache: in memory they would
+            # push out the images currently on screen.
+            if job is None or not job.background:
+                self.cache[(path, side)] = image
+                self.cache.move_to_end((path, side))
+                # Keep large previews bounded separately from lightweight thumbnails.
+                large = [key for key in self.cache if key[1] > 1000]
+                for key in large[:-6]:
+                    self.cache.pop(key, None)
+                # Also bound actual decoded bytes, especially on large monitors.
+                total = sum(item.sizeInBytes() for item in self.cache.values())
                 current = self.list.currentRow()
-                if 0 <= current < len(self.photos) and key[0] == str(self.photos[current].path):
-                    continue
-                self.cache.pop(key, None)
+                current_path = str(self.photos[current].path) if 0 <= current < len(self.photos) else None
+                for key in list(self.cache):
+                    if total <= 256*1024*1024:
+                        break
+                    if key[0] != current_path:
+                        total -= self.cache.pop(key).sizeInBytes()
         row = self.list.currentRow()
         if 0 <= row < len(self.photos) and str(self.photos[row].path) == path and side > 400:
             if error:
-                self.status.setText('Lecture impossible : '+error)
+                self.toast('Lecture impossible : '+error, 5000)
                 if self.viewer.image.isNull():
                     self.viewer.message = 'Aperçu indisponible : '+error
                     self.viewer.update()
             else:
                 self.display_best()
         self.list.viewport().update()
+        if self.review_active:
+            self.review.image_ready()
 
     def check_display_profile(self):
         """Resolve the ICC profile for the monitor containing this window."""
@@ -579,9 +1119,12 @@ class Window(QMainWindow):
             self.pending.clear()
             self.cache.clear()
             self.prepared.clear()
+            self.failed.clear()
             if self.session:
                 self.show_current()
                 self.load_visible()
+                if self.review_active:
+                    self.review.update_view()
 
     def display_best(self):
         row = self.list.currentRow()
@@ -617,12 +1160,13 @@ class Window(QMainWindow):
             for index in ((row,) if distance == 0 else (row+distance, row-distance)):
                 if 0 <= index < len(self.photos):
                     photo = self.photos[index]
-                    if str(photo.path) not in self.prepared and (str(photo.path), 1000) not in self.pending:
+                    key = (str(photo.path), 1000)
+                    if str(photo.path) not in self.prepared and key not in self.pending and key not in self.failed:
                         self.request(photo, 1000, -10)
                         return
 
     def schedule_detail(self):
-        if hasattr(self, 'detail_timer'):
+        if hasattr(self, 'detail_timer') and not self.review_active:
             self.detail_timer.start(120)
 
     def load_detail(self):
@@ -633,11 +1177,11 @@ class Window(QMainWindow):
             self.request(self.photos[row], side, 20)
 
     def load_visible(self, *args):
-        if not self.photos:
+        if not self.photos or self.review_active:
             return
         first = self.list.indexAt(self.list.viewport().rect().topLeft()).row()
         first = max(0, first)
-        count = self.list.viewport().height()//114+3
+        count = self.list.viewport().height()//ROW_HEIGHT+3
         for photo in self.photos[first:first+count]:
             self.request(photo, 400)
 
@@ -645,7 +1189,9 @@ class Window(QMainWindow):
         self.schedule_detail()
 
     def navigate(self, delta):
-        if self.photos:
+        if self.review_active:
+            self.review.navigate(delta)
+        elif self.photos:
             row = max(0, min(len(self.photos)-1, self.list.currentRow()+delta))
             # Explicitly replace selection even if Shift remains held after rating.
             self.list.setCurrentRow(row, QItemSelectionModel.SelectionFlag.ClearAndSelect)
@@ -655,41 +1201,92 @@ class Window(QMainWindow):
         if self.photos:
             five = sum(p.stars == 5 for p in self.photos)
             self.counter.setText(f'{self.list.currentRow()+1} / {len(self.photos)}')
+            current = self.current_photo()
+            metrics = self.name_label.fontMetrics()
+            self.name_label.setText(metrics.elidedText(current.path.name, Qt.TextElideMode.ElideMiddle, 180) if current else '')
             self.counter.setToolTip(f'{len(self.list.selectedItems())} sélectionnée(s) · {five} à 5 étoiles')
         else:
             self.counter.setText('Aucune photo')
+            self.name_label.clear()
 
-    def rate(self, stars):
-        if not self.session:
+    def change(self, photos, stars=None, pick=None):
+        """Single entry point for notes and markers: it is what makes them undoable."""
+        if not self.session or not photos:
             return
-        for item in self.list.selectedItems():
-            item.data(Qt.ItemDataRole.UserRole).stars = stars
+        self.undo_stack.append([(photo, photo.stars, photo.pick) for photo in photos])
+        del self.undo_stack[:-300]
+        for photo in photos:
+            if stars is not None:
+                photo.stars = stars
+            if pick is not None:
+                photo.pick = pick
         self.apply_filters()
 
+    def undo(self):
+        if not self.undo_stack:
+            self.toast('Rien à annuler')
+            return
+        states = self.undo_stack.pop()
+        for photo, stars, pick in states:
+            photo.stars, photo.pick = stars, pick
+        self.apply_filters()
+        if self.review_active:
+            self.review.after_undo([state[0] for state in states])
+        self.toast('Note annulée', 1200)
+
+    def rate(self, stars):
+        self.change(self.target_photos(), stars=stars)
+
+    def set_pick(self, pick):
+        if self.marker != 'pick' and pick == PICK_REJECT:
+            self.toast('Le rejet demande le marquage Retenue, Rejetée, Neutre, dans les Préférences.', 4000)
+            return
+        self.change(self.target_photos(), pick=pick)
+        if self.review_active:
+            self.review.after_mark(pick)
+
     def toggle_flag(self, row=None):
-        if row is None:
-            row = self.list.currentRow()
-        if 0 <= row < len(self.photos):
-            self.photos[row].flagged = not self.photos[row].flagged
-            self.apply_filters()
+        if row is not None:
+            if not 0 <= row < len(self.photos):
+                return
+            photos = [self.photos[row]]
+        else:
+            photos = self.target_photos()
+        if not photos:
+            return
+        if self.marker == 'pick' and row is not None:
+            # Clicking the mark of a thumbnail cycles through the three states.
+            following = {PICK_NEUTRAL: PICK_SELECT, PICK_SELECT: PICK_REJECT, PICK_REJECT: PICK_NEUTRAL}
+            self.change(photos, pick=following[photos[0].pick])
+        else:
+            self.change(photos, pick=PICK_NEUTRAL if photos[0].flagged else PICK_SELECT)
 
     def refresh(self):
         if self.session:
             self.session.refresh()
+            self.failed.clear()
             self.apply_filters()
             self.update_project_state()
+            self.review.start_analysis()
+            if self.review_active:
+                self.review.rebuild()
 
-    def export(self):
+    def export(self, kind='stars'):
         if not self.session:
             return
         if original_inventory(self.session.root) != self.baseline:
             QMessageBox.warning(self, 'Export interrompu', 'Le dossier a changé depuis son ouverture. Rouvrez-le avant l’export.')
             return
-        photos = [p for p in self.photos if p.stars == 5]
+        if kind == 'picks':
+            photos = [p for p in self.photos if p.pick == PICK_SELECT]
+            destination, empty = self.session.session_dir / EXPORT_PICKS_DIR_NAME, 'Aucune photo retenue dans la sélection filtrée.'
+        else:
+            # A rejected photo stays out of the export, whatever its stars.
+            photos = [p for p in self.photos if p.stars == 5 and p.pick != PICK_REJECT]
+            destination, empty = self.session.session_dir / EXPORT_DIR_NAME, 'Aucune photo à cinq étoiles dans la sélection filtrée.'
         if not photos:
-            QMessageBox.information(self, 'Export', 'Aucune photo à cinq étoiles dans la sélection filtrée.')
+            QMessageBox.information(self, 'Export', empty)
             return
-        destination = self.session.session_dir / EXPORT_DIR_NAME
         try:
             for photo in photos:
                 export_original_copy(photo.path, destination/photo.relative_path)
@@ -705,10 +1302,15 @@ class Window(QMainWindow):
         self.visible_timer.stop()
         self.preload_timer.stop()
         self.screen_timer.stop()
+        self.save_timer.stop()
+        self.review.stop_analysis()
         if self.session:
-            self.session.save()
+            self.save_session()
+            self.recents.add(self.project_path, self.session.photos)
+            self.review.save_analysis()
         self.pool.clear()
         self.pool.waitForDone()
+        self.review.analysis_pool.waitForDone()
         event.accept()
 
 
