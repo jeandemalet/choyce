@@ -4,6 +4,7 @@ They work on synthetic images in a temporary folder, with separate settings, and
 never touch real galleries or the user's preferences.
 """
 import json
+import math
 import os
 import shutil
 import sys
@@ -15,7 +16,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from PIL import Image
-from PySide6.QtCore import QEventLoop, QPointF, QTimer, Qt
+from PySide6.QtCore import QEventLoop, QPointF, QRectF, QTimer, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -252,20 +253,23 @@ def test_review_modes(base):
     # Toile: a limited hand; a note keeps it in place, shuffle deals again, straight is a display choice.
     review.set_mode('toile')
     toile = review.view()
-    toile.set_limit(12)
-    assert len(toile.stack) == 12 and len(toile.positions) == 12
+    toile.set_columns(4)
+    assert len(toile.stack) == 24 and len(toile.positions) == 24
+    # All the photos, so many across: the width fits, the rest continues below.
+    xs = [p[0] for p in toile.positions.values()]
+    assert round((max(xs)-min(xs))/toile.CELL_WIDTH) == 3
+    assert not review.bar.isVisible() and window.rate(5) is None and not toile.targets()
     key = toile.stack[0].relative_path
     position = list(toile.positions[key])
-    window.select_photo(toile.stack[0])
+    toile.pick(toile.stack[0])
+    assert review.bar.isVisible()
     window.rate(2)
-    assert toile.positions[key] == position and len(toile.stack) == 12
+    assert toile.positions[key] == position and len(toile.stack) == 24
     toile.set_straight(True)
     wait(40)
     toile.grab()
     review.shuffle()
     assert toile.positions.get(key) != position
-    toile.set_limit(0)
-    assert len(toile.stack) == 24
     # Background and black and white.
     window.set_background('#ffffff')
     assert window.viewer.background == '#ffffff' and any(s.isChecked() for s in review.picker.swatches)
@@ -284,9 +288,9 @@ class _Event:
         return QPointF(0, 0)
 
 
-def test_mosaic(base):
+def test_grid(base):
     clear_settings()
-    root = make_project(base/'mosaic', 40)
+    root = make_project(base/'grid', 40)
     window = open_window(root)
     window.set_review(True)
     review = window.review
@@ -310,6 +314,28 @@ def test_mosaic(base):
     review.set_wall_emphasis('landscape')
     sizes = {o: sum(r.width()*r.height() for r, p in wall.tiles if (review.aspect(p) >= 1) == o) / max(1, sum((review.aspect(p) >= 1) == o for _, p in wall.tiles)) for o in (True, False)}
     assert sizes[True] > sizes[False]*1.5
+    # Rows keep the order of the photos, and are set to the height of one orientation.
+    assert [p.relative_path for _, p in wall.tiles] == [p.relative_path for p in wall.ordered]
+    def row_heights(kind):
+        tops = {}
+        for rect, photo in wall.tiles:
+            tops.setdefault(round(rect.center().y()), []).append((rect, photo))
+        return all(max(r.height() for r, p in row if (review.aspect(p) >= 1) == kind) >= max(r.height() for r, _ in row)-.5
+                   for row in tops.values() if any((review.aspect(p) >= 1) == kind for _, p in row))
+    assert row_heights(True)
+    review.set_wall_emphasis('portrait')
+    assert row_heights(False)
+    assert all(abs(max(r.width(), r.height())-max(q.width(), q.height())) < .5 for r, _ in wall.tiles[:2] for q, _ in wall.tiles[:2])
+    # This make-up of photos is mostly horizontal: equal formats follow the horizontals.
+    review.set_wall_emphasis('landscape')
+    landscape = [tuple(r.getRect()) for r, _ in wall.tiles]
+    review.set_wall_emphasis('equal')
+    assert [tuple(r.getRect()) for r, _ in wall.tiles] == landscape
+    assert review.emphasis_combo.isVisibleTo(review.options['wall'][0])
+    review.set_wall_layout('staggered')
+    assert not review.emphasis_combo.isVisibleTo(review.options['wall'][0])
+    review.set_wall_layout('rows')
+    review.set_wall_emphasis('landscape')
     # Narrowing the central panel leaves margins, and the layout follows.
     review.set_wall_layout('staggered')
     review.set_wall_emphasis('equal')
@@ -321,7 +347,7 @@ def test_mosaic(base):
     review.shuffle()
     after = [p.relative_path for _, p in wall.tiles]
     assert before != after and sorted(before) == sorted(after)
-    # Dragging a photo out applies the chosen action and takes it out of the mosaic.
+    # Dragging a photo out applies the chosen action and takes it out of the grid.
     review.drop_action.setCurrentIndex(review.drop_action.findData('star1'))
     wall.bar.setValue(0)
     rect, photo = wall.visible_tiles()[0]
@@ -333,11 +359,12 @@ def test_mosaic(base):
     QTest.mouseMove(wall, QPointF(10, 400).toPoint())
     QTest.mouseRelease(wall, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPointF(10, 400).toPoint())
     assert not wall.dragging and review.bar.isVisible()
+    # A click in the empty margin takes the selection back, and with it the note.
     assert photo.stars == 1 and len(wall.tiles) == 39 and photo.relative_path in wall.set_aside
     assert review.restore_button.isVisibleTo(review.options['wall'][1])
     window.undo()
     assert photo.stars == 0 and len(wall.tiles) == 40
-    # Released inside the mosaic, nothing happens. Undo may have moved the scroll position.
+    # Released inside the grid, nothing happens. Undo may have moved the scroll position.
     wall.bar.setValue(0)
     rect, photo = wall.visible_tiles()[0]
     center = rect.center().toPoint()
@@ -349,6 +376,168 @@ def test_mosaic(base):
     assert review.options['wall'][0].isVisibleTo(review) and not review.options['toile'][1].isVisibleTo(review)
     review.set_mode('color')
     assert review.options['color'][1].isVisibleTo(review) and not review.views['color'].show_strip
+    # Order and blocks of the Couleur mode.
+    color = review.view()
+    color.resize(1400, 850)
+    review.set_color_groups(True)
+    assert color.headings and sum(count for _, _, count in color.headings) == 40
+    assert color.headings[-1][1] == 'Neutres' and color.headings[0][1] == 'Rouges'
+    assert all(a[0].bottom() < b[0].top() for a, b in zip(color.headings, color.headings[1:]))
+    color.grab()
+    review.set_color_order('hue_desc')
+    assert color.headings[0][1] != 'Rouges' and color.headings[-1][1] == 'Neutres'
+    review.set_color_groups(False)
+    assert not color.headings
+    review.set_color_order('hue')
+    window.close()
+    clear_settings()
+
+
+def test_clear_stars(base):
+    clear_settings()
+    root = make_project(base/'clear', 12)
+    window = open_window(root)
+    window.set_review(True)
+    review = window.review
+    settle(window, lambda: len(review.info) == 12)
+    for photo in window.photos:
+        photo.stars = 5
+    window.apply_filters()
+    window.stars.setCurrentIndex(window.stars.findData(5))
+    for mode in ('wall', 'color'):
+        review.set_mode(mode)
+        wall = review.view()
+        wall.resize(1400, 850)
+        wall.bar.setValue(0)
+        wall.relayout()
+        rect, photo = wall.visible_tiles()[0]
+        button = wall.badge_layout(rect, photo)[0]
+        click = button.center().toPoint()
+        QTest.mouseClick(wall, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, click)
+        # The photo leaves the five stars at once, and Ctrl+Z brings it back.
+        assert photo.stars == 0 and photo not in window.photos
+        assert all(p is not photo for _, p in wall.tiles)
+        window.undo()
+        assert photo.stars == 5 and photo in window.photos
+    # A click beside the button only selects.
+    rect, photo = wall.visible_tiles()[0]
+    QTest.mouseClick(wall, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, rect.center().toPoint())
+    assert photo.stars == 5
+    # Clearing several photos quickly never opens the Tri page.
+    rect, photo = wall.visible_tiles()[0]
+    click = wall.badge_layout(rect, photo)[0].center().toPoint()
+    QTest.mouseClick(wall, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, click)
+    QTest.mouseDClick(wall, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, click)
+    assert window.review_active and photo.stars == 0
+    window.undo()
+    window.undo()
+    # On the tilted prints of the Toile as well.
+    review.set_mode('toile')
+    toile = review.view()
+    toile.resize(1400, 850)
+    toile.set_columns(4)
+    top = toile.stack[-1]
+    rect = toile.tile_rect(top)
+    button = toile.badge_layout(QRectF(-rect.width()/2, -rect.height()/2, rect.width(), rect.height()), top)[0]
+    angle = math.radians(toile.positions[top.relative_path][2])
+    center = button.center()
+    world = rect.center()+QPointF(center.x()*math.cos(angle)-center.y()*math.sin(angle), center.x()*math.sin(angle)+center.y()*math.cos(angle))
+    screen = QPointF(toile.width()/2, toile.height()/2)+toile.pan+world*toile.scale_
+    assert toile.clear_hit(screen) is top
+    # The note bar has the same button, on the Tri page and in Revoir.
+    review.set_mode('swipe')
+    swipe = review.view()
+    bar = review.bar
+    target = swipe.current()
+    QTest.mouseClick(bar, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, bar.clear_rect().center().toPoint())
+    assert target.stars == 0
+    window.undo()
+    star = QPointF(bar.stars_x()+2*23, 23).toPoint()
+    QTest.mouseClick(bar, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, star)
+    assert target.stars == 3
+    window.close()
+    clear_settings()
+
+
+def test_swipe_zoom(base):
+    clear_settings()
+    root = make_project(base/'swipe_zoom', 8)
+    window = open_window(root)
+    window.set_review(True)
+    review = window.review
+    settle(window, lambda: len(review.info) == 8)
+    review.set_mode('swipe')
+    swipe = review.view()
+    swipe.resize(1200, 800)
+    review.zoom(1/1.15)
+    review.zoom(1/1.15)
+    level = swipe.zoom_level
+    assert level < 1 and review.zoom_label.text() == f'{round(level*100)} %'
+    # Dezoomed, a drag still decides, and the zoom stays for the next photo.
+    review.swipe_right.setCurrentIndex(review.swipe_right.findData('star4'))
+    target = swipe.current()
+    swipe.press = QPointF(600, 400)
+    swipe.offset = QPointF(500, 0)
+    swipe.mouseReleaseEvent(_Event())
+    settle(window, lambda: swipe.current() is not target)
+    assert target.stars == 4 and swipe.zoom_level == level
+    # Zoomed in, a drag moves the photo, and the framing stays too.
+    swipe.zoom(2.5, QPointF(300, 200))
+    assert swipe.zoom_level > 1
+    pan = QPointF(swipe.pan)
+    current = swipe.current()
+    QTest.mousePress(swipe, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPointF(600, 400).toPoint())
+    QTest.mouseMove(swipe, QPointF(650, 420).toPoint())
+    QTest.mouseRelease(swipe, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPointF(650, 420).toPoint())
+    assert swipe.current() is current and swipe.pan == pan+QPointF(50, 20)
+    pan = QPointF(swipe.pan)
+    swipe.skip()
+    swipe.grab()
+    assert swipe.pan == pan and swipe.zoom_level > 1
+    # Going to the Tri page and back resumes on the same card.
+    index = swipe.index
+    window.set_review(False)
+    window.set_review(True)
+    assert swipe.index == index and swipe.zoom_level > 1
+    review.zoom_reset()
+    assert swipe.zoom_level == 1 and swipe.pan == QPointF() and review.zoom_label.text() == '100 %'
+    # Grid sizes come back after a restart.
+    review.set_mode('wall')
+    wall = review.view()
+    review.set_wall_layout('rows')
+    review.zoom(1.15)
+    assert review.zoom_label.text() == '115 %'
+    height = wall.row_height
+    window.close()
+    window = open_window(root)
+    assert window.review.views['wall'].row_height == height
+    window.close()
+    clear_settings()
+
+
+def test_review_state_remembered(base):
+    clear_settings()
+    root = make_project(base/'state', 8)
+    window = open_window(root)
+    review = window.review
+    for photo in window.photos[:4]:
+        photo.stars = 5
+    aside = window.photos[0].relative_path
+    review.views['wall'].set_aside.add(aside)
+    window.stars.setCurrentIndex(window.stars.findData(5))
+    assert len(window.photos) == 4
+    window.close()
+    window = open_window(root)
+    review = window.review
+    assert window.stars.currentData() == 5 and len(window.photos) == 4
+    assert all(photo.stars == 5 for photo in window.photos)
+    assert review.views['wall'].set_aside == {aside} and review.restore_button.text() == 'Réafficher (1)'
+    # A filter that no longer matches anything never opens on an empty page.
+    for photo in window.session.photos:
+        photo.stars = 0
+    window.close()
+    window = open_window(root)
+    assert window.stars.currentIndex() == 0 and len(window.photos) == 8
     window.close()
     clear_settings()
 
@@ -417,7 +606,7 @@ def main():
     app.setStyleSheet(triphoto_qt.STYLE)
     base = Path(tempfile.mkdtemp(prefix='triphoto-tests-'))
     tests = [test_legacy_session, test_nested_session_ignored, test_dominant_color, test_recents, test_shortcuts,
-             test_window_rating_and_undo, test_review_modes, test_mosaic, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle]
+             test_window_rating_and_undo, test_review_modes, test_grid, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle]
     failures = 0
     try:
         for test in tests:

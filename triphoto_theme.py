@@ -56,6 +56,9 @@ QPushButton#primary:hover {{ background: #ffffff; }}
 QPushButton#seg {{ background: transparent; color: {MUTED}; border-radius: 6px; padding: 5px 13px; }}
 QPushButton#seg:hover {{ color: {TEXT}; }}
 QPushButton#seg:checked {{ background: {HOVER}; color: {TEXT}; }}
+QPushButton#mainseg {{ background: transparent; color: {MUTED}; border-radius: 6px; padding: 6px 24px; font-weight: 600; }}
+QPushButton#mainseg:hover {{ color: {TEXT}; }}
+QPushButton#mainseg:checked {{ background: {ACCENT}; color: {INK}; }}
 QFrame#segments {{ background: {RAISED}; border-radius: 8px; }}
 QFrame#pill {{ background: rgba(22, 22, 23, 232); border: 1px solid rgba(255, 255, 255, 22); border-radius: 11px; }}
 QFrame#toast {{ background: rgba(22, 22, 23, 240); border: 1px solid rgba(255, 255, 255, 30); border-radius: 9px; }}
@@ -112,6 +115,18 @@ def draw_stars(painter, x, y, stars, radius=6.0, gap=15.0, off=FAINT):
         painter.setPen(QPen(QColor(ACCENT if lit else off), 1.0))
         painter.setBrush(QColor(ACCENT) if lit else Qt.BrushStyle.NoBrush)
         painter.drawPolygon(star_polygon(QPointF(x+star*gap, y), radius))
+    painter.restore()
+
+
+def draw_clear_star(painter, x, y, radius, color):
+    """Empty star struck through: the button that takes a photo back to zero stars."""
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.setPen(QPen(QColor(color), 1.0))
+    painter.drawPolygon(star_polygon(QPointF(x, y), radius))
+    painter.setPen(QPen(QColor(color), 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    painter.drawLine(QPointF(x-radius, y+radius), QPointF(x+radius, y-radius))
     painter.restore()
 
 

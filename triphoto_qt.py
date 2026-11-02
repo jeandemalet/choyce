@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import os
+import sys
 import math
 import time
 from io import BytesIO
@@ -11,7 +13,7 @@ from pathlib import Path
 from collections import OrderedDict
 
 from PySide6.QtCore import Qt, QSize, QRectF, QPointF, Signal, Slot, QObject, QRunnable, QThreadPool, QTimer, QItemSelectionModel, QSettings
-from PySide6.QtGui import QImage, QPainter, QPainterPath, QColor, QFont, QShortcut, QKeySequence, QColorSpace, QPen
+from PySide6.QtGui import QIcon, QImage, QPainter, QPainterPath, QColor, QFont, QShortcut, QKeySequence, QColorSpace, QPen
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QComboBox, QSplitter, QListWidget, QListWidgetItem, QFrame, QScrollArea, QButtonGroup,
     QStackedWidget, QAbstractItemView, QFileDialog, QMessageBox, QStyledItemDelegate, QStyle, QMenu, QColorDialog)
@@ -20,8 +22,8 @@ from triphoto import (PhotoSession, sort_photos, SORT_OPTIONS, load_screen_previ
     export_original_copy, EXPORT_DIR_NAME, PICK_NEUTRAL, PICK_REJECT, PICK_SELECT)
 from triphoto_prefs import (ALIASES, PreferencesDialog, Recents, ScanJob, age_label, path_key, shortcut_map)
 from triphoto_review import BackgroundPicker, RatingBar, ReviewPage
-from triphoto_theme import (ACCENT, BACKGROUNDS, FAINT, INK, RAISED, REJECT, SELECT, STYLE, TEXT,
-    contrast_on, draw_check, draw_cross, draw_flag, draw_stars)
+from triphoto_theme import (ACCENT, ASSETS, BACKGROUNDS, FAINT, INK, RAISED, REJECT, SELECT, STYLE, TEXT,
+    contrast_on, draw_check, draw_clear_star, draw_cross, draw_flag, draw_stars)
 
 # Tests point this to a separate store, so that they never touch the user's settings.
 SETTINGS_SCOPE = os.environ.get('TRIPHOTO_SETTINGS', 'TriPhoto')
@@ -279,7 +281,8 @@ class PhotoDelegate(QStyledItemDelegate):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(thumb.adjusted(.8, .8, -.8, -.8), 5, 5)
         middle = rect.bottom()-13
-        draw_stars(painter, rect.x()+8, middle, photo.stars, 5.5, 14.0)
+        draw_clear_star(painter, rect.x()+8, middle, 5.5, TEXT if photo.stars else '#4a4a4c')
+        draw_stars(painter, rect.x()+24, middle, photo.stars, 5.5, 14.0)
         painter.setFont(QFont(option.font.family(), 8))
         painter.setPen(QColor(TEXT if selected else FAINT))
         painter.drawText(QRectF(rect.right()-74, middle-10, 42, 20), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, str(index.row()+1).zfill(3))
@@ -300,9 +303,13 @@ class PhotoDelegate(QStyledItemDelegate):
                 if x >= rect.right()-30:
                     self.window.toggle_flag(index.row())
                     return True
-                if rect.x() <= x < rect.x()+5*14+2:
-                    photo = index.data(Qt.ItemDataRole.UserRole)
-                    value = int((x-rect.x())//14)+1
+                photo = index.data(Qt.ItemDataRole.UserRole)
+                if rect.x() <= x < rect.x()+17:
+                    if photo.stars:
+                        self.window.change([photo], stars=0)
+                    return True
+                if rect.x()+17 <= x < rect.x()+17+5*14:
+                    value = int((x-rect.x()-17)//14)+1
                     self.window.change([photo], stars=0 if photo.stars == value else value)
                     return True
         return super().editorEvent(event, model, option, index)
@@ -510,7 +517,7 @@ class Window(QMainWindow):
         self.pool.setMaxThreadCount(3)
         self.setWindowTitle('TriPhoto')
         self.resize(1440, 920)
-        self.setMinimumSize(1180, 640)
+        self.setMinimumSize(1260, 640)
         central = QWidget()
         layout = QVBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -521,43 +528,51 @@ class Window(QMainWindow):
         top = QHBoxLayout(header)
         top.setContentsMargins(16, 8, 12, 8)
         top.setSpacing(8)
-        top.addWidget(QLabel('TriPhoto', objectName='brand'))
-        top.addSpacing(6)
+        # Two sides of equal stretch keep Tri and Révision in the middle of the window.
+        left, right = QHBoxLayout(), QHBoxLayout()
+        left.setSpacing(8)
+        right.setSpacing(8)
+        left.addWidget(QLabel('TriPhoto', objectName='brand'))
+        left.addSpacing(6)
         self.project_button = QPushButton('Projet', objectName='menu')
         self.project_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.project_menu = QMenu(self)
         self.project_menu.aboutToShow.connect(self.fill_project_menu)
         self.project_button.setMenu(self.project_menu)
-        top.addWidget(self.project_button)
-        top.addSpacing(6)
+        left.addWidget(self.project_button)
+        left.addSpacing(6)
         self.folder_label = QLabel('', objectName='muted')
         self.folder_label.hide()
         self.counter = QLabel('Aucune photo')
-        top.addWidget(self.counter)
+        left.addWidget(self.counter)
         self.name_label = QLabel('', objectName='faint')
-        top.addWidget(self.name_label)
-        top.addStretch(1)
-        self.stars = self.combo(top, 'Notes', STAR_FILTERS)
-        self.flags = self.combo(top, 'Marqueurs', FLAG_FILTERS)
-        self.sort = self.combo(top, 'Tri', SORT_OPTIONS)
-        top.addSpacing(6)
+        left.addWidget(self.name_label)
+        left.addSpacing(6)
+        self.stars = self.combo(left, 'Notes', STAR_FILTERS)
+        self.flags = self.combo(left, 'Marqueurs', FLAG_FILTERS)
+        left.addStretch(1)
+        right.addStretch(1)
+        self.sort = self.combo(right, 'Tri', SORT_OPTIONS)
+        right.addSpacing(6)
         segments = QFrame(objectName='segments')
         segment_row = QHBoxLayout(segments)
         segment_row.setContentsMargins(3, 3, 3, 3)
         segment_row.setSpacing(2)
-        self.tri_button = QPushButton('Tri', objectName='seg', checkable=True, checked=True)
-        self.review_button = QPushButton('Revoir', objectName='seg', checkable=True)
+        self.tri_button = QPushButton('Tri', objectName='mainseg', checkable=True, checked=True)
+        self.review_button = QPushButton('Révision', objectName='mainseg', checkable=True)
         group = QButtonGroup(self)
         for button, active in ((self.tri_button, False), (self.review_button, True)):
             group.addButton(button)
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             button.clicked.connect(lambda checked=False, value=active: self.set_review(value))
             segment_row.addWidget(button)
-        top.addWidget(segments)
         self.segments = segments
-        top.addSpacing(6)
-        self.export_button = self.button(top, 'Exporter les 5 étoiles', self.export, 'primary')
-        self.prefs_button = self.button(top, 'Préférences', self.open_preferences, 'ghost')
+        right.addSpacing(6)
+        self.export_button = self.button(right, 'Exporter les 5 étoiles', self.export, 'primary')
+        self.prefs_button = self.button(right, 'Préférences', self.open_preferences, 'ghost')
+        top.addLayout(left, 1)
+        top.addWidget(segments)
+        top.addLayout(right, 1)
         layout.addWidget(header)
         splitter = QSplitter()
         self.viewer = Viewer()
@@ -637,7 +652,7 @@ class Window(QMainWindow):
             'prev': lambda: self.navigate(-1), 'next': lambda: self.navigate(1),
             'flag': self.toggle_flag, 'select': lambda: self.set_pick(PICK_SELECT),
             'reject': lambda: self.set_pick(PICK_REJECT), 'neutral': lambda: self.set_pick(PICK_NEUTRAL),
-            'undo': self.undo, 'fit': lambda: self.viewer.set_zoom(1) if not self.review_active else None,
+            'undo': self.undo, 'fit': lambda: self.review.zoom_reset() if self.review_active else self.viewer.set_zoom(1),
             'zoom_in': lambda: self.zoom_by(1.15), 'zoom_out': lambda: self.zoom_by(1/1.15),
             'background': self.cycle_background, 'review': lambda: self.set_review(not self.review_active),
             'shuffle': lambda: self.review.shuffle() if self.review_active else None,
@@ -745,7 +760,7 @@ class Window(QMainWindow):
         self.review_active = active
         self.update_project_state()
         if changed and active:
-            self.review.rebuild()
+            self.review.enter()
         elif changed:
             self.show_current()
 
@@ -876,7 +891,7 @@ class Window(QMainWindow):
         # Nothing to filter or switch on the welcome screen.
         for control in (self.sort, self.segments, self.counter):
             control.setVisible(has_photos)
-        # In Revoir, these two filters live in the page's own top bar.
+        # In Révision, these two filters live in the page's own top bar.
         for control in (self.stars, self.flags):
             control.setVisible(has_photos and not self.review_active)
         name = project_label(self.project_path) if self.project_path else ''
@@ -890,6 +905,7 @@ class Window(QMainWindow):
             return
         try:
             self.session.save()
+            self.review.save_state()
         except OSError as error:
             self.toast(f'Enregistrement impossible : {error}', 6000)
 
@@ -937,7 +953,7 @@ class Window(QMainWindow):
         combo.setToolTip(label)
         for key, text in values.items():
             combo.addItem(text, key)
-        combo.setFixedWidth({'Tri': 182, 'Notes': 146, 'Marqueurs': 156}[label])
+        combo.setFixedWidth({'Tri': 182, 'Notes': 136, 'Marqueurs': 146}[label])
         combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         combo.currentIndexChanged.connect(self.filters_changed)
         layout.addWidget(combo)
@@ -975,7 +991,15 @@ class Window(QMainWindow):
         self.sort.blockSignals(True)
         self.sort.setCurrentIndex(self.sort.findData(session.sort_mode))
         self.sort.blockSignals(False)
+        self.review.restore_state()
         self.apply_filters()
+        if session.photos and not self.photos:
+            # The remembered filters no longer match anything: never open on an empty page.
+            for combo in (self.stars, self.flags):
+                combo.blockSignals(True)
+                combo.setCurrentIndex(0)
+                combo.blockSignals(False)
+            self.apply_filters()
         self.update_project_state()
 
     def apply_filters(self, *args):
@@ -1212,10 +1236,15 @@ class Window(QMainWindow):
     def update_counter(self):
         if self.photos:
             five = sum(p.stars == 5 for p in self.photos)
-            self.counter.setText(f'{self.list.currentRow()+1} / {len(self.photos)}')
             current = self.current_photo()
+            if self.review_active and not self.review.targets():
+                # Nothing picked on the page yet: name no photo.
+                self.counter.setText(f'{len(self.photos)} photos')
+                current = None
+            else:
+                self.counter.setText(f'{self.list.currentRow()+1} / {len(self.photos)}')
             metrics = self.name_label.fontMetrics()
-            self.name_label.setText(metrics.elidedText(current.path.name, Qt.TextElideMode.ElideMiddle, 180) if current else '')
+            self.name_label.setText(metrics.elidedText(current.path.name, Qt.TextElideMode.ElideMiddle, 150) if current else '')
             self.counter.setToolTip(f'{len(self.list.selectedItems())} sélectionnée(s) · {five} à 5 étoiles')
         else:
             self.counter.setText('Aucune photo')
@@ -1333,6 +1362,10 @@ def main():
     app = QApplication([])
     app.setStyle('Fusion')
     app.setStyleSheet(STYLE)
+    if sys.platform == 'win32':
+        # Otherwise the taskbar shows the icon of Python.
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('TriPhoto')
+    app.setWindowIcon(QIcon(str(ASSETS/'triphoto.ico')))
     window = Window(args.folder)
     window.showMaximized()
     return app.exec()

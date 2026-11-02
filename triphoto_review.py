@@ -1,4 +1,4 @@
-"""The Revoir page: other ways of looking at the photos selected by the filters.
+"""The Révision page: other ways of looking at the photos selected by the filters.
 
 Every mode reads window.photos, so the header filters drive it, and rates through
 the window, so notes, undo and session saving behave as on the Tri page.
@@ -9,25 +9,33 @@ import json
 import math
 import random
 import threading
+import time
 import zlib
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QObject, QPointF, QRectF, QRunnable, QThreadPool, QTimer, QVariantAnimation, QEasingCurve, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QColorDialog, QComboBox, QFrame, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup, QColorDialog, QComboBox, QFrame, QHBoxLayout, QLabel,
     QPushButton, QScrollBar, QSlider, QStackedWidget, QWidget)
 from PIL import Image
 from triphoto import PICK_NEUTRAL, PICK_REJECT, PICK_SELECT
-from triphoto_theme import ACCENT, ASSETS, BACKGROUNDS, FAINT, MUTED, REJECT, SELECT, TEXT, contrast_on, draw_check, draw_cross, draw_flag, draw_stars
+from triphoto_theme import ACCENT, ASSETS, BACKGROUNDS, FAINT, MUTED, REJECT, SELECT, TEXT, contrast_on, draw_check, draw_clear_star, draw_cross, draw_flag, draw_stars
 
-MODES = [('toile', 'Toile'), ('swipe', 'Swipe'), ('color', 'Couleur'), ('wall', 'Mosaïque')]
-# What a swipe or a drag out of the mosaic does to a photo. Offered in both places.
+MODES = [('toile', 'Toile'), ('swipe', 'Swipe'), ('color', 'Couleur'), ('wall', 'Grille')]
+# What a swipe or a drag out of the grid does to a photo. Offered in both places.
 ACTIONS = [('none', 'Ne rien changer'), ('select', 'Retenir'), ('reject', 'Rejeter'), ('neutral', 'Neutre'),
            ('minus', 'Retirer une étoile'), ('plus', 'Ajouter une étoile'), ('star5', '5 étoiles'), ('star4', '4 étoiles'),
            ('star3', '3 étoiles'), ('star2', '2 étoiles'), ('star1', '1 étoile'), ('star0', '0 étoile')]
 STAGGERED_MODULES = json.loads((ASSETS/'staggered_modules.json').read_text(encoding='utf-8'))
 TOP_CLEARANCE, BOTTOM_CLEARANCE = 66, 76
 ANALYSIS_FILE = 'colors.json'
+STATE_FILE = 'review_state.json'
+# Name and upper hue of each block of the Couleur mode, in rainbow order from the reds.
+COLOR_FAMILIES = [('Rouges', 15), ('Oranges', 45), ('Jaunes', 70), ('Verts', 165), ('Turquoises', 200), ('Bleus', 255),
+                  ('Violets', 300), ('Roses', 345)]
+FAMILY_COLORS = {'Rouges': '#c8392f', 'Oranges': '#d9772b', 'Jaunes': '#dcc02e', 'Verts': '#3ea04a', 'Turquoises': '#2fa8a8',
+                 'Bleus': '#3560c8', 'Violets': '#8a44c0', 'Roses': '#d05a98', 'Neutres': '#8c8c8c'}
+ROW_HEIGHT, WALL_WIDTH = 210, 62
 
 
 def analyse_photo(path):
@@ -67,12 +75,11 @@ def analyse_photo(path):
             'rgb': [int(best[2]/best[0]), int(best[3]/best[0]), int(best[4]/best[0])]}
 
 
-def staggered_plan(keys, ratios, emphasis='equal'):
+def staggered_plan(keys, ratios):
     """Choose a stable sequence of modules from the photographs' proportions.
 
     Same logic as the editorial galleries of the website: a rhythm of solos, pairs
     and diagonals, without a repeated shape. ratios are height / width.
-    emphasis gives the favored orientation a solo module as often as possible.
     """
     def fingerprint(value):
         return zlib.crc32(value.encode())
@@ -83,10 +90,8 @@ def staggered_plan(keys, ratios, emphasis='equal'):
     while index < len(keys):
         ratio, remaining = ratios[index], len(keys)-index
         token = fingerprint(f'{keys[index]}:{seed}:{index}')
-        favored = (emphasis == 'landscape' and ratio < .9) or (emphasis == 'portrait' and ratio >= 1)
-        interval = next_solo+3 if emphasis != 'equal' else next_solo
-        solo = (remaining == 1 or (index == 0 and (ratio < .9 or token % 4 == 0)) or since_solo >= interval
-                or (ratio < .53 and since_solo > 0) or (favored and since_solo > 0))
+        solo = (remaining == 1 or (index == 0 and (ratio < .9 or token % 4 == 0)) or since_solo >= next_solo
+                or (ratio < .53 and since_solo > 0))
         kind = ('wide' if ratio < .9 else 'solo') if solo else 'diagonal' if since_diagonal >= 6+token % 4 else 'pair'
         candidates = [m for m in STAGGERED_MODULES if m['kind'] == kind and len(m['frames']) <= remaining]
         candidates = candidates or [m for m in STAGGERED_MODULES if len(m['frames']) <= remaining]
@@ -116,13 +121,23 @@ def staggered_plan(keys, ratios, emphasis='equal'):
     return plan
 
 
-def color_key(info):
-    """Rainbow order starting just before the reds; neutrals close the sequence."""
+def color_key(info, order='hue'):
+    """Rainbow order starting from the reds, neutrals closing it, or plain lightness."""
     if not info:
         return (2, 0, 0)
+    if order in ('light', 'dark'):
+        return (0, -info['light'] if order == 'light' else info['light'], 0)
     if info.get('neutral'):
         return (1, -info['light'], 0)
-    return (0, (info['hue']+25) % 360, -info['light'])
+    hue = (info['hue']+15) % 360
+    return (0, hue if order == 'hue' else -hue, -info['light'])
+
+
+def color_family(info):
+    """The block of the Couleur mode a photo belongs to."""
+    if not info or info.get('neutral'):
+        return 'Neutres'
+    return next((name for name, upper in COLOR_FAMILIES if info['hue'] < upper), 'Rouges')
 
 
 class AnalysisSignals(QObject):
@@ -167,10 +182,13 @@ class RatingBar(QWidget):
     def relayout(self):
         self.name_width = 210 if self.show_name else 0
         marks = 2 if self.window.marker == 'pick' else 1
-        self.setFixedSize(self.name_width+18+5*23+18+marks*30+8, 46)
+        self.setFixedSize(self.name_width+18+26+5*23+18+marks*30+8, 46)
 
     def stars_x(self):
-        return self.name_width+18+10
+        return self.name_width+18+26+10
+
+    def clear_rect(self):
+        return QRectF(self.name_width+8, 7, 30, 32)
 
     def mark_rects(self):
         x = self.stars_x()+5*23+6
@@ -190,6 +208,8 @@ class RatingBar(QWidget):
             painter.setFont(QFont(self.font().family(), 9))
             text = painter.fontMetrics().elidedText(text, Qt.TextElideMode.ElideMiddle, self.name_width-16)
             painter.drawText(QRectF(16, 0, self.name_width-16, self.height()), Qt.AlignmentFlag.AlignVCenter, text)
+        clear = self.clear_rect().center()
+        draw_clear_star(painter, clear.x(), clear.y(), 8.0, TEXT if any(p.stars for p in photos) else FAINT)
         draw_stars(painter, self.stars_x(), self.height()/2, photo.stars if photo else 0, 8.0, 23.0)
         rects = self.mark_rects()
         icon = lambda r: r.adjusted(7, 8, -7, -8)
@@ -199,9 +219,16 @@ class RatingBar(QWidget):
         else:
             draw_flag(painter, icon(rects[0]), ACCENT if photo and photo.flagged else FAINT)
 
+    def mouseMoveEvent(self, event):
+        self.setToolTip('Retirer les étoiles' if self.clear_rect().contains(event.position()) else '')
+
     def mouseReleaseEvent(self, event):
         photos = self.window.target_photos()
         if not photos:
+            return
+        if self.clear_rect().contains(event.position()):
+            if any(p.stars for p in photos):
+                self.rated.emit(0)
             return
         x, y = event.position().x(), event.position().y()
         start = self.stars_x()-11.5
@@ -241,7 +268,7 @@ class Swatch(QAbstractButton):
 
 
 class BackgroundPicker(QFrame):
-    """Preset greys and any other color, shared by the Tri and Revoir pages."""
+    """Preset greys and any other color, shared by the Tri and Révision pages."""
 
     def __init__(self, window, parent=None, floating=False):
         super().__init__(parent)
@@ -288,6 +315,9 @@ class Surface(QWidget):
         super().__init__(review)
         self.review = review
         self.window_ = review.window
+        self.last_clear = 0.
+        # The list always has a current row: a view only acts on it once a photo is picked here.
+        self.active = False
         self.setMouseTracking(True)
         self.request_timer = QTimer(self)
         self.request_timer.setSingleShot(True)
@@ -311,11 +341,51 @@ class Surface(QWidget):
     def zoom(self, factor):
         pass
 
+    def zoom_reset(self):
+        pass
+
+    def zoom_text(self):
+        return '100 %'
+
+    def clear_hit(self, position):
+        """The photo whose zero-star button lies under this point of the widget."""
+        return None
+
+    def clear_click(self, position):
+        photo = self.clear_hit(position)
+        if photo is None:
+            return False
+        self.window_.change([photo], stars=0)
+        self.last_clear = time.monotonic()
+        return True
+
+    def just_cleared(self):
+        """Clearing fast reads as a double click, which must not leave for the Tri page."""
+        return time.monotonic()-self.last_clear < QApplication.doubleClickInterval()/1000
+
+    def hover_clear(self, position):
+        hit = self.clear_hit(position) is not None
+        self.setCursor(Qt.CursorShape.PointingHandCursor) if hit else self.unsetCursor()
+        self.setToolTip('Retirer les étoiles' if hit else '')
+
     def targets(self):
-        return self.window_.selected_photos()
+        return self.window_.selected_photos() if self.active else []
 
     def current(self):
         return self.window_.current_photo()
+
+    def pick(self, photo, extend=False):
+        extend = extend and self.active
+        self.active = True
+        self.window_.select_photo(photo, extend)
+        self.update()
+        self.review.sync_bar()
+
+    def unpick(self):
+        if self.active:
+            self.active = False
+            self.update()
+            self.review.sync_bar()
 
     def schedule_requests(self):
         if not self.request_timer.isActive():
@@ -345,19 +415,31 @@ class Surface(QWidget):
         if photo.pick == PICK_REJECT:
             painter.fillRect(target, QColor(0, 0, 0, 120))
 
+    def badge_layout(self, rect, photo):
+        """Zero-star button, when there are stars to take away, and the plate beside it."""
+        if not photo.stars and photo.pick == PICK_NEUTRAL:
+            return None, None
+        width = (5*11+8 if photo.stars else 0)+(17 if photo.pick != PICK_NEUTRAL else 0)
+        button = QRectF(rect.left()+6, rect.bottom()-25, 19, 19) if photo.stars else None
+        plate = QRectF(rect.left()+(29 if photo.stars else 6), rect.bottom()-25, width+4, 19)
+        if rect.width() < plate.right()-rect.left()+4 or rect.height() < 34:
+            return None, None
+        return button, plate
+
     def paint_badges(self, painter, rect, photo):
         """Stars and marker on a small dark plate, readable on any photo or background."""
-        if not photo.stars and photo.pick == PICK_NEUTRAL:
-            return
-        width = (5*11+8 if photo.stars else 0)+(17 if photo.pick != PICK_NEUTRAL else 0)
-        plate = QRectF(rect.left()+6, rect.bottom()-25, width+4, 19)
-        if rect.width() < width+14 or rect.height() < 34:
+        button, plate = self.badge_layout(rect, photo)
+        if plate is None:
             return
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(15, 15, 16, 190))
         painter.drawRoundedRect(plate, 5, 5)
+        if button is not None:
+            painter.setBrush(QColor(15, 15, 16, 190))
+            painter.drawEllipse(button)
+            draw_clear_star(painter, button.center().x(), button.center().y(), 5.5, TEXT)
         x = plate.left()+9
         if photo.stars:
             draw_stars(painter, x, plate.center().y(), photo.stars, 4.5, 11.0, '#6a6a6d')
@@ -378,17 +460,21 @@ class Surface(QWidget):
 
 
 class WallView(Surface):
-    """Mosaic of photos. Couleur uses the same wall, sorted by dominant color."""
+    """Grid of photos. Couleur uses the same wall, sorted by dominant color."""
 
     def __init__(self, review, by_color=False):
         super().__init__(review)
         self.by_color = by_color
         settings = review.settings
-        self.row_height = 210
+        self.height_setting = 'color_row_height' if by_color else 'wall_row_height'
+        self.row_height = float(settings.value(self.height_setting, ROW_HEIGHT))
         self.layout_kind = 'rows' if by_color else settings.value('wall_layout', 'staggered')
-        self.width_percent = 100 if by_color else int(settings.value('wall_width', 62))
+        self.width_percent = 100 if by_color else int(settings.value('wall_width', WALL_WIDTH))
         self.emphasis = 'equal' if by_color else settings.value('wall_emphasis', 'equal')
         self.show_strip = settings.value('color_strip', False, type=bool)
+        self.order = settings.value('color_order', 'hue')
+        self.groups = settings.value('color_groups', False, type=bool)
+        self.headings = []
         self.order_seed = None
         self.set_aside = set()
         self.tiles = []
@@ -407,7 +493,7 @@ class WallView(Surface):
     def rebuild(self):
         self.ordered = [p for p in self.window_.photos if p.relative_path not in self.set_aside]
         if self.by_color:
-            self.ordered.sort(key=lambda p: color_key(self.review.info.get(p.relative_path)))
+            self.ordered.sort(key=lambda p: color_key(self.review.info.get(p.relative_path), self.order))
         elif self.order_seed is not None:
             # Hashed, so that removing one photo leaves the others where they are.
             self.ordered.sort(key=lambda p: zlib.crc32(f'{self.order_seed}|{p.relative_path}'.encode()))
@@ -432,6 +518,7 @@ class WallView(Surface):
         anchor_key = self.tiles[anchor][1].relative_path if anchor is not None and anchor < len(self.tiles) else None
         left, width = self.content_box()
         self.tiles = []
+        self.headings = []
         if self.layout_kind == 'staggered':
             bottom = self.layout_staggered(left, width)
         else:
@@ -449,47 +536,59 @@ class WallView(Surface):
         self.schedule_requests()
 
     def layout_rows(self, left, width):
-        gap = 6
         y = float(TOP_CLEARANCE)
+        if not (self.by_color and self.groups):
+            return self.place_rows(self.ordered, left, width, y)
+        blocks = {}
+        for photo in self.ordered:
+            blocks.setdefault(color_family(self.review.info.get(photo.relative_path)), []).append(photo)
+        names = [name for name, _ in COLOR_FAMILIES]
+        for name in (names[::-1] if self.order == 'hue_desc' else names)+['Neutres']:
+            if name in blocks:
+                y += 40 if self.headings else 0
+                self.headings.append((QRectF(left, y, width, 30), name, len(blocks[name])))
+                y = self.place_rows(blocks[name], left, width, y+38)
+        return y
 
-        def place(row, target):
-            nonlocal y
-            total = sum(self.review.aspect(p) for p in row)
-            height = min(target*1.15, (width-gap*(len(row)-1))/total)
-            x = left
-            for photo in row:
-                tile = self.review.aspect(photo)*height
-                self.tiles.append((QRectF(x, y, tile, height), photo))
-                x += tile+gap
-            y += height+gap
+    def place_rows(self, photos, left, width, y):
+        """Rows in the order of the photos, set to the height of one orientation.
 
-        def take(queue, target):
+        Set to the horizontals, every photo of a row has the same height: the verticals
+        look small. Set to the verticals, a horizontal keeps the same long side and sits
+        centered in the taller row: it looks small. Formats égaux follows the majority.
+        """
+        gap = 6
+        reference = self.emphasis
+        if reference == 'equal':
+            landscapes = sum(self.review.aspect(p) >= 1 for p in photos)
+            reference = 'landscape' if landscapes*2 >= len(photos) else 'portrait'
+
+        def unit(photo):
+            aspect = self.review.aspect(photo)
+            return (1., 1/aspect) if reference == 'portrait' and aspect >= 1 else (aspect, 1.)
+
+        target = self.row_height*(1.35 if reference == 'portrait' else 1)
+        tallest = max(240, self.height()-TOP_CLEARANCE-BOTTOM_CLEARANCE)
+        queue = list(photos)
+        while queue:
             row, total = [], 0.
             while queue and total*target < width:
                 row.append(queue.pop(0))
-                total += self.review.aspect(row[-1])
-            return row
-
-        if self.emphasis == 'equal':
-            queues = [(list(self.ordered), self.row_height)]
-        else:
-            # Large rows of the favored orientation alternate with small rows of the
-            # other: both stay uncropped, and the difference of size does the work.
-            landscape = self.emphasis == 'landscape'
-            favored = [p for p in self.ordered if (self.review.aspect(p) >= 1) == landscape]
-            others = [p for p in self.ordered if (self.review.aspect(p) >= 1) != landscape]
-            queues = [(favored, self.row_height*1.5), (others, self.row_height*.72)]
-        while any(queue for queue, _ in queues):
-            for queue, target in queues:
-                if queue:
-                    place(take(queue, target), target)
+                total += unit(row[-1])[0]
+            height = min(target*1.15, tallest, (width-gap*(len(row)-1))/total)
+            x = left
+            for photo in row:
+                tile_width, tile_height = unit(photo)
+                self.tiles.append((QRectF(x, y+(1-tile_height)*height/2, tile_width*height, tile_height*height), photo))
+                x += tile_width*height+gap
+            y += height+gap
         return y
 
     def layout_staggered(self, left, width):
         if not self.ordered:
             return float(TOP_CLEARANCE)
         ratios = [1/self.review.aspect(p) for p in self.ordered]
-        plan = staggered_plan([p.relative_path for p in self.ordered], ratios, self.emphasis)
+        plan = staggered_plan([p.relative_path for p in self.ordered], ratios)
         # On the website a tall photo may exceed the screen; to judge it here, it must not.
         tallest = max(240, self.height()-TOP_CLEARANCE-BOTTOM_CLEARANCE)
         cursor, index = float(TOP_CLEARANCE), 0
@@ -542,8 +641,9 @@ class WallView(Surface):
             self.paint_empty(painter, 'Aucune photo pour ces filtres')
             return
         painter.translate(0, -self.bar.value())
+        self.paint_headings(painter)
         current = self.window_.current_photo()
-        selected = {p.relative_path for p in self.window_.selected_photos()}
+        selected = {p.relative_path for p in self.targets()}
         for rect, photo in self.visible_tiles():
             self.paint_photo(painter, rect, photo)
             if self.by_color and self.show_strip:
@@ -561,6 +661,24 @@ class WallView(Surface):
         if self.dragging:
             painter.resetTransform()
             self.paint_drag(painter)
+
+    def paint_headings(self, painter):
+        top, bottom = self.bar.value(), self.bar.value()+self.height()
+        for rect, name, count in self.headings:
+            if rect.bottom() < top or rect.top() > bottom:
+                continue
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(FAMILY_COLORS[name]))
+            painter.drawEllipse(QRectF(rect.left(), rect.center().y()-7, 14, 14))
+            painter.setPen(self.hint_color())
+            font = painter.font()
+            font.setPointSize(14)
+            font.setWeight(QFont.Weight.DemiBold)
+            painter.setFont(font)
+            painter.drawText(rect.adjusted(24, 0, 0, 0), Qt.AlignmentFlag.AlignVCenter, f'{name}  ·  {count}')
+            painter.restore()
 
     def drop_zones(self):
         left, width = self.content_box()
@@ -606,20 +724,46 @@ class WallView(Surface):
         if self.layout_kind == 'staggered':
             self.review.set_wall_width(self.width_percent*(1.06 if factor > 1 else 1/1.06))
         else:
-            self.row_height = max(90, min(560, self.row_height*factor))
-            self.relayout()
+            self.set_row_height(max(90, min(560, self.row_height*factor)))
+
+    def set_row_height(self, value):
+        self.row_height = value
+        self.review.settings.setValue(self.height_setting, value)
+        self.relayout()
+        self.review.sync_zoom()
+
+    def zoom_reset(self):
+        if self.layout_kind == 'staggered':
+            self.review.set_wall_width(WALL_WIDTH)
+        else:
+            self.set_row_height(ROW_HEIGHT)
+
+    def zoom_text(self):
+        return f'{self.width_percent} %' if self.layout_kind == 'staggered' else f'{round(self.row_height/ROW_HEIGHT*100)} %'
+
+    def clear_hit(self, position):
+        point = position+QPointF(0, self.bar.value())
+        for rect, photo in self.visible_tiles():
+            button = self.badge_layout(rect, photo)[0]
+            if button is not None and button.adjusted(-4, -4, 4, 4).contains(point):
+                return photo
+        return None
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            if self.clear_click(event.position()):
+                return
             photo = self.tile_at(event.position())
             if photo:
                 extend = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
-                self.window_.select_photo(photo, extend)
+                self.pick(photo, extend)
                 self.press = (photo, event.position()) if not extend and not self.by_color else None
-                self.update()
+            else:
+                self.unpick()
 
     def mouseMoveEvent(self, event):
         if self.press is None:
+            self.hover_clear(event.position())
             return
         if not self.dragging and (event.position()-self.press[1]).manhattanLength() > 14:
             self.dragging = True
@@ -640,6 +784,8 @@ class WallView(Surface):
                 self.review.drop_out(press[0])
 
     def mouseDoubleClickEvent(self, event):
+        if self.clear_click(event.position()) or self.just_cleared():
+            return
         photo = self.tile_at(event.position())
         if photo:
             self.window_.open_in_tri(photo)
@@ -648,9 +794,10 @@ class WallView(Surface):
         if not self.tiles:
             return
         current = self.window_.current_photo()
-        index = next((i for i, (_, p) in enumerate(self.tiles) if p is current), 0)
-        rect, photo = self.tiles[max(0, min(len(self.tiles)-1, index+delta))]
-        self.window_.select_photo(photo)
+        # With nothing picked yet, the keys start from what is on screen.
+        index = next((i for i, (_, p) in enumerate(self.tiles) if p is current), 0)+delta if self.active else self.first_visible() or 0
+        rect, photo = self.tiles[max(0, min(len(self.tiles)-1, index))]
+        self.pick(photo)
         top = self.bar.value()
         if rect.top()-TOP_CLEARANCE < top:
             self.bar.setValue(int(rect.top()-TOP_CLEARANCE))
@@ -660,9 +807,9 @@ class WallView(Surface):
 
 
 class ToileView(Surface):
-    """A handful of prints laid on a table, drawn from the filtered photos.
+    """The filtered photos laid out as prints on a table, so many across its width.
 
-    Mélanger deals a new hand. Better-rated photos are laid out larger.
+    Mélanger lays them out again. Better-rated photos are larger.
     """
     CELL_WIDTH, CELL_HEIGHT = 440, 390
 
@@ -672,7 +819,8 @@ class ToileView(Surface):
         self.stack = []
         self.dealt = []
         self.available = set()
-        self.limit = int(review.settings.value('toile_limit', 24))
+        self.columns = int(review.settings.value('toile_columns', 8))
+        self.moved = False
         self.straight = review.settings.value('toile_straight', False, type=bool)
         self.scale_ = .6
         self.pan = QPointF()
@@ -698,13 +846,13 @@ class ToileView(Surface):
 
     def deal(self):
         photos = self.window_.photos
-        count = min(self.limit, len(photos)) if self.limit else len(photos)
+        count = len(photos)
         self.dealt = random.sample(photos, count)
         self.stack = list(self.dealt)
         self.positions = {}
+        self.active = False
         if count:
-            ratio = max(.5, self.width()/max(1, self.height()-TOP_CLEARANCE-BOTTOM_CLEARANCE))
-            columns = max(1, round(math.sqrt(count*ratio*self.CELL_HEIGHT/self.CELL_WIDTH)))
+            columns = min(self.columns, count)
             rows = math.ceil(count/columns)
             cells = list(range(count))
             random.shuffle(cells)
@@ -712,7 +860,6 @@ class ToileView(Surface):
                 x = (cell % columns-(columns-1)/2)*self.CELL_WIDTH+random.uniform(-55, 55)
                 y = (cell//columns-(rows-1)/2)*self.CELL_HEIGHT+random.uniform(-45, 45)
                 self.positions[photo.relative_path] = [x, y, random.uniform(-4, 4)]
-            self.window_.select_photo(self.dealt[0])
         self.fresh = True
         self.fit()
 
@@ -723,11 +870,14 @@ class ToileView(Surface):
         ys = [p[1] for p in self.positions.values()]
         span_w, span_h = max(xs)-min(xs)+460, max(ys)-min(ys)+430
         area_h = self.height()-TOP_CLEARANCE-BOTTOM_CLEARANCE
-        self.scale_ = max(.2, min(1.3, min(self.width()/span_w, area_h/span_h)))
-        # Centered between the top and bottom bars rather than in the whole page.
-        shift = (TOP_CLEARANCE-BOTTOM_CLEARANCE)/2
-        self.pan = QPointF(-(max(xs)+min(xs))/2*self.scale_, shift-(max(ys)+min(ys))/2*self.scale_)
-        self.fresh = False
+        # The whole width fits; what does not fit in height continues below.
+        self.scale_ = max(.06, min(1.3, (self.width()-36)/span_w))
+        if span_h*self.scale_ <= area_h:
+            y = (TOP_CLEARANCE-BOTTOM_CLEARANCE)/2-(max(ys)+min(ys))/2*self.scale_
+        else:
+            y = TOP_CLEARANCE+10-self.height()/2-(min(ys)-215)*self.scale_
+        self.pan = QPointF(-(max(xs)+min(xs))/2*self.scale_, y)
+        self.review.sync_zoom()
 
     def shuffle(self):
         self.deal()
@@ -738,8 +888,8 @@ class ToileView(Surface):
         self.straight = value
         self.update()
 
-    def set_limit(self, value):
-        self.limit = value
+    def set_columns(self, value):
+        self.columns = value
         self.shuffle()
 
     def resizeEvent(self, event):
@@ -777,7 +927,7 @@ class ToileView(Surface):
             return
         painter.translate(QPointF(self.width()/2, self.height()/2)+self.pan)
         painter.scale(self.scale_, self.scale_)
-        selected = {p.relative_path for p in self.window_.selected_photos()}
+        selected = {p.relative_path for p in self.targets()}
         for photo in self.visible():
             rect = self.tile_rect(photo)
             painter.save()
@@ -795,6 +945,24 @@ class ToileView(Surface):
                 painter.drawRect(local.adjusted(-2, -2, 2, 2))
             painter.restore()
 
+    def clear_hit(self, position):
+        # Tiles are tilted and scaled: work in the coordinates of each tile, top one first.
+        world = self.to_world(position)
+        margin = min(30., 4/self.scale_)
+        for photo in reversed(self.stack):
+            rect = self.tile_rect(photo)
+            local = QRectF(-rect.width()/2, -rect.height()/2, rect.width(), rect.height())
+            point = world-rect.center()
+            if not self.straight:
+                angle = math.radians(-self.positions[photo.relative_path][2])
+                point = QPointF(point.x()*math.cos(angle)-point.y()*math.sin(angle), point.x()*math.sin(angle)+point.y()*math.cos(angle))
+            button = self.badge_layout(local, photo)[0]
+            if button is not None and button.adjusted(-margin, -margin, margin, margin).contains(point):
+                return photo
+            if local.contains(point):
+                return None
+        return None
+
     def tile_at(self, position):
         world = self.to_world(position)
         for photo in reversed(self.stack):
@@ -806,52 +974,77 @@ class ToileView(Surface):
         self.stack = [p for p in self.stack if p is not photo]+[photo]
 
     def mousePressEvent(self, event):
-        if event.button() != Qt.MouseButton.LeftButton:
+        if event.button() != Qt.MouseButton.LeftButton or self.clear_click(event.position()):
             return
         photo = self.tile_at(event.position())
         self.drag = (photo, event.position())
+        self.moved = False
         if photo:
             self.bring_front(photo)
-            self.window_.select_photo(photo, bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier))
+            self.pick(photo, bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier))
         self.setCursor(Qt.CursorShape.ClosedHandCursor)
         self.update()
 
     def mouseMoveEvent(self, event):
         if self.drag is None:
+            self.hover_clear(event.position())
             return
         photo, last = self.drag
         delta = event.position()-last
         self.drag = (photo, event.position())
+        self.moved = True
         if photo:
             position = self.positions[photo.relative_path]
             position[0] += delta.x()/self.scale_
             position[1] += delta.y()/self.scale_
         else:
             self.pan += delta
+            self.fresh = False
             self.schedule_requests()
         self.update()
 
     def mouseReleaseEvent(self, event):
+        if self.drag is not None and self.drag[0] is None and not self.moved:
+            self.unpick()
         self.drag = None
         self.unsetCursor()
 
     def mouseDoubleClickEvent(self, event):
+        if self.clear_click(event.position()) or self.just_cleared():
+            return
         photo = self.tile_at(event.position())
         if photo:
             self.window_.open_in_tri(photo)
 
     def wheelEvent(self, event):
-        factor = 1.15 if event.angleDelta().y() > 0 else 1/1.15
-        self.zoom(factor, event.position())
+        delta = event.angleDelta().y() or event.angleDelta().x()
+        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            self.pan += QPointF(0, delta)
+            self.fresh = False
+            self.update()
+            self.schedule_requests()
+        elif delta:
+            self.zoom(1.15 if delta > 0 else 1/1.15, event.position())
         event.accept()
 
     def zoom(self, factor, anchor=None):
         anchor = anchor if anchor is not None else QPointF(self.width()/2, self.height()/2)
         world = self.to_world(anchor)
         self.scale_ = max(.06, min(4., self.scale_*factor))
+        self.fresh = False
         self.pan = anchor-QPointF(self.width()/2, self.height()/2)-world*self.scale_
         self.update()
         self.schedule_requests()
+        self.review.sync_zoom()
+
+    def zoom_reset(self):
+        self.fresh = True
+        self.fit()
+        self.update()
+        self.schedule_requests()
+
+    def zoom_text(self):
+        return f'{round(self.scale_*100)} %'
 
     def navigate(self, delta):
         photos = [p for p in self.dealt if p in self.stack]
@@ -861,11 +1054,12 @@ class ToileView(Surface):
         index = next((i for i, p in enumerate(photos) if p is current), 0)
         photo = photos[max(0, min(len(photos)-1, index+delta))]
         self.bring_front(photo)
-        self.window_.select_photo(photo)
+        self.pick(photo)
         rect = self.tile_rect(photo)
         area = QRectF(self.to_world(QPointF(0, TOP_CLEARANCE)), self.to_world(QPointF(self.width(), self.height()-BOTTOM_CLEARANCE)))
         if not area.contains(rect):
             self.pan = -rect.center()*self.scale_
+            self.fresh = False
         self.update()
         self.schedule_requests()
 
@@ -881,6 +1075,10 @@ class SwipeView(Surface):
         self.offset = QPointF()
         self.press = None
         self.flying = 0
+        # As on the Tri page, zoom and framing stay the same from one photo to the next.
+        self.zoom_level = 1.
+        self.pan = QPointF()
+        self.pan_drag = None
         self.animation = QVariantAnimation(self)
         self.animation.setDuration(170)
         self.animation.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -889,8 +1087,12 @@ class SwipeView(Surface):
 
     def rebuild(self):
         self.finish_animation()
-        self.deck = list(self.window_.photos)
-        self.index = 0
+        photos = list(self.window_.photos)
+        # Coming back to the same photos resumes where the deck was left.
+        if {p.relative_path for p in photos} != {p.relative_path for p in self.deck}:
+            current = self.current()
+            self.deck = photos
+            self.index = next((i for i, p in enumerate(photos) if p is current), 0)
         self.offset = QPointF()
         self.settle()
 
@@ -917,18 +1119,51 @@ class SwipeView(Surface):
             self.window_.select_photo(photo)
         self.update()
         self.request_images()
-        self.review.bar.update()
+        self.review.sync_bar()
 
     def request_images(self):
         ratio = self.devicePixelRatioF()
         photo = self.current()
+        pixels = max(self.card_area().width(), self.card_area().height())*ratio*max(1., self.zoom_level)
         if photo:
-            self.window_.request_for(photo, max(self.card_area().width(), self.card_area().height())*ratio, 15)
-        for following in self.deck[self.index+1:self.index+4]:
-            self.window_.request_for(following, 1000, 4)
+            self.window_.request_for(photo, pixels, 15)
+        for n, following in enumerate(self.deck[self.index+1:self.index+4]):
+            self.window_.request_for(following, pixels if n == 0 and self.zoom_level > 1 else 1000, 4)
 
     def card_area(self):
         return QRectF(40, TOP_CLEARANCE, max(1, self.width()-80), max(1, self.height()-TOP_CLEARANCE-BOTTOM_CLEARANCE))
+
+    def framed(self, local):
+        """Where a photo goes inside its card, once zoomed and moved."""
+        width, height = local.width()*self.zoom_level, local.height()*self.zoom_level
+        return QRectF(self.pan.x()-width/2, self.pan.y()-height/2, width, height)
+
+    def zoom(self, factor, anchor=None):
+        previous = self.zoom_level
+        self.zoom_level = max(.1, min(8., previous*factor))
+        ratio = self.zoom_level/previous
+        if self.zoom_level <= 1:
+            # Below the fitted size, dragging decides: nothing could recenter the photo.
+            self.pan = QPointF()
+        elif anchor is not None:
+            self.pan = (anchor-self.card_area().center())*(1-ratio)+self.pan*ratio
+        else:
+            self.pan *= ratio
+        self.update()
+        self.schedule_requests()
+        self.review.sync_zoom()
+
+    def zoom_reset(self):
+        self.zoom(1/self.zoom_level)
+
+    def zoom_text(self):
+        return f'{round(self.zoom_level*100)} %'
+
+    def wheelEvent(self, event):
+        delta = event.angleDelta().y()
+        if delta:
+            self.zoom(1.15 if delta > 0 else 1/1.15, event.position())
+        event.accept()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -943,19 +1178,20 @@ class SwipeView(Surface):
         area = self.card_area()
         following = self.deck[self.index+1] if self.index+1 < len(self.deck) else None
         travel = min(1., abs(self.offset.x())/max(1, self.width()*.35))
-        if following:
+        # The next photo only shows while the current one is leaving.
+        if following and travel > 0:
             painter.save()
-            painter.setOpacity(.35+.65*travel)
+            painter.setOpacity(travel)
             painter.translate(area.center())
             grow = .95+.05*travel
             painter.scale(grow, grow)
-            self.paint_photo(painter, QRectF(-area.width()/2, -area.height()/2, area.width(), area.height()), following)
+            self.paint_photo(painter, self.framed(QRectF(-area.width()/2, -area.height()/2, area.width(), area.height())), following)
             painter.restore()
         painter.save()
         painter.translate(area.center()+self.offset)
         painter.rotate(self.offset.x()/max(1, self.width())*11)
         local = QRectF(-area.width()/2, -area.height()/2, area.width(), area.height())
-        self.paint_photo(painter, local, photo)
+        self.paint_photo(painter, self.framed(local), photo)
         label = self.review.swipe_labels()[1 if self.offset.x() > 0 else 0]
         if travel > .06:
             painter.setOpacity(min(1., travel*1.6))
@@ -975,15 +1211,26 @@ class SwipeView(Surface):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.current():
             self.finish_animation()
-            self.press = event.position()
+            # Zoomed in, dragging moves the photo as on the Tri page; the keys still decide.
+            if self.zoom_level > 1:
+                self.pan_drag = event.position()
+            else:
+                self.press = event.position()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
     def mouseMoveEvent(self, event):
-        if self.press is not None:
+        if self.pan_drag is not None:
+            self.pan += event.position()-self.pan_drag
+            self.pan_drag = event.position()
+            self.update()
+        elif self.press is not None:
             self.offset = QPointF(event.position().x()-self.press.x(), (event.position().y()-self.press.y())*.25)
             self.update()
 
     def mouseReleaseEvent(self, event):
+        if self.pan_drag is not None:
+            self.pan_drag = None
+            self.unsetCursor()
         if self.press is None:
             return
         self.press = None
@@ -1132,9 +1379,14 @@ class ReviewPage(QWidget):
 
     def build_toolbar(self):
         """Top bar: what applies to every mode. Options of a mode sit at the bottom."""
-        self.pill = QFrame(self, objectName='pill')
-        row = QHBoxLayout(self.pill)
-        row.setContentsMargins(8, 6, 12, 6)
+        self.pill = QWidget(self)
+        capsules = QHBoxLayout(self.pill)
+        capsules.setContentsMargins(0, 0, 0, 0)
+        capsules.setSpacing(8)
+        modes = QFrame(objectName='pill')
+        capsules.addWidget(modes)
+        row = QHBoxLayout(modes)
+        row.setContentsMargins(8, 6, 8, 6)
         row.setSpacing(4)
         self.mode_group = QButtonGroup(self)
         self.mode_buttons = {}
@@ -1146,7 +1398,11 @@ class ReviewPage(QWidget):
             self.mode_group.addButton(button)
             self.mode_buttons[key] = button
             row.addWidget(button)
-        row.addSpacing(12)
+        filters = QFrame(objectName='pill')
+        capsules.addWidget(filters)
+        row = QHBoxLayout(filters)
+        row.setContentsMargins(8, 6, 12, 6)
+        row.setSpacing(4)
         self.note_filter = NoteFilter(self.window)
         row.addWidget(self.note_filter)
         row.addSpacing(6)
@@ -1164,6 +1420,12 @@ class ReviewPage(QWidget):
         row.addSpacing(8)
         self.picker = BackgroundPicker(self.window)
         row.addWidget(self.picker)
+        row.addSpacing(8)
+        self.option_button(row, '−', lambda *_: self.zoom(1/1.15)).setToolTip('Dézoomer')
+        self.zoom_label = self.option_button(row, '100 %', self.zoom_reset)
+        self.zoom_label.setFixedWidth(58)
+        self.zoom_label.setToolTip('Revenir au zoom par défaut')
+        self.option_button(row, '+', lambda *_: self.zoom(1.15)).setToolTip('Zoomer')
 
     def option_pill(self):
         pill = QFrame(self, objectName='pill')
@@ -1206,20 +1468,27 @@ class ReviewPage(QWidget):
         toile_pill, row = self.option_pill()
         self.option_button(row, 'Mélanger', self.shuffle)
         self.straight_button = self.option_button(row, 'Photos droites', toile.set_straight, True, toile.straight)
-        self.option_combo(row, [(12, '12 photos'), (24, '24 photos'), (48, '48 photos'), (0, 'Toutes')], 'toile_limit', 24, 110,
-                          lambda value: (toile.set_limit(int(value)), self.bar.update()))
+        row.addWidget(QLabel('En largeur', objectName='muted'))
+        self.option_combo(row, [(n, f'{n} photos') for n in (4, 6, 8, 10, 12, 16)], 'toile_columns', 8, 100,
+                          lambda value: (toile.set_columns(int(value)), self.sync_bar()))
         swipe_left, row = self.option_pill()
         row.addWidget(QLabel('À gauche', objectName='muted'))
         self.swipe_left = self.action_combo(row, 'swipe_left')
         swipe_right, row = self.option_pill()
         row.addWidget(QLabel('À droite', objectName='muted'))
         self.swipe_right = self.action_combo(row, 'swipe_right')
+        color_left, row = self.option_pill()
+        self.option_combo(row, [('hue', 'Du rouge au violet'), ('hue_desc', 'Du violet au rouge'), ('light', 'Du clair au sombre'),
+                                ('dark', 'Du sombre au clair')], 'color_order', 'hue', 164, self.set_color_order)
+        self.groups_button = self.option_button(row, 'Blocs de couleur', self.set_color_groups, True, color.groups)
         color_pill, row = self.option_pill()
         self.strip_button = self.option_button(row, 'Bandeau de couleur', self.set_strip, True, color.show_strip)
         wall_left, row = self.option_pill()
         self.option_combo(row, [('staggered', 'Décalée'), ('rows', 'Rangées')], 'wall_layout', 'staggered', 100, self.set_wall_layout)
-        self.option_combo(row, [('equal', 'Formats égaux'), ('landscape', 'Horizontales en avant'), ('portrait', 'Verticales en avant')],
-                          'wall_emphasis', 'equal', 172, self.set_wall_emphasis)
+        # The staggered layout follows its modules: this choice only applies to rows.
+        self.emphasis_combo = self.option_combo(row, [('equal', 'Formats égaux'), ('landscape', 'Horizontales en avant'), ('portrait', 'Verticales en avant')],
+                                                'wall_emphasis', 'equal', 172, self.set_wall_emphasis)
+        self.emphasis_combo.setVisible(wall.layout_kind == 'rows')
         row.addWidget(QLabel('Largeur', objectName='muted'))
         self.width_slider = QSlider(Qt.Orientation.Horizontal)
         self.width_slider.setRange(35, 100)
@@ -1228,14 +1497,15 @@ class ReviewPage(QWidget):
         self.width_slider.setValue(wall.width_percent)
         self.width_slider.valueChanged.connect(self.set_wall_width)
         row.addWidget(self.width_slider)
+        row.addSpacing(12)
         self.option_button(row, 'Mélanger', self.shuffle)
         wall_right, row = self.option_pill()
         row.addWidget(QLabel('Sortie', objectName='muted'))
         self.drop_action = self.action_combo(row, 'drop_action')
         self.restore_button = self.option_button(row, '', self.restore_set_aside)
-        self.restore_button.setToolTip("Réaffiche les photos sorties de la mosaïque. Leurs notes ne changent pas : Ctrl+Z annule une note.")
+        self.restore_button.setToolTip("Réaffiche les photos sorties de la grille. Leurs notes ne changent pas : Ctrl+Z annule une note.")
         self.restore_button.hide()
-        self.options = {'toile': (None, toile_pill), 'swipe': (swipe_left, swipe_right), 'color': (None, color_pill), 'wall': (wall_left, wall_right)}
+        self.options = {'toile': (None, toile_pill), 'swipe': (swipe_left, swipe_right), 'color': (color_left, color_pill), 'wall': (wall_left, wall_right)}
         self.refresh_marker_options()
 
     def action_combo(self, row, setting):
@@ -1284,6 +1554,7 @@ class ReviewPage(QWidget):
 
     def sync_toolbar(self):
         self.picker.sync()
+        self.sync_zoom()
         self.pill.adjustSize()
         self.place_overlays()
 
@@ -1291,7 +1562,7 @@ class ReviewPage(QWidget):
         return self.window.viewer.background_menu(self)
 
     def set_bottom_visible(self, visible):
-        """The bottom drop zone of the mosaic needs the room while a photo is dragged."""
+        """The bottom drop zone of the grid needs the room while a photo is dragged."""
         self.bottom_visible = visible
         self.place_overlays()
 
@@ -1302,26 +1573,25 @@ class ReviewPage(QWidget):
             for pill in group:
                 if pill is not None:
                     pill.setVisible(mode == self.mode and self.bottom_visible)
-        self.bar.setVisible(self.bottom_visible)
+        show_bar = self.bottom_visible and bool(self.targets())
+        self.bar.setVisible(show_bar)
         left, right = options.get(self.mode, (None, None))
         for pill in (left, right):
             if pill is not None:
                 pill.adjustSize()
         y = self.height()-self.bar.height()-14
         sides = [pill.width() for pill in (left, right) if pill is not None]
-        total = self.bar.width()+sum(sides)+8*len(sides)
+        line = [part for part in (left, self.bar if show_bar else None, right) if part is not None]
+        total = sum(part.width() for part in line)+8*(len(line)-1)
         if total <= self.width()-24:
             x = (self.width()-total)//2
-            if left is not None:
-                left.move(x, y)
-                x += left.width()+8
-            self.bar.move(x, y)
-            if right is not None:
-                right.move(x+self.bar.width()+8, y)
+            for part in line:
+                part.move(x, y)
+                x += part.width()+8
         else:
             # Too narrow for one line: the options go just above the note.
             self.bar.move((self.width()-self.bar.width())//2, y)
-            above = y-54
+            above = y-54 if show_bar else y
             width = sum(sides)+8*(len(sides)-1)
             x = max(8, (self.width()-width)//2)
             for pill in (left, right):
@@ -1343,9 +1613,22 @@ class ReviewPage(QWidget):
         self.settings.setValue('review_mode', mode)
         self.mode_buttons[mode].setChecked(True)
         self.stack.setCurrentWidget(self.views[mode])
+        self.view().active = False
         self.sync_toolbar()
         self.view().rebuild()
+        self.sync_bar()
+
+    def enter(self):
+        """Arriving from the Tri page: its current photo is not a choice made here."""
+        self.view().active = False
+        self.rebuild()
+        self.sync_bar()
+
+    def sync_bar(self):
+        """The note and the name of a photo only show once there is a photo to name."""
+        self.place_overlays()
         self.bar.update()
+        self.window.update_counter()
 
     def rebuild(self):
         self.mono_cache.clear()
@@ -1357,7 +1640,7 @@ class ReviewPage(QWidget):
 
     def photos_changed(self):
         self.view().photos_changed()
-        self.bar.update()
+        self.sync_bar()
 
     def image_ready(self):
         if not self.repaint_timer.isActive():
@@ -1379,10 +1662,16 @@ class ReviewPage(QWidget):
 
     def shuffle(self, *args):
         self.view().shuffle()
-        self.bar.update()
+        self.sync_bar()
 
     def zoom(self, factor):
         self.view().zoom(factor)
+
+    def zoom_reset(self, *args):
+        self.view().zoom_reset()
+
+    def sync_zoom(self):
+        self.zoom_label.setText(self.view().zoom_text())
 
     def transformed(self, image):
         if not self.mono:
@@ -1406,9 +1695,22 @@ class ReviewPage(QWidget):
         self.settings.setValue('color_strip', value)
         self.update_view()
 
+    def set_color_order(self, value):
+        self.views['color'].order = value
+        self.views['color'].rebuild()
+
+    def set_color_groups(self, value):
+        self.views['color'].groups = value
+        self.settings.setValue('color_groups', value)
+        self.views['color'].relayout()
+        self.views['color'].bar.setValue(0)
+
     def set_wall_layout(self, value):
         self.views['wall'].layout_kind = value
         self.views['wall'].relayout()
+        self.emphasis_combo.setVisible(value == 'rows')
+        self.place_overlays()
+        self.sync_zoom()
 
     def set_wall_emphasis(self, value):
         self.views['wall'].emphasis = value
@@ -1422,6 +1724,7 @@ class ReviewPage(QWidget):
         self.width_slider.setValue(wall.width_percent)
         self.width_slider.blockSignals(False)
         wall.relayout()
+        self.sync_zoom()
 
     def apply_action(self, photo, action):
         if action == 'minus':
@@ -1446,7 +1749,7 @@ class ReviewPage(QWidget):
         return self.drop_action.currentText()
 
     def drop_out(self, photo):
-        """A photo dragged out of the mosaic: apply the chosen action and take it away."""
+        """A photo dragged out of the grid: apply the chosen action and take it away."""
         wall = self.views['wall']
         index = next((i for i, (_, p) in enumerate(wall.tiles) if p is photo), 0)
         wall.set_aside.add(photo.relative_path)
@@ -1466,6 +1769,7 @@ class ReviewPage(QWidget):
         self.views['wall'].set_aside.clear()
         self.views['wall'].rebuild()
         self.update_restore()
+        self.window.save_timer.start(500)
 
     def after_mark(self, pick):
         """A marker set from the keyboard is a decision in Swipe: move on."""
@@ -1485,6 +1789,30 @@ class ReviewPage(QWidget):
         if self.mode == 'swipe':
             self.view().skip(delta)
             self.bar.update()
+
+    # What was chosen in this project, kept next to the session like the analysis.
+    def state_path(self):
+        return self.window.session.session_dir/STATE_FILE
+
+    def save_state(self):
+        state = {'stars': self.window.stars.currentData(), 'flags': self.window.flags.currentData(),
+                 'set_aside': sorted(self.views['wall'].set_aside)}
+        self.state_path().write_text(json.dumps(state, ensure_ascii=False), encoding='utf-8')
+
+    def restore_state(self):
+        try:
+            state = json.loads(self.state_path().read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return
+        for combo, key in ((self.window.stars, 'stars'), (self.window.flags, 'flags')):
+            index = combo.findData(state.get(key)) if state.get(key) is not None else -1
+            if index >= 0:
+                combo.blockSignals(True)
+                combo.setCurrentIndex(index)
+                combo.blockSignals(False)
+        known = {photo.relative_path for photo in self.window.session.photos}
+        self.views['wall'].set_aside = known & set(state.get('set_aside', []))
+        self.update_restore()
 
     # Analysis cache, kept next to the session so that it travels with the project.
     def analysis_path(self):
@@ -1565,7 +1893,8 @@ class ReviewPage(QWidget):
         toile, swipe = self.views['toile'], self.views['swipe']
         toile.positions, toile.stack, toile.dealt, toile.available = {}, [], [], set()
         toile.fresh = True
-        swipe.deck = []
+        swipe.deck, swipe.index = [], 0
+        swipe.zoom_level, swipe.pan = 1., QPointF()
         for wall in (self.views['wall'], self.views['color']):
             wall.ordered, wall.tiles = [], []
             wall.set_aside = set()
