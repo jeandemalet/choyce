@@ -21,7 +21,7 @@ from PIL import Image, ImageCms, ImageWin
 from triphoto import (PhotoSession, sort_photos, SORT_OPTIONS, load_screen_preview, original_inventory,
     export_original_copy, EXPORT_DIR_NAME, PICK_NEUTRAL, PICK_REJECT, PICK_SELECT)
 from triphoto_prefs import (ALIASES, PreferencesDialog, Recents, ScanJob, age_label, path_key, shortcut_map)
-from triphoto_review import BackgroundPicker, RatingBar, ReviewPage
+from triphoto_review import BackgroundPicker, MarkerFilter, NoteFilter, RatingBar, ReviewPage
 from triphoto_theme import (ACCENT, ASSETS, BACKGROUNDS, FAINT, INK, RAISED, REJECT, SELECT, STYLE, TEXT,
     contrast_on, draw_check, draw_clear_star, draw_cross, draw_flag, draw_stars)
 
@@ -550,6 +550,9 @@ class Window(QMainWindow):
         left.addSpacing(6)
         self.stars = self.combo(left, 'Notes', STAR_FILTERS)
         self.flags = self.combo(left, 'Marqueurs', FLAG_FILTERS)
+        # They hold the filters; the capsules of both pages are what the user sees.
+        self.stars.hide()
+        self.flags.hide()
         left.addStretch(1)
         right.addStretch(1)
         self.sort = self.combo(right, 'Tri', SORT_OPTIONS)
@@ -593,6 +596,16 @@ class Window(QMainWindow):
         self.viewer_bar.hide()
         self.viewer_picker = BackgroundPicker(self, self.viewer, floating=True)
         self.viewer_picker.hide()
+        self.viewer_filters = QFrame(self.viewer, objectName='pill')
+        filter_row = QHBoxLayout(self.viewer_filters)
+        filter_row.setContentsMargins(8, 6, 12, 6)
+        filter_row.setSpacing(4)
+        self.note_filter = NoteFilter(self)
+        self.marker_filter = MarkerFilter(self)
+        filter_row.addWidget(self.note_filter)
+        filter_row.addSpacing(6)
+        filter_row.addWidget(self.marker_filter)
+        self.viewer_filters.hide()
         self.viewer_bar_timer = QTimer(self)
         self.viewer_bar_timer.setSingleShot(True)
         self.viewer_bar_timer.timeout.connect(self.hide_viewer_bar)
@@ -711,20 +724,26 @@ class Window(QMainWindow):
         self.toast_timer.start(duration)
 
     def show_viewer_bar(self):
+        if self.session:
+            self.viewer_filters.show()
+            self.viewer_filters.raise_()
+        self.viewer_bar_timer.start(1700)
+        self.place_viewer_bar()
         if self.viewer.image.isNull():
             return
-        self.place_viewer_bar()
         self.viewer_bar.update()
         self.viewer_bar.show()
         self.viewer_picker.show()
-        self.viewer_bar_timer.start(1700)
 
     def hide_viewer_bar(self):
-        if self.viewer_bar.underMouse() or self.viewer_picker.underMouse():
+        if (self.viewer_bar.underMouse() or self.viewer_picker.underMouse() or self.viewer_filters.underMouse()
+                or self.marker_filter.view().isVisible()):
             self.viewer_bar_timer.start(1000)
         else:
             self.viewer_bar.hide()
             self.viewer_picker.hide()
+            # With no photo left, this is the only way back from the filter.
+            self.viewer_filters.setVisible(bool(self.session and not self.photos))
 
     def place_viewer_bar(self):
         self.viewer_picker.adjustSize()
@@ -732,6 +751,8 @@ class Window(QMainWindow):
         y = self.viewer.height()-self.viewer_bar.height()-16
         self.viewer_bar.move(x, y)
         self.viewer_picker.move(x+self.viewer_bar.width()+8, y)
+        self.viewer_filters.adjustSize()
+        self.viewer_filters.move((self.viewer.width()-self.viewer_filters.width())//2, 12)
 
     def set_background(self, color):
         self.viewer.set_background(color)
@@ -891,9 +912,6 @@ class Window(QMainWindow):
         # Nothing to filter or switch on the welcome screen.
         for control in (self.sort, self.segments, self.counter):
             control.setVisible(has_photos)
-        # In Révision, these two filters live in the page's own top bar.
-        for control in (self.stars, self.flags):
-            control.setVisible(has_photos and not self.review_active)
         name = project_label(self.project_path) if self.project_path else ''
         self.setWindowTitle(f'TriPhoto · {name}' if self.session else 'TriPhoto')
 
@@ -938,6 +956,9 @@ class Window(QMainWindow):
         self.viewer.zoom = 1
         self.viewer.update()
         self.counter.setToolTip('')
+        self.viewer_filters.hide()
+        self.note_filter.sync()
+        self.marker_filter.sync()
         self.update_counter()
         self.update_project_state()
 
@@ -1003,6 +1024,9 @@ class Window(QMainWindow):
         self.update_project_state()
 
     def apply_filters(self, *args):
+        self.note_filter.sync()
+        self.marker_filter.sync()
+        self.review.sync_filters()
         if not self.session:
             return
         current = self.photos[self.list.currentRow()].relative_path if 0 <= self.list.currentRow() < len(self.photos) else None
@@ -1052,6 +1076,8 @@ class Window(QMainWindow):
     def notify_review(self):
         if self.review_active:
             self.review.photos_changed()
+        elif self.session and not self.photos:
+            self.show_viewer_bar()
         self.viewer_bar.update()
 
     def request(self, photo, side, priority=0):

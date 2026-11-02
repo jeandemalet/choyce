@@ -361,6 +361,10 @@ def test_grid(base):
     assert not wall.dragging and review.bar.isVisible()
     # A click in the empty margin takes the selection back, and with it the note.
     assert photo.stars == 1 and len(wall.tiles) == 39 and photo.relative_path in wall.set_aside
+    # The others do not move: the place stays empty until asked to close.
+    places = {p.relative_path: tuple(r.getRect()) for r, p in wall.placed}
+    assert all(places[p.relative_path] == tuple(r.getRect()) for r, p in wall.tiles)
+    assert review.close_wall.isVisibleTo(review.options['wall'][1])
     assert review.restore_button.isVisibleTo(review.options['wall'][1])
     window.undo()
     assert photo.stars == 0 and len(wall.tiles) == 40
@@ -372,10 +376,21 @@ def test_grid(base):
     QTest.mouseMove(wall, center+QPointF(30, 30).toPoint())
     QTest.mouseRelease(wall, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, center+QPointF(30, 30).toPoint())
     assert len(wall.tiles) == 40 and photo.stars == 0
+    # Closing the gaps relays everything out, without the photos set aside.
+    rect, photo = wall.visible_tiles()[0]
+    window.change([photo], stars=5)
+    window.stars.setCurrentIndex(window.stars.findData(5))
+    assert len(wall.tiles) == 1
+    window.change([photo], stars=0)
+    assert not wall.tiles and review.close_wall.isVisibleTo(review.options['wall'][1])
+    window.undo()
+    assert len(wall.tiles) == 1
+    window.stars.setCurrentIndex(0)
+    assert not review.close_wall.isVisibleTo(review.options['wall'][1])
     # Options belong to their mode, at the bottom.
     assert review.options['wall'][0].isVisibleTo(review) and not review.options['toile'][1].isVisibleTo(review)
     review.set_mode('color')
-    assert review.options['color'][1].isVisibleTo(review) and not review.views['color'].show_strip
+    assert review.options['color'][1].isVisibleTo(review)
     # Order and blocks of the Couleur mode.
     color = review.view()
     color.resize(1400, 850)
@@ -386,9 +401,67 @@ def test_grid(base):
     color.grab()
     review.set_color_order('hue_desc')
     assert color.headings[0][1] != 'Rouges' and color.headings[-1][1] == 'Neutres'
+    # The order is a criterion and a direction.
+    review.flip_color_order()
+    assert color.order == 'hue' and review.order_button.text() == 'Rouge → violet'
+    review.order_combo.setCurrentIndex(1)
+    assert color.order == 'light' and review.order_button.text() == 'Clair → sombre'
+    lights = [review.info[p.relative_path]['light'] for p in color.ordered]
+    assert lights == sorted(lights, reverse=True)
+    review.set_color_order('hue')
+    # The blocks also work in the staggered layout.
+    review.set_color_layout('staggered')
+    assert sum(count for _, _, count in color.headings) == 40 and len(color.tiles) == 40
+    color.grab()
+    review.set_color_layout('rows')
+    # The cursor takes the color of what is in the middle of the page.
+    color.bar.setValue(0)
+    first = color.bar.styleSheet()
+    color.bar.setValue(color.bar.maximum())
+    assert first and color.bar.styleSheet() != first
     review.set_color_groups(False)
     assert not color.headings
-    review.set_color_order('hue')
+    window.close()
+    clear_settings()
+
+
+class _Wheel:
+    def __init__(self, delta, modifiers=Qt.KeyboardModifier.NoModifier):
+        self.delta, self.keys = delta, modifiers
+
+    def angleDelta(self):
+        return QPointF(0, self.delta).toPoint()
+
+    def modifiers(self):
+        return self.keys
+
+    def position(self):
+        return QPointF(300, 300)
+
+    def accept(self):
+        pass
+
+
+def test_tri_filters(base):
+    clear_settings()
+    root = make_project(base/'tri_filters', 6)
+    window = open_window(root)
+    assert list(window.note_filter.buttons)[:3] == ['all', 0, 1]
+    # The capsule of the Tri page and that of Révision drive the same filter.
+    for photo in window.photos[:2]:
+        photo.stars = 5
+    window.note_filter.buttons[5].click()
+    assert window.stars.currentData() == 5 and len(window.photos) == 2
+    assert window.review.note_filter.buttons[5].isChecked()
+    window.note_filter.buttons[0].click()
+    assert len(window.photos) == 4
+    window.review.note_filter.buttons[3].click()
+    assert not window.photos and window.note_filter.buttons[3].isChecked()
+    # With no photo left, the capsule stays within reach.
+    window.hide_viewer_bar()
+    assert window.viewer_filters.isVisible()
+    window.note_filter.buttons['all'].click()
+    assert len(window.photos) == 6
     window.close()
     clear_settings()
 
@@ -436,6 +509,15 @@ def test_clear_stars(base):
     toile = review.view()
     toile.resize(1400, 850)
     toile.set_columns(4)
+    # The wheel goes up and down without zooming, and stops at both ends.
+    scale, pan = toile.scale_, QPointF(toile.pan)
+    toile.wheelEvent(_Wheel(-240))
+    assert toile.scale_ == scale and toile.pan.y() < pan.y() and toile.pan.x() == pan.x()
+    toile.wheelEvent(_Wheel(24000))
+    assert toile.pan == pan
+    toile.wheelEvent(_Wheel(120, Qt.KeyboardModifier.ControlModifier))
+    assert toile.scale_ > scale
+    toile.zoom_reset()
     top = toile.stack[-1]
     rect = toile.tile_rect(top)
     button = toile.badge_layout(QRectF(-rect.width()/2, -rect.height()/2, rect.width(), rect.height()), top)[0]
@@ -606,7 +688,7 @@ def main():
     app.setStyleSheet(triphoto_qt.STYLE)
     base = Path(tempfile.mkdtemp(prefix='triphoto-tests-'))
     tests = [test_legacy_session, test_nested_session_ignored, test_dominant_color, test_recents, test_shortcuts,
-             test_window_rating_and_undo, test_review_modes, test_grid, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle]
+             test_window_rating_and_undo, test_review_modes, test_grid, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle]
     failures = 0
     try:
         for test in tests:

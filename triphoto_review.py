@@ -468,16 +468,19 @@ class WallView(Surface):
         settings = review.settings
         self.height_setting = 'color_row_height' if by_color else 'wall_row_height'
         self.row_height = float(settings.value(self.height_setting, ROW_HEIGHT))
-        self.layout_kind = 'rows' if by_color else settings.value('wall_layout', 'staggered')
-        self.width_percent = 100 if by_color else int(settings.value('wall_width', WALL_WIDTH))
+        self.layout_kind = settings.value('color_layout', 'rows') if by_color else settings.value('wall_layout', 'staggered')
+        self.width_setting = 'color_width' if by_color else 'wall_width'
+        self.width_percent = int(settings.value(self.width_setting, WALL_WIDTH))
         self.emphasis = 'equal' if by_color else settings.value('wall_emphasis', 'equal')
-        self.show_strip = settings.value('color_strip', False, type=bool)
         self.order = settings.value('color_order', 'hue')
         self.groups = settings.value('color_groups', False, type=bool)
         self.headings = []
         self.order_seed = None
         self.set_aside = set()
         self.tiles = []
+        # Where every photo of the current layout went, shown or not: one that leaves keeps its place.
+        self.placed = []
+        self.bar_tint = None
         self.content_height = 0
         self.ordered = []
         self.press = None
@@ -489,6 +492,20 @@ class WallView(Surface):
     def on_scroll(self, *args):
         self.update()
         self.schedule_requests()
+        self.tint_bar()
+
+    def tint_bar(self):
+        """In Couleur, the cursor takes the color of the photos in the middle of the page."""
+        if not self.by_color:
+            return
+        middle = self.bar.value()+self.height()/2
+        tile = min(self.visible_tiles(), key=lambda t: abs(t[0].center().y()-middle), default=None)
+        info = self.review.info.get(tile[1].relative_path) if tile else None
+        tint = tuple(info['rgb']) if info else None
+        if tint != self.bar_tint:
+            self.bar_tint = tint
+            self.bar.setStyleSheet(f'QScrollBar::handle:vertical {{ background: rgb{tint}; border: 1px solid rgba(0, 0, 0, 90); '
+                                   'border-radius: 5px; min-height: 48px; }' if tint else '')
 
     def rebuild(self):
         self.ordered = [p for p in self.window_.photos if p.relative_path not in self.set_aside]
@@ -498,6 +515,26 @@ class WallView(Surface):
             # Hashed, so that removing one photo leaves the others where they are.
             self.ordered.sort(key=lambda p: zlib.crc32(f'{self.order_seed}|{p.relative_path}'.encode()))
         self.relayout()
+        self.review.update_restore()
+
+    def shown_keys(self):
+        return {p.relative_path for p in self.window_.photos}-self.set_aside
+
+    def keep_shown(self):
+        shown = self.shown_keys()
+        self.tiles = [tile for tile in self.placed if tile[1].relative_path in shown]
+        for heading in self.headings:
+            heading[2] = sum(color_family(self.review.info.get(p.relative_path)) == heading[1] for _, p in self.tiles)
+
+    def photos_changed(self):
+        # A photo leaving, or coming back with Ctrl+Z, must not move the others under the eye.
+        if self.shown_keys() <= {p.relative_path for _, p in self.placed}:
+            self.keep_shown()
+            self.update()
+            self.schedule_requests()
+            self.review.update_restore()
+        else:
+            self.rebuild()
 
     def shuffle(self):
         if not self.by_color:
@@ -507,7 +544,7 @@ class WallView(Surface):
 
     def content_box(self):
         available = max(200, self.width()-2*18-10)
-        width = available*self.width_percent/100
+        width = available*(100 if self.by_color and self.layout_kind == 'rows' else self.width_percent)/100
         return (self.width()-10-width)/2, width
 
     def relayout(self):
@@ -519,10 +556,9 @@ class WallView(Surface):
         left, width = self.content_box()
         self.tiles = []
         self.headings = []
-        if self.layout_kind == 'staggered':
-            bottom = self.layout_staggered(left, width)
-        else:
-            bottom = self.layout_rows(left, width)
+        bottom = self.layout_photos(left, width)
+        self.placed = list(self.tiles)
+        self.keep_shown()
         self.content_height = bottom+BOTTOM_CLEARANCE
         self.bar.setPageStep(self.height())
         self.bar.setSingleStep(90)
@@ -534,11 +570,13 @@ class WallView(Surface):
                     break
         self.update()
         self.schedule_requests()
+        self.tint_bar()
 
-    def layout_rows(self, left, width):
+    def layout_photos(self, left, width):
+        place = self.layout_staggered if self.layout_kind == 'staggered' else self.place_rows
         y = float(TOP_CLEARANCE)
         if not (self.by_color and self.groups):
-            return self.place_rows(self.ordered, left, width, y)
+            return place(self.ordered, left, width, y)
         blocks = {}
         for photo in self.ordered:
             blocks.setdefault(color_family(self.review.info.get(photo.relative_path)), []).append(photo)
@@ -546,8 +584,8 @@ class WallView(Surface):
         for name in (names[::-1] if self.order == 'hue_desc' else names)+['Neutres']:
             if name in blocks:
                 y += 40 if self.headings else 0
-                self.headings.append((QRectF(left, y, width, 30), name, len(blocks[name])))
-                y = self.place_rows(blocks[name], left, width, y+38)
+                self.headings.append([QRectF(left, y, width, 30), name, len(blocks[name])])
+                y = place(blocks[name], left, width, y+38)
         return y
 
     def place_rows(self, photos, left, width, y):
@@ -584,14 +622,14 @@ class WallView(Surface):
             y += height+gap
         return y
 
-    def layout_staggered(self, left, width):
-        if not self.ordered:
-            return float(TOP_CLEARANCE)
-        ratios = [1/self.review.aspect(p) for p in self.ordered]
-        plan = staggered_plan([p.relative_path for p in self.ordered], ratios)
+    def layout_staggered(self, photos, left, width, cursor):
+        if not photos:
+            return cursor
+        ratios = [1/self.review.aspect(p) for p in photos]
+        plan = staggered_plan([p.relative_path for p in photos], ratios)
         # On the website a tall photo may exceed the screen; to judge it here, it must not.
         tallest = max(240, self.height()-TOP_CLEARANCE-BOTTOM_CLEARANCE)
-        cursor, index = float(TOP_CLEARANCE), 0
+        index = 0
         for module in plan:
             cursor += module.get('before', 0)*width
             panels = []
@@ -612,7 +650,7 @@ class WallView(Surface):
                     for panel in panels:
                         panel[3] = (row_height-panel[2])/2
             for n, panel in enumerate(panels):
-                self.tiles.append((QRectF(panel[0], cursor+panel[3], panel[1], panel[2]), self.ordered[index+n]))
+                self.tiles.append((QRectF(panel[0], cursor+panel[3], panel[1], panel[2]), photos[index+n]))
             cursor += row_height+module.get('after', 0)*width+(10 if not module.get('after') else 0)
             index += len(panels)
         return cursor
@@ -631,7 +669,8 @@ class WallView(Surface):
             self.window_.request_for(photo, max(rect.width(), rect.height())*ratio, 5)
 
     def resizeEvent(self, event):
-        self.bar.setGeometry(self.width()-10, TOP_CLEARANCE, 9, self.height()-TOP_CLEARANCE-8)
+        side = 14 if self.by_color else 9
+        self.bar.setGeometry(self.width()-side-1, TOP_CLEARANCE, side, self.height()-TOP_CLEARANCE-8)
         self.relayout()
 
     def paintEvent(self, event):
@@ -646,10 +685,6 @@ class WallView(Surface):
         selected = {p.relative_path for p in self.targets()}
         for rect, photo in self.visible_tiles():
             self.paint_photo(painter, rect, photo)
-            if self.by_color and self.show_strip:
-                info = self.review.info.get(photo.relative_path)
-                if info:
-                    painter.fillRect(QRectF(rect.left(), rect.bottom()-4, rect.width(), 4), QColor(*info['rgb']))
             self.paint_badges(painter, rect, photo)
             if photo.relative_path in selected:
                 painter.save()
@@ -722,9 +757,15 @@ class WallView(Surface):
 
     def zoom(self, factor):
         if self.layout_kind == 'staggered':
-            self.review.set_wall_width(self.width_percent*(1.06 if factor > 1 else 1/1.06))
+            self.set_width(self.width_percent*(1.06 if factor > 1 else 1/1.06))
         else:
             self.set_row_height(max(90, min(560, self.row_height*factor)))
+
+    def set_width(self, value):
+        self.width_percent = max(35, min(100, int(value)))
+        self.review.settings.setValue(self.width_setting, self.width_percent)
+        self.relayout()
+        self.review.sync_zoom()
 
     def set_row_height(self, value):
         self.row_height = value
@@ -734,7 +775,7 @@ class WallView(Surface):
 
     def zoom_reset(self):
         if self.layout_kind == 'staggered':
-            self.review.set_wall_width(WALL_WIDTH)
+            self.set_width(WALL_WIDTH)
         else:
             self.set_row_height(ROW_HEIGHT)
 
@@ -1018,14 +1059,26 @@ class ToileView(Surface):
 
     def wheelEvent(self, event):
         delta = event.angleDelta().y() or event.angleDelta().x()
-        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-            self.pan += QPointF(0, delta)
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            if delta:
+                self.zoom(1.15 if delta > 0 else 1/1.15, event.position())
+        else:
+            self.pan += QPointF(0, delta*.9)
+            self.keep_in_view()
             self.fresh = False
             self.update()
             self.schedule_requests()
-        elif delta:
-            self.zoom(1.15 if delta > 0 else 1/1.15, event.position())
         event.accept()
+
+    def keep_in_view(self):
+        """The wheel stops at the first and last rows, between the two bars."""
+        ys = [p[1] for p in self.positions.values()]
+        if not ys:
+            return
+        lowest = self.height()-BOTTOM_CLEARANCE-self.height()/2-(max(ys)+215)*self.scale_
+        highest = TOP_CLEARANCE+10-self.height()/2-(min(ys)-215)*self.scale_
+        if lowest < highest:
+            self.pan = QPointF(self.pan.x(), max(lowest, min(highest, self.pan.y())))
 
     def zoom(self, factor, anchor=None):
         anchor = anchor if anchor is not None else QPointF(self.width()/2, self.height()/2)
@@ -1309,7 +1362,7 @@ class NoteFilter(QFrame):
         row.setSpacing(1)
         self.group = QButtonGroup(self)
         self.buttons = {}
-        for key, label in [('all', 'Toutes'), (5, '5 ★'), (4, '4 ★'), (3, '3 ★'), (2, '2 ★'), (1, '1 ★'), (0, '0 ★')]:
+        for key, label in [('all', 'Toutes'), (0, '0 ★'), (1, '1 ★'), (2, '2 ★'), (3, '3 ★'), (4, '4 ★'), (5, '5 ★')]:
             button = QPushButton(label, objectName='seg', checkable=True)
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             button.clicked.connect(self.apply)
@@ -1339,6 +1392,28 @@ class NoteFilter(QFrame):
             self.and_more.setChecked(True)
         elif data in (1, 2, 3, 4):
             self.and_more.setChecked(False)
+
+
+class MarkerFilter(QComboBox):
+    """Choice of the markers shown, driving the same filter on both pages."""
+
+    def __init__(self, window):
+        super().__init__()
+        self.window = window
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setFixedWidth(150)
+        self.currentIndexChanged.connect(lambda index: self.window.flags.setCurrentIndex(index))
+        self.sync()
+
+    def sync(self):
+        flags = self.window.flags
+        self.blockSignals(True)
+        if [self.itemData(i) for i in range(self.count())] != [flags.itemData(i) for i in range(flags.count())]:
+            self.clear()
+            for index in range(flags.count()):
+                self.addItem(flags.itemText(index), flags.itemData(index))
+        self.setCurrentIndex(flags.currentIndex())
+        self.blockSignals(False)
 
 
 class ReviewPage(QWidget):
@@ -1406,10 +1481,7 @@ class ReviewPage(QWidget):
         self.note_filter = NoteFilter(self.window)
         row.addWidget(self.note_filter)
         row.addSpacing(6)
-        self.marker_filter = QComboBox()
-        self.marker_filter.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.marker_filter.setFixedWidth(150)
-        self.marker_filter.currentIndexChanged.connect(lambda index: self.window.flags.setCurrentIndex(index))
+        self.marker_filter = MarkerFilter(self.window)
         row.addWidget(self.marker_filter)
         row.addSpacing(10)
         self.mono_button = QPushButton('N&&B', objectName='seg', checkable=True)
@@ -1478,11 +1550,21 @@ class ReviewPage(QWidget):
         row.addWidget(QLabel('À droite', objectName='muted'))
         self.swipe_right = self.action_combo(row, 'swipe_right')
         color_left, row = self.option_pill()
-        self.option_combo(row, [('hue', 'Du rouge au violet'), ('hue_desc', 'Du violet au rouge'), ('light', 'Du clair au sombre'),
-                                ('dark', 'Du sombre au clair')], 'color_order', 'hue', 164, self.set_color_order)
+        self.option_combo(row, [('staggered', 'Décalée'), ('rows', 'Rangées')], 'color_layout', 'rows', 100, self.set_color_layout)
         self.groups_button = self.option_button(row, 'Blocs de couleur', self.set_color_groups, True, color.groups)
         color_pill, row = self.option_pill()
-        self.strip_button = self.option_button(row, 'Bandeau de couleur', self.set_strip, True, color.show_strip)
+        self.order_combo = QComboBox()
+        self.order_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.order_combo.setFixedWidth(150)
+        self.order_combo.addItem('Tri par couleur', 'hue')
+        self.order_combo.addItem('Tri par contraste', 'light')
+        self.order_combo.currentIndexChanged.connect(lambda *_: self.set_color_order(self.order_combo.currentData()))
+        row.addWidget(self.order_combo)
+        self.order_button = self.option_button(row, '', self.flip_color_order)
+        self.order_button.setFixedWidth(124)
+        self.close_color = self.option_button(row, 'Resserrer', self.close_gaps)
+        self.close_color.setToolTip('Referme les vides laissés par les photos retirées')
+        self.close_color.hide()
         wall_left, row = self.option_pill()
         self.option_combo(row, [('staggered', 'Décalée'), ('rows', 'Rangées')], 'wall_layout', 'staggered', 100, self.set_wall_layout)
         # The staggered layout follows its modules: this choice only applies to rows.
@@ -1505,6 +1587,10 @@ class ReviewPage(QWidget):
         self.restore_button = self.option_button(row, '', self.restore_set_aside)
         self.restore_button.setToolTip("Réaffiche les photos sorties de la grille. Leurs notes ne changent pas : Ctrl+Z annule une note.")
         self.restore_button.hide()
+        self.close_wall = self.option_button(row, 'Resserrer', self.close_gaps)
+        self.close_wall.setToolTip('Referme les vides laissés par les photos retirées')
+        self.close_wall.hide()
+        self.sync_color_order()
         self.options = {'toile': (None, toile_pill), 'swipe': (swipe_left, swipe_right), 'color': (color_left, color_pill), 'wall': (wall_left, wall_right)}
         self.refresh_marker_options()
 
@@ -1544,13 +1630,7 @@ class ReviewPage(QWidget):
 
     def sync_filters(self):
         self.note_filter.sync()
-        flags = self.window.flags
-        self.marker_filter.blockSignals(True)
-        self.marker_filter.clear()
-        for index in range(flags.count()):
-            self.marker_filter.addItem(flags.itemText(index), flags.itemData(index))
-        self.marker_filter.setCurrentIndex(flags.currentIndex())
-        self.marker_filter.blockSignals(False)
+        self.marker_filter.sync()
 
     def sync_toolbar(self):
         self.picker.sync()
@@ -1672,6 +1752,9 @@ class ReviewPage(QWidget):
 
     def sync_zoom(self):
         self.zoom_label.setText(self.view().zoom_text())
+        self.width_slider.blockSignals(True)
+        self.width_slider.setValue(self.views['wall'].width_percent)
+        self.width_slider.blockSignals(False)
 
     def transformed(self, image):
         if not self.mono:
@@ -1690,14 +1773,28 @@ class ReviewPage(QWidget):
         self.mono_button.setChecked(self.mono)
         self.update_view()
 
-    def set_strip(self, value):
-        self.views['color'].show_strip = value
-        self.settings.setValue('color_strip', value)
-        self.update_view()
+    def set_color_layout(self, value):
+        self.views['color'].layout_kind = value
+        self.views['color'].relayout()
+        self.sync_zoom()
+
+    def sync_color_order(self):
+        order = self.views['color'].order
+        self.order_combo.blockSignals(True)
+        self.order_combo.setCurrentIndex(0 if order in ('hue', 'hue_desc') else 1)
+        self.order_combo.blockSignals(False)
+        self.order_button.setText({'hue': 'Rouge → violet', 'hue_desc': 'Violet → rouge', 'light': 'Clair → sombre', 'dark': 'Sombre → clair'}[order])
 
     def set_color_order(self, value):
         self.views['color'].order = value
+        self.settings.setValue('color_order', value)
+        self.sync_color_order()
         self.views['color'].rebuild()
+        self.views['color'].bar.setValue(0)
+        self.place_overlays()
+
+    def flip_color_order(self, *args):
+        self.set_color_order({'hue': 'hue_desc', 'hue_desc': 'hue', 'light': 'dark', 'dark': 'light'}[self.views['color'].order])
 
     def set_color_groups(self, value):
         self.views['color'].groups = value
@@ -1717,14 +1814,7 @@ class ReviewPage(QWidget):
         self.views['wall'].relayout()
 
     def set_wall_width(self, value):
-        wall = self.views['wall']
-        wall.width_percent = max(35, min(100, int(value)))
-        self.settings.setValue('wall_width', wall.width_percent)
-        self.width_slider.blockSignals(True)
-        self.width_slider.setValue(wall.width_percent)
-        self.width_slider.blockSignals(False)
-        wall.relayout()
-        self.sync_zoom()
+        self.views['wall'].set_width(value)
 
     def apply_action(self, photo, action):
         if action == 'minus':
@@ -1754,7 +1844,7 @@ class ReviewPage(QWidget):
         index = next((i for i, (_, p) in enumerate(wall.tiles) if p is photo), 0)
         wall.set_aside.add(photo.relative_path)
         self.apply_action(photo, self.drop_action.currentData())
-        wall.rebuild()
+        wall.photos_changed()
         if wall.tiles:
             self.window.select_photo(wall.tiles[min(index, len(wall.tiles)-1)][1])
         self.update_restore()
@@ -1763,11 +1853,16 @@ class ReviewPage(QWidget):
         count = len(self.views['wall'].set_aside)
         self.restore_button.setText(f'Réafficher ({count})')
         self.restore_button.setVisible(count > 0)
+        for view, button in ((self.views['wall'], self.close_wall), (self.views['color'], self.close_color)):
+            button.setVisible(len(view.placed) > len(view.tiles))
         self.place_overlays()
+
+    def close_gaps(self, *args):
+        self.view().rebuild()
 
     def restore_set_aside(self, *args):
         self.views['wall'].set_aside.clear()
-        self.views['wall'].rebuild()
+        self.views['wall'].photos_changed()
         self.update_restore()
         self.window.save_timer.start(500)
 
@@ -1780,7 +1875,7 @@ class ReviewPage(QWidget):
         wall = self.views['wall']
         if wall.set_aside & {photo.relative_path for photo in photos}:
             wall.set_aside -= {photo.relative_path for photo in photos}
-            wall.rebuild()
+            wall.photos_changed()
             self.update_restore()
         if self.mode == 'swipe' and photos:
             self.view().show_photo(photos[0])
@@ -1877,7 +1972,9 @@ class ReviewPage(QWidget):
             self.relayout_timer.start(700)
 
     def apply_analysis(self):
-        if self.window.review_active and self.mode in ('color', 'wall', 'toile'):
+        if self.window.review_active and self.mode == 'wall':
+            self.view().relayout()
+        elif self.window.review_active and self.mode in ('color', 'toile'):
             self.view().rebuild()
 
     def save_analysis(self):
@@ -1896,6 +1993,6 @@ class ReviewPage(QWidget):
         swipe.deck, swipe.index = [], 0
         swipe.zoom_level, swipe.pan = 1., QPointF()
         for wall in (self.views['wall'], self.views['color']):
-            wall.ordered, wall.tiles = [], []
+            wall.ordered, wall.tiles, wall.placed = [], [], []
             wall.set_aside = set()
         self.update_restore()

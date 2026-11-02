@@ -16,7 +16,7 @@ Sous Windows, double-cliquez ensuite sur `Lancer TriPhoto.bat`. Ailleurs, lancez
 
 Le menu **Projet** ouvre un dossier, liste les projets récents et retrouve les anciens projets d'un disque. L'accueil les présente aussi sous forme de cartes. Un projet dont le disque est débranché reste dans la liste.
 
-Le bandeau du haut filtre par note et par marqueur, et trie les photos. Au mouvement de la souris sur la photo, une petite barre donne accès aux étoiles, au marqueur et à la couleur du fond : cinq gris ou n'importe quelle autre couleur avec le bouton +. Le clic droit et la touche `B` changent aussi le fond.
+Le bandeau du haut trie les photos. Au mouvement de la souris sur la photo, une gélule en haut filtre par note et par marqueur, comme dans la page Révision, et une petite barre en bas donne accès aux étoiles, au marqueur et à la couleur du fond : cinq gris ou n'importe quelle autre couleur avec le bouton +. Le clic droit et la touche `B` changent aussi le fond.
 
 ## La page Révision
 
@@ -24,12 +24,16 @@ La touche `G` bascule entre Tri et Révision. Le haut de la page porte deux gél
 
 | Mode | Principe | Réglages en bas |
 | --- | --- | --- |
-| **Toile** | Toutes les photos du filtre posées sur une table, les mieux notées plus grandes. La table tient en largeur et continue vers le bas. On déplace les photos à la souris, on navigue en glissant le fond ou avec `Maj` + molette, et on zoome à la molette. | Mélanger (touche `R`), photos droites ou penchées, nombre de photos en largeur |
+| **Toile** | Toutes les photos du filtre posées sur une table, les mieux notées plus grandes. La table tient en largeur et continue vers le bas. On déplace les photos à la souris, la molette monte et descend, et le zoom se règle en haut ou avec `Ctrl` + molette. | Mélanger (touche `R`), photos droites ou penchées, nombre de photos en largeur |
 | **Swipe** | Une photo à la fois : glissez-la à droite ou à gauche, ou utilisez les touches précédente et suivante. Espace passe sans décider, Retour arrière revient en arrière. La molette zoome et le zoom se conserve d'une photo à l'autre, comme dans le Tri. Zoomé au-delà de 100 %, glisser déplace la photo et ce sont les touches qui décident. | Action à gauche, action à droite |
-| **Couleur** | Un mur de photos rangées selon leur couleur dominante, les images neutres et le noir et blanc à la fin. Les blocs de couleur séparent les rouges, oranges, jaunes, etc., chacun sous son titre. | Ordre (du rouge au violet, l'inverse, du clair au sombre, l'inverse), blocs de couleur, bandeau de couleur dominante |
+| **Couleur** | Un mur de photos rangées selon leur couleur dominante, les images neutres et le noir et blanc à la fin. Les blocs de couleur séparent les rouges, oranges, jaunes, etc., chacun sous son titre. Le curseur de défilement prend la couleur des photos au milieu de la page. | Disposition décalée ou en rangées, blocs de couleur, tri par couleur ou par contraste (ici la clarté) et son sens |
 | **Grille** | Une grille décalée, comme une galerie éditoriale, ou des rangées. Formats égaux cale les rangées sur l'orientation majoritaire, Horizontales en avant sur la hauteur des horizontales, Verticales en avant sur celle des verticales, sans changer l'ordre des photos. Tirez une photo hors de la grille, sur un côté ou en bas, pour la sortir de la sélection. `Ctrl` + molette change la taille. | Disposition, formats mis en avant (rangées seulement), largeur du panneau central, mélange, action de sortie |
 
 Une photo sortie de la grille reçoit l'action choisie. « Réafficher » remet les photos sorties à l'écran sans toucher à leurs notes, et `Ctrl+Z` annule la dernière sortie, note comprise.
+
+## Vides et retraits
+
+Une photo qui quitte la Grille ou Couleur laisse sa place vide, pour ne pas déplacer les autres sous vos yeux. « Resserrer » referme les vides, tout comme un changement de filtre ou de mode.
 
 ## Retirer les étoiles
 
