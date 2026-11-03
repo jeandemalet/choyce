@@ -15,7 +15,7 @@ from io import BytesIO
 from pathlib import Path
 from collections import OrderedDict
 
-from PySide6.QtCore import Qt, QSize, QRectF, QPointF, Signal, Slot, QObject, QRunnable, QThreadPool, QTimer, QItemSelectionModel, QSettings, QStandardPaths, QUrl
+from PySide6.QtCore import Qt, QSize, QRectF, QPointF, Signal, Slot, QObject, QRunnable, QThreadPool, QTimer, QItemSelection, QItemSelectionModel, QSettings, QStandardPaths, QUrl
 from PySide6.QtGui import QCursor, QDesktopServices, QIcon, QImage, QPainter, QPainterPath, QColor, QFont, QShortcut, QKeySequence, QColorSpace, QPen
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QComboBox, QSplitter, QListWidget, QListWidgetItem, QFrame, QScrollArea, QButtonGroup,
@@ -447,24 +447,41 @@ class PhotoDelegate(QStyledItemDelegate):
         if event.type() == event.Type.MouseButtonRelease:
             rect = self.card(option)
             x, y = event.position().x(), event.position().y()
+            photo = index.data(Qt.ItemDataRole.UserRole)
             if self.heart(rect).adjusted(-4, -4, 4, 4).contains(event.position()):
-                photo = index.data(Qt.ItemDataRole.UserRole)
-                self.window.change([photo], liked=not photo.liked)
+                self.window.list.on_control = True
+                self.window.change(self.window.with_selection(photo), liked=not photo.liked)
                 return True
             if y >= rect.bottom()-26:
                 if x >= rect.right()-30:
+                    self.window.list.on_control = True
                     self.window.toggle_flag(index.row())
                     return True
-                photo = index.data(Qt.ItemDataRole.UserRole)
                 if rect.x() <= x < rect.x()+17:
+                    self.window.list.on_control = True
                     if photo.stars:
-                        self.window.change([photo], stars=0)
+                        self.window.change(self.window.with_selection(photo), stars=0)
                     return True
                 if rect.x()+17 <= x < rect.x()+17+5*14:
                     value = int((x-rect.x()-17)//14)+1
-                    self.window.change([photo], stars=0 if photo.stars == value else value)
+                    self.window.list.on_control = True
+                    self.window.change(self.window.with_selection(photo), stars=0 if photo.stars == value else value)
                     return True
         return super().editorEvent(event, model, option, index)
+
+
+class PhotoList(QListWidget):
+    """The ribbon. A click on the note of a thumbnail leaves the selection as it is."""
+    on_control = False
+
+    def selectionCommand(self, index, event=None):
+        if self.on_control:
+            return QItemSelectionModel.SelectionFlag.NoUpdate
+        return super().selectionCommand(index, event)
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        self.on_control = False
 
 
 class CoverSignals(QObject):
@@ -964,7 +981,7 @@ class Window(QMainWindow):
         self.viewer.liked = lambda: self.current_photo().liked if self.current_photo() else None
         self.viewer.heartClicked.connect(self.toggle_like)
         splitter.addWidget(self.viewer)
-        self.list = QListWidget()
+        self.list = PhotoList()
         self.list.setMinimumWidth(250)
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
@@ -1081,7 +1098,7 @@ class Window(QMainWindow):
             'prev': lambda: self.navigate(-1), 'next': lambda: self.navigate(1),
             'flag': self.toggle_flag, 'like': self.toggle_like, 'portfolio': self.toggle_portfolio, 'publish': self.toggle_publish, 'select': lambda: self.set_pick(PICK_SELECT),
             'reject': lambda: self.set_pick(PICK_REJECT), 'neutral': lambda: self.set_pick(PICK_NEUTRAL),
-            'undo': self.undo, 'fit': lambda: self.review.zoom_reset() if self.review_active else self.viewer.set_zoom(1),
+            'select_all': self.select_all, 'deselect': self.deselect, 'undo': self.undo, 'fit': lambda: self.review.zoom_reset() if self.review_active else self.viewer.set_zoom(1),
             'zoom_in': lambda: self.zoom_by(1.15), 'zoom_out': lambda: self.zoom_by(1/1.15),
             'background': self.cycle_background, 'review': lambda: self.set_review(not self.review_active),
             'shuffle': lambda: self.review.shuffle() if self.review_active else None,
@@ -1258,13 +1275,63 @@ class Window(QMainWindow):
         return self.photos[row] if 0 <= row < len(self.photos) else None
 
     def selected_photos(self):
-        return [item.data(Qt.ItemDataRole.UserRole) for item in self.list.selectedItems()]
+        """The photo on display comes first: the bars show its note and a toggle starts from it."""
+        current = self.current_photo()
+        return sorted((item.data(Qt.ItemDataRole.UserRole) for item in self.list.selectedItems()), key=lambda photo: photo is not current)
 
     def target_photos(self):
         """Photos that the keys act on. Swipe and Duel show cards of their own."""
         if self.review_active:
             return self.review.targets()
         return self.selected_photos()
+
+    def with_selection(self, photo):
+        """What a click on one photo acts on: that photo first, then the selection it belongs to."""
+        targets = self.target_photos()
+        others = [candidate for candidate in targets if candidate is not photo]
+        return [photo]+others if len(others) < len(targets) else [photo]
+
+    def select_all(self):
+        if self.review_active:
+            self.review.view().select_all()
+        else:
+            self.select_photos(self.photos)
+
+    def deselect(self):
+        if self.review_active:
+            self.review.view().unpick()
+        else:
+            self.select_only_current()
+
+    def select_photos(self, photos):
+        """Select these photos at once. The one on display stays so if it is among them."""
+        chosen = {id(photo) for photo in photos}
+        rows = [row for row, photo in enumerate(self.photos) if id(photo) in chosen]
+        if not rows:
+            return
+        if self.list.currentRow() not in rows:
+            self.list.setCurrentRow(rows[0], QItemSelectionModel.SelectionFlag.NoUpdate)
+        self.select_rows(rows)
+        self.toast(f"{len(rows)} photo{'s' if len(rows) > 1 else ''} sélectionnée{'s' if len(rows) > 1 else ''}", 1400)
+
+    def select_rows(self, rows):
+        """In one go, by runs of rows: one at a time takes seconds on a large gallery."""
+        selection = QItemSelection()
+        model = self.list.model()
+        first = previous = None
+        for row in rows+[None]:
+            if previous is None or row != previous+1:
+                if previous is not None:
+                    selection.select(model.index(first), model.index(previous))
+                first = row
+            previous = row
+        self.list.selectionModel().select(selection, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+
+    def select_only_current(self):
+        """Classique always acts on a photo: the one on display stays selected."""
+        row = self.list.currentRow()
+        if row >= 0:
+            self.list.setCurrentRow(row, QItemSelectionModel.SelectionFlag.ClearAndSelect)
 
     def select_photo(self, photo, extend=False):
         row = next((i for i, candidate in enumerate(self.photos) if candidate is photo), None)
@@ -1540,17 +1607,18 @@ class Window(QMainWindow):
         self.list.blockSignals(True)
         self.list.clear()
         row = max(0, min(old_row, len(self.photos)-1))
+        surviving = []
         for i, photo in enumerate(self.photos):
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, photo)
             item.setToolTip(photo.relative_path)
             self.list.addItem(item)
             if photo.relative_path in selected:
-                item.setSelected(True)
+                surviving.append(i)
             if photo.relative_path == current:
                 row = i
         if self.photos:
-            surviving = bool(self.list.selectedItems())
+            self.select_rows(surviving)
             self.list.setCurrentRow(row, QItemSelectionModel.SelectionFlag.NoUpdate if surviving else QItemSelectionModel.SelectionFlag.ClearAndSelect)
         self.list.doItemsLayout()
         anchor_row = next((i for i, photo in enumerate(self.photos) if photo.relative_path == anchor), None)
@@ -1920,11 +1988,15 @@ class Window(QMainWindow):
         if not photos:
             return
         if self.viewing_portfolio():
-            self.take_out_of_portfolio(photos)
+            if len(photos) == 1 or ask(self, 'Retirer du portfolio', f"{len(photos)} copies iront à la corbeille. Les fichiers d'origine ne bougent pas.",
+                                       [('cancel', 'Annuler', False), ('remove', 'Retirer', True)]) == 'remove':
+                self.take_out_of_portfolio(photos)
             return
         adding = not self.portfolio.contains(photos[0].path)
         if adding and not self.ready_for_portfolio():
             return
+        # Only those that change, so that Ctrl+Z leaves the others where they were.
+        photos = [photo for photo in photos if self.portfolio.contains(photo.path) != adding]
         self.send_to_portfolio(photos, adding)
         self.undo_stack.append(('portfolio', photos, adding))
         del self.undo_stack[:-300]
@@ -2066,7 +2138,7 @@ class Window(QMainWindow):
         if row is not None:
             if not 0 <= row < len(self.photos):
                 return
-            photos = [self.photos[row]]
+            photos = self.with_selection(self.photos[row])
         else:
             photos = self.target_photos()
         if not photos:

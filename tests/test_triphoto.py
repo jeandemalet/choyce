@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from PIL import Image
 from PySide6.QtCore import QEventLoop, QPointF, QRectF, QTimer, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QStyleOptionViewItem
 
 import triphoto
 import triphoto_portfolio
@@ -1581,6 +1581,135 @@ def test_rows_gap_and_captions(base):
     window.close()
 
 
+def test_select_all(base):
+    clear_settings()
+    root = make_project(base/'select_all', 12)
+    window = open_window(root)
+    fired = lambda key: next(s for s in window.shortcuts if s.key().toString() == key).activated.emit()
+    names = lambda photos: {p.relative_path for p in photos}
+    # Only what the filter lets through, whatever the rest of the gallery holds.
+    for photo in window.photos[:5]:
+        photo.stars = 5
+    window.note_filter.buttons[5].click()
+    assert len(window.photos) == 5 and len(window.session.photos) == 12
+    fired('Ctrl+A')
+    assert names(window.target_photos()) == names(window.photos) and len(window.target_photos()) == 5
+    # A key acts on all of them, and the photo on display decides a toggle.
+    window.list.setCurrentRow(2, triphoto_qt.QItemSelectionModel.SelectionFlag.NoUpdate)
+    displayed = window.current_photo()
+    assert window.target_photos()[0] is displayed
+    displayed.liked = True
+    window.toggle_like()
+    assert not any(p.liked for p in window.photos)
+    window.undo()
+    assert displayed.liked and sum(p.liked for p in window.photos) == 1
+    displayed.liked = False
+    # So does a click on the note of one thumbnail of the selection, which stays selected.
+    window.note_filter.buttons['all'].click()
+    assert len(window.target_photos()) == 5, 'the selection survives a wider filter'
+    assert names(window.target_photos()) == {p.relative_path for p in window.photos if p.stars == 5}
+    fired('Ctrl+A')
+    assert len(window.target_photos()) == 12
+    window.show()
+    window.list.doItemsLayout()
+    wait()
+    delegate, row = window.list.itemDelegate(), 1
+    option = QStyleOptionViewItem()
+    option.rect = window.list.visualItemRect(window.list.item(row))
+    card = delegate.card(option)
+    star = QPointF(card.x()+17+2.5*14, card.bottom()-10).toPoint()
+    QTest.mouseClick(window.list.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, star)
+    assert {p.stars for p in window.session.photos} == {3}
+    assert len(window.target_photos()) == 12
+    QTest.mouseClick(window.list.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, delegate.heart(card).center().toPoint())
+    assert all(p.liked for p in window.session.photos) and len(window.target_photos()) == 12
+    window.undo()
+    assert not any(p.liked for p in window.session.photos)
+    # A click on the body of a thumbnail still collapses the selection, as before.
+    QTest.mouseClick(window.list.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, card.center().toPoint())
+    assert len(window.target_photos()) == 1
+    # Deselecting in Classique keeps the photo on display as the one the keys act on.
+    fired('Ctrl+A')
+    fired('Ctrl+D')
+    assert window.target_photos() == [window.current_photo()]
+    # A note clicked on a photo outside the selection only changes that photo.
+    window.select_photos(window.photos[:3])
+    outsider = window.photos[5]
+    assert window.with_selection(outsider) == [outsider]
+    assert window.with_selection(window.photos[1])[0] is window.photos[1] and len(window.with_selection(window.photos[1])) == 3
+    # In the Grille, what has been set aside stays out; Ctrl+D leaves nothing behind for Classique.
+    window.set_review(True)
+    review = window.review
+    settle(window, lambda: len(review.info) == 12)
+    review.set_mode('wall')
+    wall = review.view()
+    wall.resize(1400, 850)
+    assert not wall.targets()
+    aside = window.photos[0]
+    wall.set_aside.add(aside.relative_path)
+    wall.photos_changed()
+    fired('Ctrl+A')
+    assert wall.active and len(wall.targets()) == 11 and aside not in wall.targets()
+    window.rate(4)
+    assert aside.stars == 3 and sum(p.stars == 4 for p in window.photos) == 11
+    window.undo()
+    rect, photo = next(t for t in wall.visible_tiles() if t[1] in wall.targets())
+    QTest.mouseClick(wall, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, wall.heart_rect(rect).center().toPoint())
+    assert sum(p.liked for p in window.photos) == 11 and len(wall.targets()) == 11
+    window.undo()
+    fired('Ctrl+D')
+    assert not wall.targets() and len(window.selected_photos()) == 1
+    # A click in the void does the same.
+    fired('Ctrl+A')
+    wall.unpick()
+    assert len(window.selected_photos()) == 1
+    # One photo at a time in Tindr and Instagram: nothing to select.
+    for mode in ('swipe', 'instagram'):
+        review.set_mode(mode)
+        fired('Ctrl+A')
+        assert len(review.targets()) == 1 and len(window.selected_photos()) == 1, mode
+    window.set_review(False)
+    # Taking many copies out of the portfolio sends them to the bin: it is asked first.
+    answers = []
+    real_ask, real_viewing, real_take = triphoto_qt.ask, window.viewing_portfolio, window.take_out_of_portfolio
+    taken = []
+    window.viewing_portfolio, window.take_out_of_portfolio = (lambda: True), taken.append
+    fired('Ctrl+A')
+    triphoto_qt.ask = lambda parent, title, text, buttons: answers.append(text) or 'cancel'
+    try:
+        window.toggle_portfolio()
+        assert len(answers) == 1 and '12 copies' in answers[0] and not taken
+        triphoto_qt.ask = lambda parent, title, text, buttons: 'remove'
+        window.toggle_portfolio()
+        assert len(taken) == 1 and len(taken[0]) == 12
+        fired('Ctrl+D')
+        triphoto_qt.ask = lambda *args: answers.append('asked')
+        window.toggle_portfolio()
+        assert len(answers) == 1 and len(taken) == 2 and len(taken[1]) == 1
+    finally:
+        triphoto_qt.ask = real_ask
+        window.viewing_portfolio, window.take_out_of_portfolio = real_viewing, real_take
+    # Both keys are customizable, and the former ones then do nothing.
+    settings = triphoto_qt.app_settings()
+    mapping = triphoto_prefs.shortcut_map(settings)
+    assert mapping['select_all'] == ['Ctrl+A'] and mapping['deselect'] == ['Ctrl+D']
+    mapping['select_all'], mapping['deselect'] = ['Ctrl+Shift+T'], ['Ctrl+Shift+Y']
+    triphoto_prefs.save_shortcut_map(settings, mapping)
+    window.install_shortcuts()
+    keys = {s.key().toString() for s in window.shortcuts}
+    assert 'Ctrl+Shift+T' in keys and 'Ctrl+Shift+Y' in keys and 'Ctrl+A' not in keys and 'Ctrl+D' not in keys
+    fired('Ctrl+Shift+T')
+    assert len(window.target_photos()) == 12
+    fired('Ctrl+Shift+Y')
+    assert len(window.target_photos()) == 1
+    dialog = triphoto_prefs.PreferencesDialog(window, settings)
+    assert dialog.mapping()['select_all'] == ['Ctrl+Shift+T']
+    dialog.reset()
+    assert dialog.mapping()['select_all'] == ['Ctrl+A'] and not triphoto_prefs.conflicts(dialog.mapping())
+    window.close()
+    clear_settings()
+
+
 def test_defaults_and_viewer_room(base):
     clear_settings()
     project = make_project(base/'defaults', 4)
@@ -1601,7 +1730,7 @@ def main():
     app.setStyleSheet(triphoto_qt.STYLE)
     base = Path(tempfile.mkdtemp(prefix='triphoto-tests-'))
     tests = [test_legacy_session, test_nested_session_ignored, test_dominant_color, test_recents, test_shortcuts,
-             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_export_by_its_button, test_themed_dialog, test_update, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_defaults_and_viewer_room]
+             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_export_by_its_button, test_themed_dialog, test_update, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_defaults_and_viewer_room]
     failures = 0
     try:
         for test in tests:

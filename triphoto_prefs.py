@@ -33,6 +33,8 @@ ACTIONS = [
     ('select', 'Retenir', ['P']),
     ('reject', 'Rejeter', ['X']),
     ('neutral', 'Neutre', ['U']),
+    ('select_all', 'Sélectionner toutes les photos du filtre', ['Ctrl+A']),
+    ('deselect', 'Désélectionner', ['Ctrl+D']),
     ('undo', 'Annuler la dernière note', ['Ctrl+Z']),
     ('fit', 'Ajuster la photo', ['0']),
     ('zoom_in', 'Zoom avant', ['+']),

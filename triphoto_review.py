@@ -445,10 +445,11 @@ class Surface(QWidget):
         if hit is None:
             return False
         photo, kind = hit
+        photos = self.window_.with_selection(photo)
         if kind == 'heart':
-            self.window_.change([photo], liked=not photo.liked)
+            self.window_.change(photos, liked=not photo.liked)
         else:
-            self.window_.change([photo], stars=0)
+            self.window_.change(photos, stars=0)
         self.last_clear = time.monotonic()
         return True
 
@@ -475,10 +476,23 @@ class Surface(QWidget):
         self.review.sync_bar()
 
     def unpick(self):
-        if self.active:
-            self.active = False
-            self.update()
-            self.review.sync_bar()
+        # Otherwise a selection no longer visible here would still act back in Classique.
+        self.active = False
+        self.window_.select_only_current()
+        self.update()
+        self.review.sync_bar()
+
+    def shown_photos(self):
+        return self.window_.photos
+
+    def select_all(self):
+        if self.fixed_deck:
+            self.window_.toast('Cette vue montre une photo à la fois.', 1400)
+            return
+        self.active = True
+        self.window_.select_photos(self.shown_photos())
+        self.update()
+        self.review.sync_bar()
 
     def request_tiles(self, wanted):
         """Ask for the previews of what is on screen, (photo, pixels), within what memory can hold.
@@ -648,8 +662,11 @@ class WallView(Surface):
             self.bar.setStyleSheet(f'QScrollBar::handle:vertical {{ background: {tint}; border: 1px solid rgba(128, 128, 128, 120); '
                                    'border-radius: 5px; min-height: 48px; }' if tint else '')
 
+    def shown_photos(self):
+        return [p for p in self.window_.photos if p.relative_path not in self.set_aside]
+
     def rebuild(self):
-        self.ordered = [p for p in self.window_.photos if p.relative_path not in self.set_aside]
+        self.ordered = self.shown_photos()
         if self.by_color:
             self.ordered.sort(key=lambda p: color_key(self.review.info.get(p.relative_path), self.order))
         elif self.order_seed is not None:

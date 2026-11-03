@@ -36,6 +36,10 @@ Une photo en grand et le ruban de toutes les photos à droite. Ajustée, la phot
 
 La barre du bas porte les réglages propres à la vue et, dès qu'une photo est sélectionnée, sa note ; un clic dans le vide retire la sélection. On annule avec `Ctrl+Z`, et un double-clic ouvre la photo dans la vue Classique.
 
+## Sélection multiple
+
+`Ctrl+clic` ajoute une photo à la sélection et `Ctrl+A` sélectionne toutes celles que laisse passer le filtre, sans celles qui sont sorties de la grille. Une note, un marqueur, un cœur, le portfolio ou « à publier » s'appliquent alors à toute la sélection, au clavier, depuis la barre comme d'un clic sur l'une des photos sélectionnées ; une bascule part de l'état de la photo affichée. `Ctrl+Z` annule le tout en une fois. `Ctrl+D` désélectionne : la vue Classique garde seulement la photo affichée. Tindr et Instagram montrent une photo à la fois et n'ont donc pas de sélection. Dans le portfolio, retirer plusieurs photos demande confirmation.
+
 | Vue | Principe | Réglages en bas |
 | --- | --- | --- |
 | **Grille** | Une grille décalée, comme une galerie éditoriale, ou des rangées. En décalé, les étoiles se placent sous la photo ; en rangées, sur la photo. Formats égaux cale les rangées sur l'orientation majoritaire, Horizontales en avant sur la hauteur des horizontales, Verticales en avant sur celle des verticales, sans changer l'ordre des photos. Tirez une photo hors de la grille, sur un côté ou en bas, pour la sortir de la sélection. `Ctrl` + molette change la taille. | Disposition, formats mis en avant (rangées seulement), largeur du panneau central, mélange, action de sortie |
@@ -88,6 +92,7 @@ Tous les raccourcis se changent dans **Préférences** (`Ctrl+,`). Les touches e
 | `1` à `5`, `Maj+C`, `Maj+V` | Note, zéro étoile, cinq étoiles |
 | `F`, `L`, `K`, `I` | Drapeau, j'aime, portfolio, à publier |
 | `P`, `X`, `U` | Retenir, rejeter, neutre |
+| `Ctrl+A`, `Ctrl+D` | Sélectionner toutes les photos du filtre, désélectionner |
 | `Ctrl+Z` | Annuler la dernière note |
 | `G`, Échap | Basculer de vue, revenir à Classique |
 | `Ctrl+0` à `Ctrl+5` | Vues |
