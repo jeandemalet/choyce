@@ -15,7 +15,7 @@ from io import BytesIO
 from pathlib import Path
 from collections import OrderedDict
 
-from PySide6.QtCore import Qt, QPoint, QSize, QRectF, QPointF, Signal, Slot, QObject, QRunnable, QThreadPool, QTimer, QItemSelection, QItemSelectionModel, QSettings, QStandardPaths, QUrl
+from PySide6.QtCore import Qt, QPoint, QSize, QRectF, QPointF, Signal, Slot, QObject, QRunnable, QThreadPool, QTimer, QItemSelection, QItemSelectionModel, QMimeData, QSettings, QStandardPaths, QUrl
 from PySide6.QtGui import QPixmap, QCursor, QDesktopServices, QIcon, QImage, QPainter, QPainterPath, QColor, QFont, QShortcut, QKeySequence, QColorSpace, QPen
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QComboBox, QSplitter, QListWidget, QListWidgetItem, QFrame, QScrollArea, QButtonGroup,
@@ -231,6 +231,7 @@ class HoverButton(QPushButton):
         super().enterEvent(event)
 
 
+FILTER_WIDTH = 318
 # Fitted, a photo stops above the floating bar instead of lying under it.
 BAR_ROOM = 66
 
@@ -325,6 +326,9 @@ class Viewer(QWidget):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
     def mouseMoveEvent(self, event):
+        if self.drag is not None and not event.buttons() & Qt.MouseButton.LeftButton:
+            self.drag = None
+            self.unsetCursor()
         if self.drag is not None:
             self.pan += event.position()-self.drag
             self.drag = event.position()
@@ -1053,6 +1057,7 @@ class Window(QMainWindow):
         self.prepared = set()
         self.failed = set()
         self.undo_stack = []
+        self.copied = []
         self.shortcuts = []
         self.scans = []
         self.display_profile = None
@@ -1092,6 +1097,8 @@ class Window(QMainWindow):
         self.project_menu.aboutToShow.connect(self.fill_project_menu)
         self.project_button.setMenu(self.project_menu)
         left.addWidget(self.project_button)
+        self.undo_button = self.button(left, '↶ Annuler', self.undo, 'ghost')
+        self.undo_button.hide()
         left.addSpacing(6)
         self.folder_label = QLabel('', objectName='muted')
         self.folder_label.hide()
@@ -1126,22 +1133,15 @@ class Window(QMainWindow):
         self.view_buttons['classic'].setChecked(True)
         self.view_buttons['buckets'].hide()
         self.segments = segments
-        self.filter_chip = HoverButton('Filtre  ▾', objectName='ghost')
+        self.filter_chip = HoverButton('Filtre', objectName='seg', checkable=True)
         self.filter_chip.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.filter_chip.setToolTip('Notes, marqueurs et réglages de la vue')
-        self.filter_chip.clicked.connect(self.show_filter_panel)
-        self.display_button = QPushButton('Affichage  ▾', objectName='ghost')
-        self.display_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.display_button.setToolTip('Noir et blanc, couleur du fond et zoom')
-        self.display_button.clicked.connect(lambda *_: self.show_display_panel())
-        self.display_button.hide()
+        self.filter_chip.clicked.connect(self.toggle_filter_panel)
         right.addSpacing(6)
         self.export_button = self.button(right, 'Exporter…', self.export, 'primary')
         self.prefs_button = self.button(right, 'Préférences', self.open_preferences, 'ghost')
         top.addLayout(left, 1)
         top.addWidget(segments)
         top.addWidget(self.filter_chip)
-        top.addWidget(self.display_button)
         top.addLayout(right, 1)
         self.header = header
         layout.addWidget(header)
@@ -1191,67 +1191,60 @@ class Window(QMainWindow):
         self.bucket_ghost = QLabel(self)
         self.bucket_ghost.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.bucket_ghost.hide()
-        # Large and in the center of the window, every filter in view; a click beside it closes it.
-        self.filter_scrim = QPushButton(self, objectName='filterScrim', flat=True)
-        self.filter_scrim.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.filter_scrim.setStyleSheet('QPushButton#filterScrim { background: rgba(0, 0, 0, 120); border: none; border-radius: 0; }')
-        self.filter_scrim.clicked.connect(lambda *_: self.hide_filter_panel())
-        self.filter_scrim.hide()
-        self.filter_panel = QFrame(self, objectName='dialog')
-        filter_lines = QVBoxLayout(self.filter_panel)
-        filter_lines.setContentsMargins(26, 22, 26, 20)
+        # On the right of the views, open or closed for good: the photos answer each filter beside it.
+        self.filter_open = {'classic': self.settings.value('filter_open_classic', False, type=bool),
+                            'views': self.settings.value('filter_open_views', True, type=bool)}
+        self.filter_panel = QFrame(objectName='dock')
+        self.filter_panel.setFixedWidth(FILTER_WIDTH)
+        panel_outer = QVBoxLayout(self.filter_panel)
+        panel_outer.setContentsMargins(0, 0, 0, 0)
+        panel_scroll = QScrollArea()
+        panel_scroll.setWidgetResizable(True)
+        panel_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        panel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        panel_scroll.setStyleSheet('QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }')
+        panel_outer.addWidget(panel_scroll)
+        panel_body = QWidget()
+        panel_scroll.setWidget(panel_body)
+        filter_lines = QVBoxLayout(panel_body)
+        filter_lines.setContentsMargins(16, 14, 14, 16)
         filter_lines.setSpacing(6)
         filter_top = QHBoxLayout()
         filter_top.addWidget(QLabel('Filtres', objectName='dialogTitle'))
-        filter_top.addSpacing(10)
-        self.filter_count = QLabel(objectName='muted')
-        filter_top.addWidget(self.filter_count)
         filter_top.addStretch(1)
         self.button(filter_top, 'Tout effacer', self.clear_filters, 'ghost')
-        self.button(filter_top, 'Fermer', self.hide_filter_panel, 'primary')
         filter_lines.addLayout(filter_top)
-        filter_lines.addSpacing(10)
-        def criterion(title, widget):
-            row = QHBoxLayout()
-            label = QLabel(title, objectName='muted')
-            label.setFixedWidth(84)
-            row.addWidget(label)
-            row.addWidget(widget)
-            row.addStretch(1)
-            filter_lines.addLayout(row)
-            filter_lines.addSpacing(6)
+        self.filter_count = QLabel(objectName='muted')
+        filter_lines.addWidget(self.filter_count)
+        filter_lines.addSpacing(8)
+        def section(title, widget):
+            box = QWidget()
+            lines = QVBoxLayout(box)
+            lines.setContentsMargins(0, 0, 0, 10)
+            lines.setSpacing(5)
+            lines.addWidget(QLabel(title, objectName='muted'))
+            lines.addWidget(widget)
+            filter_lines.addWidget(box)
+            return box
         self.bucket_rule = BucketFilter(self)
-        self.bucket_area = QScrollArea()
-        self.bucket_area.setWidgetResizable(True)
-        self.bucket_area.setFrameShape(QFrame.Shape.NoFrame)
-        self.bucket_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.bucket_area.setStyleSheet('QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }')
-        self.bucket_area.setWidget(self.bucket_rule)
-        self.bucket_section = QWidget()
-        bucket_lines = QVBoxLayout(self.bucket_section)
-        bucket_lines.setContentsMargins(0, 0, 0, 8)
-        bucket_lines.setSpacing(4)
-        bucket_lines.addWidget(QLabel('Buckets', objectName='muted'))
-        bucket_lines.addWidget(self.bucket_area)
-        filter_lines.addWidget(self.bucket_section)
-        criterion('Note', self.note_filter)
-        criterion('Marqueur', self.marker_filter)
-        criterion('Avec', self.choices)
-        self.filter_panel.setMinimumWidth(620)
+        self.bucket_section = section('Buckets', self.bucket_rule)
+        section('Note', self.note_filter)
+        section('Marqueur', self.marker_filter)
+        section('Avec', self.choices)
         # What is displayed apart from what is filtered: black and white, background and zoom of the views.
-        self.display_panel = QFrame(self, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
-        self.display_panel.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        display_outer = QVBoxLayout(self.display_panel)
-        display_outer.setContentsMargins(0, 0, 0, 0)
-        display_frame = QFrame(objectName='dialog')
-        display_outer.addWidget(display_frame)
-        display_row = QHBoxLayout(display_frame)
-        display_row.setContentsMargins(12, 10, 14, 10)
-        display_row.addWidget(self.review.tools)
-        self.filter_panel.hide()
-        layout.addWidget(self.pages, 1)
-        layout.addWidget(self.review_tabs)
-        layout.addWidget(self.bucket_strip)
+        self.display_section = section('Affichage', self.review.tools)
+        filter_lines.addStretch(1)
+        self.custom.currentChanged.connect(lambda *_: self.update_project_state())
+        content = QHBoxLayout()
+        content.setSpacing(0)
+        column = QVBoxLayout()
+        column.setSpacing(0)
+        column.addWidget(self.pages, 1)
+        column.addWidget(self.review_tabs)
+        column.addWidget(self.bucket_strip)
+        content.addLayout(column, 1)
+        content.addWidget(self.filter_panel)
+        layout.addLayout(content, 1)
         # How many large previews stay in memory: more when a page shows more of them at once.
         self.large_keep = 6
         self.export_job = None
@@ -1321,7 +1314,7 @@ class Window(QMainWindow):
             'prev': lambda: self.navigate(-1), 'next': lambda: self.navigate(1),
             'flag': self.toggle_flag, 'like': self.toggle_like, 'portfolio': self.toggle_portfolio, 'publish': self.toggle_publish, 'select': lambda: self.set_pick(PICK_SELECT),
             'reject': lambda: self.set_pick(PICK_REJECT), 'neutral': lambda: self.set_pick(PICK_NEUTRAL),
-            'select_all': self.select_all, 'deselect': self.deselect, 'undo': self.undo, 'fit': self.fit,
+            'select_all': self.select_all, 'deselect': self.deselect, 'undo': self.undo, 'copy': self.copy_photos, 'paste': self.paste_photos, 'fit': self.fit,
             'zoom_in': lambda: self.zoom_by(1.15), 'zoom_out': lambda: self.zoom_by(1/1.15),
             'background': self.cycle_background, 'review': lambda: self.set_review(not self.review_active),
             'shuffle': lambda: self.review.shuffle() if self.review_active else None,
@@ -1342,6 +1335,7 @@ class Window(QMainWindow):
         for key, delta in (('Up', -1), ('Down', 1), ('Shift+Up', -1), ('Shift+Down', 1)):
             if QKeySequence(key).toString() not in taken:
                 self.shortcuts.append(QShortcut(QKeySequence(key), self, activated=lambda value=delta: self.browse(value)))
+        self.undo_button.setToolTip(f"Annuler la dernière action ({' / '.join(mapping['undo'])})")
         lines = [f"{' / '.join(mapping[key])} : {label}" for key, label in [('prev', 'précédente'), ('next', 'suivante')]]
         self.viewer.setToolTip('\n'.join(lines)+'\nClic droit : couleur du fond\nPréférences : tous les raccourcis')
 
@@ -1377,43 +1371,29 @@ class Window(QMainWindow):
         self.toast_frame.raise_()
         self.toast_timer.start(duration)
 
-    def place_filter_panel(self):
-        self.filter_scrim.setGeometry(self.rect())
-        # The buckets at full size, and scrolling beyond what the window can show.
-        panel_layout = self.filter_panel.layout()
-        self.bucket_rule.layout().invalidate()
-        self.bucket_rule.layout().activate()
-        wanted = self.bucket_rule.sizeHint()
-        self.bucket_area.setMinimumWidth(wanted.width()+14)
-        self.bucket_area.setFixedHeight(0)
-        panel_layout.invalidate()
-        others = panel_layout.sizeHint().height()
-        self.bucket_area.setFixedHeight(max(80, min(wanted.height()+4, self.height()-16-others)))
-        panel_layout.invalidate()
-        panel_layout.activate()
-        self.filter_panel.resize(panel_layout.sizeHint())
-        self.filter_panel.move((self.width()-self.filter_panel.width())//2, max(8, (self.height()-self.filter_panel.height())//2))
-        self.filter_scrim.raise_()
-        self.filter_panel.raise_()
+    def filter_place(self):
+        """Classique has its ribbon on the right: there the panel only opens on demand."""
+        return 'views' if self.review_active or self.custom_active else 'classic'
 
-    def show_display_panel(self):
-        self.display_panel.adjustSize()
-        below = self.display_button.mapToGlobal(self.display_button.rect().bottomLeft())
-        self.display_panel.move(below.x(), below.y()+6)
-        self.display_panel.show()
+    def toggle_filter_panel(self, *args):
+        place = self.filter_place()
+        self.filter_open[place] = not self.filter_open[place]
+        self.settings.setValue(f'filter_open_{place}', self.filter_open[place])
+        self.sync_filter_panel()
 
-    def show_filter_panel(self, *args):
-        self.bucket_rule.sync()
-        self.update_filter_chip()
-        self.filter_scrim.show()
-        self.filter_panel.show()
-        self.place_filter_panel()
-        # Once its new buttons have taken their style, and so their true size.
-        QTimer.singleShot(0, self.place_filter_panel)
-
-    def hide_filter_panel(self):
-        self.filter_panel.hide()
-        self.filter_scrim.hide()
+    def sync_filter_panel(self):
+        has_photos = bool(self.session and self.session.photos)
+        # In a selection, the buckets filter too. Choosing its galleries is not looking at photos.
+        with_filter = has_photos and (not self.custom_active or (bool(self.selection) and self.custom.currentWidget() is self.custom.work))
+        self.filter_chip.setVisible(with_filter)
+        shown = with_filter and self.filter_open[self.filter_place()]
+        self.filter_chip.setChecked(shown)
+        self.filter_panel.setVisible(shown)
+        self.bucket_section.setVisible(bool(self.selection))
+        self.display_section.setVisible(self.review_active)
+        if shown:
+            self.bucket_rule.sync()
+            self.update_filter_chip()
 
     def clear_filters(self):
         for combo in (self.stars, self.flags):
@@ -1430,8 +1410,8 @@ class Window(QMainWindow):
         parts = [combo.currentText() for combo in (self.stars, self.flags) if combo.currentIndex() > 0]+self.choices.active_labels()
         # Elided: a long filter must not push the views out of the header. In a selection, Revoir already tells.
         text = self.filter_chip.fontMetrics().elidedText(' · '.join(parts), Qt.TextElideMode.ElideRight, 100)
-        self.filter_chip.setText(f'Filtre : {text}  ▾' if parts and not self.selection else 'Filtre  ▾')
-        self.filter_chip.setToolTip(' · '.join(parts) or 'Notes, marqueurs et réglages de la vue')
+        self.filter_chip.setText(f'Filtre : {text}' if parts and not self.selection else 'Filtre')
+        self.filter_chip.setToolTip(' · '.join(parts) or 'Afficher ou masquer le panneau des filtres')
         self.review_tabs.sync()
         count = len(self.photos)
         self.filter_count.setText(f"{count} photo{'s' if count > 1 else ''} affichée{'s' if count > 1 else ''}")
@@ -1455,6 +1435,10 @@ class Window(QMainWindow):
     def sync_view_buttons(self):
         mode = 'wall' if self.review.mode == 'color' else self.review.mode
         self.view_buttons['buckets' if self.custom_active else mode if self.review_active else 'classic'].setChecked(True)
+        # Dealt at random or sorted from the bottom bar, these two have no use for the order of the names.
+        self.sort.setVisible(bool(self.session and self.session.photos) and not self.custom_active
+                             and not (self.review_active and self.review.mode in ('toile', 'color')))
+        self.sync_filter_panel()
 
     def show_viewer_bar(self):
         self.viewer_bar_timer.start(1700)
@@ -1636,8 +1620,7 @@ class Window(QMainWindow):
     def buckets_done(self, before):
         changed = len(self.selection.undo_stack)-before
         if changed:
-            self.undo_stack.append(('buckets', changed))
-            del self.undo_stack[:-300]
+            self.remember(('buckets', changed))
             self.custom.changed()
 
     def show_custom_home(self):
@@ -1685,9 +1668,7 @@ class Window(QMainWindow):
             self.review.set_mode(mode)
 
     def leave_review(self):
-        if self.filter_panel.isVisible():
-            self.hide_filter_panel()
-        elif self.custom_active:
+        if self.custom_active:
             self.custom.back()
         elif self.review_active:
             self.set_review(False)
@@ -1953,19 +1934,10 @@ class Window(QMainWindow):
         in_project = has_photos and not self.custom_active
         self.export_button.setVisible(in_project)
         # Nothing to filter or switch on the welcome screen. Custom has its own controls, and its own export.
-        for control in (self.sort, self.counter):
-            control.setVisible(in_project)
+        self.counter.setVisible(in_project)
         self.segments.setVisible(has_photos)
-        # In a selection, the buckets filter too.
-        with_filter = in_project or bool(self.selection and has_photos)
-        self.filter_chip.setVisible(with_filter)
-        if not with_filter:
-            self.hide_filter_panel()
-        # Black and white, background and zoom of the panel are those of the other views.
-        self.display_button.setVisible(self.review_active and in_project)
-        self.bucket_section.setVisible(bool(self.selection))
-        if self.filter_panel.isVisible():
-            self.place_filter_panel()
+        self.undo_button.setVisible(has_photos)
+        self.sync_undo_button()
         name = self.selection.name if self.selection else project_label(self.project_path) if self.project_path else ''
         self.setWindowTitle(f'{APP_NAME} · {name}' if self.session else APP_NAME)
 
@@ -1994,6 +1966,7 @@ class Window(QMainWindow):
         self.review.reset()
         self.review_active = False
         self.undo_stack.clear()
+        self.copied = []
         self.failed.clear()
         self.color_generation += 1
         self.pool.clear()
@@ -2452,10 +2425,11 @@ class Window(QMainWindow):
 
     def change(self, photos, stars=None, pick=None, liked=None, publish=None):
         """Single entry point for notes and markers: it is what makes them undoable."""
+        if not photos:
+            self.ask_for_photo()
         if not self.session or not photos:
             return
-        self.undo_stack.append([(photo, photo.stars, photo.pick, photo.liked, photo.publish) for photo in photos])
-        del self.undo_stack[:-300]
+        self.remember([(photo, photo.stars, photo.pick, photo.liked, photo.publish) for photo in photos])
         for photo in photos:
             if stars is not None:
                 photo.stars = stars
@@ -2467,14 +2441,41 @@ class Window(QMainWindow):
                 photo.publish = publish
         self.apply_filters()
 
+    def ask_for_photo(self):
+        """A key that acts on nothing says so, rather than looking broken."""
+        if self.session and self.photos and not self.custom_active:
+            self.toast('Cliquez d’abord sur une photo.', 1600)
+
+    def remember(self, entry):
+        """A step that Ctrl+Z and the Annuler button can take back: notes as a list; ('buckets', how many),
+        ('portfolio', photos, added) or ('view', message, how to restore) otherwise."""
+        self.undo_stack.append(entry)
+        del self.undo_stack[:-300]
+        self.sync_undo_button()
+
+    def can_undo(self):
+        return bool(self.undo_stack or (self.selection and self.selection.undo_stack))
+
+    def sync_undo_button(self):
+        self.undo_button.setEnabled(self.can_undo())
+
     def undo(self):
+        self.take_back()
+        self.sync_undo_button()
+
+    def take_back(self):
         if self.custom_active:
             self.custom.undo()
             return
-        if not self.undo_stack:
+        if not self.can_undo():
             self.toast('Rien à annuler')
             return
-        states = self.undo_stack.pop()
+        # A step made on the Buckets page is taken back from any view of the selection.
+        states = self.undo_stack.pop() if self.undo_stack else ('buckets', 1)
+        if states[0] == 'view':
+            states[2]()
+            self.toast(states[1], 1200)
+            return
         if states[0] == 'buckets':
             paths = [self.selection.undo() for _ in range(states[1])]
             self.custom.changed()
@@ -2504,11 +2505,62 @@ class Window(QMainWindow):
         photos = self.target_photos()
         if photos:
             self.change(photos, liked=not photos[0].liked)
+        else:
+            self.ask_for_photo()
 
     def toggle_publish(self):
         photos = self.target_photos()
         if photos:
             self.change(photos, publish=not photos[0].publish)
+        else:
+            self.ask_for_photo()
+
+    def clipboard_photos(self):
+        if self.custom_active:
+            current = self.custom.current()
+            return [photo for photo in self.session.photos if current and photo.relative_path == current['path']] if self.session else []
+        return self.target_photos()
+
+    def copy_photos(self):
+        """The files for other programs, and the image itself when there is one. Here, what Ctrl+V takes up."""
+        photos = self.clipboard_photos()
+        if not photos:
+            self.ask_for_photo()
+            return
+        data = QMimeData()
+        data.setUrls([QUrl.fromLocalFile(str(photo.path)) for photo in photos])
+        image = self.best_image(photos[0]) if len(photos) == 1 else None
+        if image is not None:
+            data.setImageData(image)
+        QApplication.clipboard().setMimeData(data)
+        self.copied = list(photos)
+        self.toast('Photo copiée' if len(photos) == 1 else f'{len(photos)} photos copiées', 1200)
+
+    def paste_photos(self):
+        """Into the bucket under review; otherwise the note of the photo copied goes to the photos selected."""
+        if not self.copied:
+            self.toast('Rien à coller : copiez d’abord une photo avec Ctrl+C.', 2200)
+            return
+        rule = self.selection.rule() if self.selection else None
+        if rule and len(rule['include']) == 1:
+            key = rule['include'][0]
+            before = len(self.selection.undo_stack)
+            for photo in self.copied:
+                self.selection.add(photo.relative_path, key)
+            added = len(self.selection.undo_stack)-before
+            self.toast(f"{added} photo{'s' if added > 1 else ''} ajoutée{'s' if added > 1 else ''} à {self.selection.bucket(key)['title']}" if added else 'Déjà dans ce bucket', 1400)
+            self.buckets_done(before)
+            return
+        if self.custom_active:
+            self.toast('Choisissez un bucket dans Revoir pour y coller ces photos.', 2200)
+            return
+        source = self.copied[0]
+        photos = [photo for photo in self.target_photos() if all(photo is not other for other in self.copied)]
+        if not photos:
+            self.toast('Sélectionnez les photos qui recevront cette note.', 2200)
+            return
+        self.change(photos, stars=source.stars, pick=source.pick, liked=source.liked, publish=source.publish)
+        self.toast(f"Note collée sur {len(photos)} photo{'s' if len(photos) > 1 else ''}", 1400)
 
     # Portfolio. Inside it, every photo belongs to it and taking one out sends the file to the bin.
     def is_portfolio_path(self, path):
@@ -2564,8 +2616,7 @@ class Window(QMainWindow):
         # Only those that change, so that Ctrl+Z leaves the others where they were.
         photos = [photo for photo in photos if self.portfolio.contains(photo.path) != adding]
         self.send_to_portfolio(photos, adding)
-        self.undo_stack.append(('portfolio', photos, adding))
-        del self.undo_stack[:-300]
+        self.remember(('portfolio', photos, adding))
         count = len(photos)
         self.toast(f"{count} photo{'s' if count > 1 else ''} {'ajoutée' if adding else 'retirée'}{'s' if count > 1 else ''} {'au' if adding else 'du'} portfolio", 1400)
 
@@ -2821,7 +2872,6 @@ class Window(QMainWindow):
 
     def resizeEvent(self, event):
         self.place_export_panel()
-        self.place_filter_panel()
         super().resizeEvent(event)
 
     def export_checking(self):

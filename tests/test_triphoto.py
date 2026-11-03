@@ -264,8 +264,10 @@ def test_review_modes(base):
     toile.set_columns(4)
     assert len(toile.stack) == 24 and len(toile.positions) == 24
     # All the photos, so many across: the width fits, the rest continues below.
-    xs = [p[0] for p in toile.positions.values()]
-    assert round((max(xs)-min(xs))/toile.CELL_WIDTH) == 3
+    first = sorted((toile.tile_rect(p) for p in toile.dealt[:4]), key=lambda r: r.left())
+    # Tight: the neighbours of a row are separated by the gap, give or take its disorder.
+    assert all(0 < b.left()-a.right() < toile.GAP*1.7 for a, b in zip(first, first[1:]))
+    assert toile.tile_rect(toile.dealt[4]).top() > min(r.top() for r in first), 'four across, then the next row'
     assert not review.bar.isVisible() and window.rate(5) is None and not toile.targets()
     key = toile.stack[0].relative_path
     position = list(toile.positions[key])
@@ -987,6 +989,96 @@ def test_update(base):
     clear_settings()
 
 
+def test_keys_undo_and_clipboard(base):
+    clear_settings()
+    root = make_project(base/'keys', 8)
+    window = open_window(root)
+    window.activateWindow()
+    settle(window, window.isActiveWindow)
+    review = window.review
+    # A press on the bar is not for the photo under it: nothing follows the mouse, and a double click does not zoom.
+    window.show_viewer_bar()
+    bar = window.viewer_bar
+    QTest.mouseClick(bar, Qt.MouseButton.LeftButton, pos=QPoint(int(bar.stars_x()+23), 23))
+    assert window.viewer.drag is None and window.current_photo().stars == 2
+    QTest.mouseDClick(bar, Qt.MouseButton.LeftButton, pos=QPoint(int(bar.stars_x()+46), 23))
+    assert window.viewer.zoom == 1
+    # The Annuler button does what Ctrl+Z does, and says when there is nothing left.
+    assert window.undo_button.isVisible() and window.undo_button.isEnabled()
+    while window.can_undo():
+        window.undo_button.click()
+    assert window.current_photo().stars == 0 and not window.undo_button.isEnabled()
+    for photo in window.session.photos:
+        photo.stars = 5
+    window.note_filter.buttons[5].click()
+    window.set_view('toile')
+    toile = review.view()
+    # Nothing picked: a key says so instead of looking broken.
+    QTest.keyClick(window, Qt.Key.Key_C, Qt.KeyboardModifier.ShiftModifier)
+    assert window.toast_frame.isVisible() and 'Cliquez' in window.toast_label.text() and len(window.photos) == 8
+    # A photo leaves the filter: the next key does not fall on another one, somewhere on the table.
+    photo = toile.stack[3]
+    toile.pick(photo)
+    QTest.keyClick(window, Qt.Key.Key_C, Qt.KeyboardModifier.ShiftModifier)
+    assert photo.stars == 0 and not toile.targets() and not review.bar.isVisible()
+    QTest.keyClick(window, Qt.Key.Key_C, Qt.KeyboardModifier.ShiftModifier)
+    assert sum(p.stars == 0 for p in window.session.photos) == 1
+    # Ctrl+Z brings it back, picked again.
+    QTest.keyClick(window, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    assert photo.stars == 5 and photo in toile.stack and toile.targets() == [photo]
+    # A photo moved by hand and a new deal are steps too.
+    key, start = photo.relative_path, list(toile.positions[photo.relative_path])
+    toile.drag, toile.moved, toile.drag_start = (photo, QPointF()), True, list(start)
+    toile.positions[key][0] += 300
+    toile.mouseReleaseEvent(type('E', (), {'globalPosition': lambda self: QPointF()})())
+    QTest.keyClick(window, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    assert toile.positions[key] == start
+    dealt = list(toile.dealt)
+    review.shuffle()
+    QTest.keyClick(window, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    assert toile.dealt == dealt and toile.positions[key][:2] == start[:2] and len(toile.stack) == 8
+    # In the grid, Mélanger is a state of the sort, and the names come back.
+    window.set_view('wall')
+    wall = review.view()
+    names = [p.relative_path for p in wall.ordered]
+    review.shuffle()
+    assert review.wall_sort.currentData() == 'shuffled'
+    review.wall_sort.setCurrentIndex(0)
+    assert wall.order_seed is None and [p.relative_path for p in wall.ordered] == names
+    # Tindr follows the order of the names, until shuffled.
+    window.set_view('swipe')
+    swipe = review.view()
+    window.sort.setCurrentIndex(window.sort.findData('name_desc'))
+    assert swipe.deck[0].relative_path == max(names)
+    window.sort.setCurrentIndex(window.sort.findData('name_asc'))
+    # Ctrl+C gives the files to other programs; Ctrl+V gives the note of the photo copied to those selected.
+    window.set_view('classic')
+    QTest.keyClick(window, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
+    assert 'Rien à coller' in window.toast_label.text()
+    source, other = window.photos[0], window.photos[1]
+    source.stars, source.liked, other.stars = 3, True, 1
+    window.select_photo(source)
+    QTest.keyClick(window, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+    urls = QApplication.clipboard().mimeData().urls()
+    assert [url.toLocalFile() for url in urls] == [source.path.as_posix()] and window.toast_label.text() == 'Photo copiée'
+    window.select_photo(other)
+    QTest.keyClick(window, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
+    assert other.stars == 3 and other.liked and 'Note collée' in window.toast_label.text()
+    window.undo_button.click()
+    assert other.stars == 1 and not other.liked
+    # "et +" only where it means something.
+    window.note_filter.buttons['all'].click()
+    assert not window.note_filter.and_more.isEnabled()
+    window.note_filter.buttons[3].click()
+    assert window.note_filter.and_more.isEnabled()
+    window.note_filter.and_more.click()
+    assert window.stars.currentData() == 'ge3'
+    window.note_filter.buttons[5].click()
+    assert window.stars.currentData() == 5 and not window.note_filter.and_more.isChecked()
+    window.close()
+    clear_settings()
+
+
 def test_views_and_filter_panel(base):
     clear_settings()
     root = make_project(base/'views', 6)
@@ -1020,41 +1112,33 @@ def test_views_and_filter_panel(base):
     assert window.view_buttons['wall'].isChecked()
     # The same filter everywhere.
     assert review.note_filter is window.note_filter and review.marker_filter is window.marker_filter
-    # A click on Filtre opens the panel in the center, and it stays until closed.
-    assert not window.filter_panel.isVisible()
-    window.filter_chip.click()
+    # The panel stands on the right of the views, the photos beside it, and stays.
     panel = window.filter_panel
-    assert panel.isVisible() and window.filter_scrim.isVisible() and not review.tools.isVisibleTo(panel)
-    assert abs(panel.geometry().center().x()-window.rect().center().x()) < 3
-    assert panel.geometry().top() >= 0 and panel.geometry().bottom() <= window.height()
-    wait(300)
-    assert panel.isVisible()
+    wait(30)
+    assert panel.isVisible() and review.tools.isVisible() and window.filter_chip.isChecked()
+    assert panel.geometry().right() == window.width()-1 and review.width() == window.width()-panel.width()
     window.note_filter.buttons[5].click()
     assert panel.isVisible() and 'affichée' in window.filter_count.text()
     window.clear_filters()
     assert window.stars.currentIndex() == 0
-    # A click beside it, or Échap, closes it.
-    window.filter_scrim.click()
-    assert not panel.isVisible() and not window.filter_scrim.isVisible()
+    # Filtre closes it, for every view.
     window.filter_chip.click()
-    window.leave_review()
-    assert not panel.isVisible() and window.review_active
-    # What is displayed has its own button, apart from the filters.
-    assert window.display_button.isVisible()
-    window.show_display_panel()
-    assert window.display_panel.isVisible() and review.tools.isVisible()
-    window.display_panel.hide()
-    # In Classique, no tools of the other views.
+    wait(30)
+    assert not panel.isVisible() and not window.filter_chip.isChecked() and review.width() == window.width()
+    window.set_view('toile')
+    assert not panel.isVisible()
+    window.filter_chip.click()
+    assert panel.isVisible()
+    # Classique keeps its ribbon on the right: closed until asked for, and without the tools of the other views.
     window.set_view('classic')
-    assert not window.display_button.isVisible()
-    window.note_filter.buttons[0].click() if False else None
-    window.show_filter_panel()
-    assert window.filter_panel.isVisible()
-    window.hide_filter_panel()
+    assert not panel.isVisible() and window.filter_chip.isVisible()
+    window.filter_chip.click()
+    assert panel.isVisible() and not review.tools.isVisibleTo(panel)
+    window.filter_chip.click()
     window.note_filter.buttons[0].click()
     assert '0 étoile' in window.filter_chip.toolTip()
     window.note_filter.buttons['all'].click()
-    assert window.filter_chip.text() == 'Filtre  ▾'
+    assert window.filter_chip.text() == 'Filtre'
     # Up and down browse like left and right, except where moving on is a decision.
     keys = {shortcut.key().toString() for shortcut in window.shortcuts}
     assert {'Up', 'Down', 'Shift+Up', 'Shift+Down'} <= keys
@@ -2335,7 +2419,7 @@ def test_selection_views(base):
     state('b', 'include')
     assert {str(p.path) for p in window.photos} == {paths[0], paths[1], paths[2], paths[3]}
     assert rule.options.isVisibleTo(rule) and 'AG ou WPJA' in window.filter_chip.toolTip()
-    assert window.filter_chip.text() == 'Filtre  ▾', 'Revoir tells which bucket is shown'
+    assert window.filter_chip.text() == 'Filtre', 'Revoir tells which bucket is shown'
     # Two of them included stay so, each with its own state.
     assert rule.buttons['a']['include'].isChecked() and rule.buttons['b']['include'].isChecked()
     rule.all_button.click()
@@ -2444,8 +2528,9 @@ def test_selection_views(base):
     insta = review.view()
     background = window.viewer.background
     was = insta.light
-    insta.theme_button.click()
+    (review.dark_button if was else review.light_button).click()
     assert insta.light != was and window.viewer.background == background
+    assert review.theme_row.isVisible() and not review.picker.isVisible()
     insta.set_light(True)
     assert insta.CARD == '#ffffff' and insta.SCREEN == '#000000'
     window.grab()
@@ -2700,7 +2785,7 @@ def main():
     app.setStyleSheet(triphoto_qt.STYLE)
     base = Path(tempfile.mkdtemp(prefix='triphoto-tests-'))
     tests = [test_legacy_session, test_nested_session_ignored, test_dominant_color, test_recents, test_shortcuts,
-             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_export_by_its_button, test_themed_dialog, test_update, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_repair_links, test_selection_review_and_health, test_defaults_and_viewer_room]
+             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_export_by_its_button, test_themed_dialog, test_update, test_keys_undo_and_clipboard, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_repair_links, test_selection_review_and_health, test_defaults_and_viewer_room]
     failures = 0
     try:
         for test in tests:

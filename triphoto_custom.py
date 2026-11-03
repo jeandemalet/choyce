@@ -502,15 +502,16 @@ class BucketFilter(QFrame):
             return
         for bucket in selection.buckets:
             key = bucket['id']
+            head = QHBoxLayout()
+            title = QLabel(bucket['title'])
+            title.setWordWrap(True)
+            title.setStyleSheet(f'color: {pastel(bucket["color"]).name()};')
+            head.addWidget(title, 1)
+            self.counts[key] = QLabel(objectName='faint')
+            head.addWidget(self.counts[key])
+            self.lines.addLayout(head)
             row = QHBoxLayout()
             row.setSpacing(2)
-            title = QLabel(bucket['title'])
-            title.setStyleSheet(f'color: {pastel(bucket["color"]).name()};')
-            row.addWidget(title)
-            row.addSpacing(8)
-            self.counts[key] = QLabel(objectName='faint')
-            row.addWidget(self.counts[key])
-            row.addStretch(1)
             self.buttons[key] = {}
             group = QButtonGroup(self)
             self.groups.append(group)
@@ -521,12 +522,19 @@ class BucketFilter(QFrame):
                 button.clicked.connect(lambda checked=False, k=key, v=value: self.set_state(k, v))
                 row.addWidget(button)
                 self.buttons[key][value] = button
+            row.addStretch(1)
             self.lines.addLayout(row)
+            self.lines.addSpacing(6)
         self.options = QWidget()
-        row = QHBoxLayout(self.options)
-        row.setContentsMargins(0, 6, 0, 0)
+        lines = QVBoxLayout(self.options)
+        lines.setContentsMargins(0, 2, 0, 0)
+        lines.setSpacing(4)
+        hint = QLabel('Avec plusieurs buckets inclus, afficher les photos', objectName='muted')
+        hint.setWordWrap(True)
+        lines.addWidget(hint)
+        row = QHBoxLayout()
         row.setSpacing(4)
-        row.addWidget(QLabel('Avec plusieurs buckets inclus, afficher les photos', objectName='muted'))
+        lines.addLayout(row)
         self.any_button = self.choice(row, "dans l'un d'eux", False)
         self.all_button = self.choice(row, 'dans tous à la fois', True)
         row.addStretch(1)
@@ -566,8 +574,6 @@ class BucketFilter(QFrame):
         self.window.custom.save_timer.start()
         self.window.filters_changed()
         self.sync()
-        if self.window.filter_panel.isVisible():
-            self.window.place_filter_panel()
 
     def labels(self):
         selection = self.window.selection

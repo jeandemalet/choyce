@@ -78,6 +78,7 @@ QPushButton#stateOff:hover {{ color: {TEXT}; }}
 QPushButton#stateOff:checked {{ background: {REJECT}; color: {INK}; font-weight: 600; }}
 QFrame#pill {{ background: rgba(22, 22, 23, 232); border: 1px solid rgba(255, 255, 255, 22); border-radius: 11px; }}
 QFrame#dialog {{ background: {RAISED}; border: 1px solid {LINE}; border-radius: 12px; }}
+QFrame#dock {{ background: {BASE}; border-left: 1px solid #262627; }}
 QLabel#dialogTitle {{ font-size: 15px; font-weight: 600; }}
 QProgressBar {{ background: {HOVER}; border: none; border-radius: 3px; }}
 QProgressBar::chunk {{ background: {TEXT}; border-radius: 3px; }}
