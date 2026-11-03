@@ -63,8 +63,8 @@ QPushButton#mainseg:checked {{ background: {HOVER}; color: {TEXT}; }}
 QFrame#segments {{ background: {RAISED}; border-radius: 8px; }}
 QFrame#customRow {{ background: {RAISED}; border-radius: 8px; }}
 QFrame#customRow:hover {{ background: {CONTROL}; }}
-QCheckBox::indicator {{ width: 15px; height: 15px; border: 1px solid {FAINT}; border-radius: 4px; background: transparent; }}
-QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
+QCheckBox::indicator {{ width: 20px; height: 20px; border: 1px solid {FAINT}; border-radius: 5px; background: transparent; }}
+QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; image: url("{(ASSETS / 'check.svg').as_posix()}"); }}
 QCheckBox::indicator:disabled {{ border-color: {LINE}; }}
 QFrame#pill {{ background: rgba(22, 22, 23, 232); border: 1px solid rgba(255, 255, 255, 22); border-radius: 11px; }}
 QFrame#dialog {{ background: {RAISED}; border: 1px solid {LINE}; border-radius: 12px; }}

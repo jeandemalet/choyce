@@ -1957,7 +1957,10 @@ def test_custom_sorting(base):
     session = triphoto_custom.Sorting.create(base/'tri seul', 'Concours')
     photos = [{'path': str(base/'a'/f'{i}.jpg'), 'gallery': 'a', 'relative': f'{i}.jpg'} for i in range(3)]+[{'path': str(base/'b'/'0.jpg'), 'gallery': 'b', 'relative': '0.jpg'}]
     session.set_photos(photos)
-    session.buckets.extend([{'id': 'x', 'title': 'Concours : Fearless', 'subtitle': ''}, {'id': 'y', 'title': 'Livre', 'subtitle': 'Sélection'}])
+    session.buckets.append({'id': 'x', 'title': 'Concours : Fearless', 'subtitle': '', 'color': session.free_color()})
+    session.buckets.append({'id': 'y', 'title': 'Livre', 'subtitle': 'Sélection', 'color': session.free_color()})
+    assert session.bucket('x')['color'] != session.bucket('y')['color'], 'a different color by default'
+    assert session.free_color('y') == session.bucket('y')['color'], 'its own color is free for the bucket being edited'
     a0, a1, a2, b0 = [photo['path'] for photo in photos]
     session.add(a0, 'x')
     session.add(a0, 'y')
@@ -2025,10 +2028,18 @@ def test_custom_view(base):
     settle(window, lambda: not setup.scanning(), 10000)
     assert not setup.go.isEnabled(), 'it needs a name'
     setup.name.setText('Concours 2027')
-    assert setup.go.isEnabled()
     rows = {row.title: row for row in setup.rows.values()}
     assert set(rows) == {'Portfolio', 'mariage', 'bapteme'}
-    assert all(row.check.isChecked() for row in rows.values())
+    # None chosen at first, and it needs at least one.
+    assert not any(row.check.isChecked() for row in rows.values()) and not setup.chosen() and not setup.go.isEnabled()
+    # A click anywhere on the row, as far from the box as can be, and not on its filters.
+    wait(50)
+    row = rows['mariage']
+    QTest.mouseClick(row, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, row.rect().center())
+    assert row.check.isChecked() and setup.go.isEnabled()
+    QTest.mouseClick(row, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, row.rect().center())
+    assert not row.check.isChecked()
+    setup.select_all()
     # Six and four photos, the one of the portfolio being one of the four.
     assert len(setup.chosen()) == 9, len(setup.chosen())
     setup.select_portfolio()
@@ -2060,13 +2071,30 @@ def test_custom_view(base):
     dialog.title.setText('Fearless')
     assert not dialog.go.isEnabled()
     dialog.title.setText('Fearless 2027')
-    assert dialog.go.isEnabled()
-    answers = [('Fearless', 'Mariage, mars'), ('Livre', '')]
+    assert dialog.go.isEnabled() and dialog.color() == triphoto_custom.BUCKET_COLORS[0]
+    dialog.colors[3].click()
+    assert dialog.color() == triphoto_custom.BUCKET_COLORS[3]
+    # With no bucket yet, the row offers to create one and takes no drop.
+    assert set(custom.cards) == {None} and custom.card_at(custom.cards[None].mapToGlobal(custom.cards[None].rect().center())) is None
+    offered = []
+    custom.ask_bucket = lambda *args: offered.append(1)
+    wait(50)
+    QTest.mouseClick(custom.cards[None], Qt.MouseButton.LeftButton)
+    assert offered
+    answers = [('Fearless', 'Mariage, mars', '#ff3b30'), ('Livre', '', '#0a84ff')]
     custom.ask_bucket = lambda *args: answers.pop(0)
     custom.add_bucket()
     custom.add_bucket()
     first, second = [bucket['id'] for bucket in session.buckets]
-    assert session.bucket(first)['subtitle'] == 'Mariage, mars' and set(custom.cards) == {None, first, second}
+    assert session.bucket(first)['subtitle'] == 'Mariage, mars' and set(custom.cards) == {first, second}
+    assert session.bucket(second)['color'] == '#0a84ff'
+    wait(50)
+    # The three dots open the menu, and do not put the photo in the bucket.
+    menus = []
+    card = custom.cards[first]
+    card.show_menu = lambda where: menus.append(where)
+    QTest.mouseClick(card, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, card.dots().center().toPoint())
+    assert menus and first not in custom.current_buckets()
     # The keys of the ribbon, in both directions, at the ends too.
     assert custom.position() == (0, 3)
     fired('V')
@@ -2104,7 +2132,7 @@ def test_custom_view(base):
     assert custom.position() == (2, 3)
     fired('Ctrl+Z')
     assert not session.buckets_of(second_photo) and custom.position() == (1, 3)
-    # "Ne rien faire" leaves the photo without a bucket and moves on; a click changes it in place.
+    # The key of the zero star leaves the photo without a bucket and moves on; a click changes it in place.
     custom.key_bucket(0)
     assert custom.position() == (2, 3) and not session.buckets_of(second_photo)
     held = custom.current()['path']

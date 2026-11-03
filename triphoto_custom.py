@@ -22,11 +22,12 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QFram
 from triphoto import PhotoSession, export_folder_name, write_json_atomic
 from triphoto_portfolio import PortfolioSession, move_to_trash, source_key
 from triphoto_prefs import age_label, ask, inform
-from triphoto_theme import ACCENT, CONTROL, FAINT, HOVER, MUTED, RAISED, TEXT, contrast_on
+from triphoto_theme import CONTROL, FAINT, MUTED, RAISED, TEXT, contrast_on
 
 PREVIEW_SIDE = 2000
 PREVIEWS_KEPT = 12
 ALL, UNSORTED = 'all', 'none'
+BUCKET_COLORS = ['#ff3b30', '#0a84ff', '#ffd60a', '#30d158', '#ff2d92', '#ff9500', '#00d4d8', '#bf5af2', '#a4e000', '#5e5ce6']
 
 
 class Sorting:
@@ -44,7 +45,17 @@ class Sorting:
 
     @classmethod
     def load(cls, path):
-        return cls(path, json.loads(Path(path).read_text(encoding='utf-8')))
+        session = cls(path, json.loads(Path(path).read_text(encoding='utf-8')))
+        # Buckets made before they had colors.
+        for bucket in session.buckets:
+            if not bucket.get('color'):
+                bucket['color'] = session.free_color()
+        return session
+
+    def free_color(self, ignored=None):
+        """The first color no other bucket has; with more buckets than colors, the least used."""
+        used = [bucket.get('color') for bucket in self.buckets if bucket['id'] != ignored]
+        return min(BUCKET_COLORS, key=used.count)
 
     def save(self):
         self.data['updated'] = time.time()
@@ -230,12 +241,13 @@ class SourceRow(QFrame):
         self.page, self.key, self.title, self.portfolio = page, key, title, portfolio
         self.photos = None
         self.missing = False
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         row = QHBoxLayout(self)
         row.setContentsMargins(12, 8, 12, 8)
         row.setSpacing(10)
         self.check = QCheckBox()
         self.check.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.check.setFixedWidth(22)
+        self.check.setFixedWidth(26)
         self.check.toggled.connect(lambda *_: self.changed.emit())
         row.addWidget(self.check)
         names = QVBoxLayout()
@@ -259,6 +271,11 @@ class SourceRow(QFrame):
         self.count.setFixedWidth(116)
         self.count.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         row.addWidget(self.count)
+
+    def mouseReleaseEvent(self, event):
+        # Anywhere on the row: the filters keep their own clicks.
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()) and not self.missing:
+            self.check.toggle()
 
     def apply(self, source):
         self.check.setChecked(True)
@@ -361,7 +378,7 @@ class SetupPage(QWidget):
         return row
 
     def open(self, session):
-        """Every gallery known on this computer. A new session starts from all of them."""
+        """Every gallery known on this computer. A new session starts with none of them chosen."""
         self.session = session
         for row in self.rows.values():
             self.list.removeWidget(row)
@@ -376,9 +393,7 @@ class SetupPage(QWidget):
         for entry in self.window.recents.entries():
             if not self.window.is_portfolio_path(entry['path']):
                 self.add_row(entry['path'], self.page.project_label(entry['path']), entry['path'])
-        if session is None:
-            self.select_all()
-        else:
+        if session is not None:
             for source in session.data['sources']:
                 row = self.rows.get(source['key']) or self.add_row(source['key'], self.page.project_label(source['key']), source['key'])
                 row.apply(source)
@@ -435,10 +450,31 @@ class SetupPage(QWidget):
         self.page.show_after_setup(session)
 
 
-class BucketDialog(QDialog):
-    """A title, which names the export folder, and a description if it helps."""
+class ColorChoice(QPushButton):
+    def __init__(self, color):
+        super().__init__(objectName='colorChoice', checkable=True, autoExclusive=True)
+        self.color = color
+        self.setFixedSize(34, 34)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
-    def __init__(self, parent, taken, title='', subtitle=''):
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        area = QRectF(self.rect())
+        if self.isChecked():
+            painter.setPen(QPen(QColor(TEXT), 2))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(area.adjusted(1, 1, -1, -1))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(self.color))
+        painter.drawEllipse(area.adjusted(6, 6, -6, -6))
+
+
+class BucketDialog(QDialog):
+    """A title, which names the export folder, a description if it helps, and its color."""
+
+    def __init__(self, parent, taken, title='', subtitle='', color=BUCKET_COLORS[0]):
         super().__init__(parent)
         self.taken = taken
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
@@ -461,6 +497,14 @@ class BucketDialog(QDialog):
         self.subtitle.setMaxLength(160)
         self.subtitle.setPlaceholderText('Description, facultative')
         layout.addWidget(self.subtitle)
+        colors = QHBoxLayout()
+        colors.setSpacing(2)
+        self.colors = [ColorChoice(value) for value in BUCKET_COLORS]
+        for choice in self.colors:
+            choice.setChecked(choice.color == color)
+            colors.addWidget(choice)
+        colors.addStretch(1)
+        layout.addLayout(colors)
         self.note = QLabel(objectName='faint')
         layout.addWidget(self.note)
         buttons = QHBoxLayout()
@@ -474,6 +518,9 @@ class BucketDialog(QDialog):
         layout.addLayout(buttons)
         self.refresh()
 
+    def color(self):
+        return next(choice.color for choice in self.colors if choice.isChecked())
+
     def refresh(self, *args):
         folder = export_folder_name(self.title.text())
         clash = folder.lower() in self.taken
@@ -482,7 +529,7 @@ class BucketDialog(QDialog):
 
 
 class BucketCard(QWidget):
-    """A large drop zone. Its key is None for the zone that does nothing."""
+    """A large drop zone, in the color of its bucket. Without a key, it offers to create the first one."""
 
     def __init__(self, page, key):
         super().__init__()
@@ -495,30 +542,47 @@ class BucketCard(QWidget):
     def bucket(self):
         return self.page.session.bucket(self.key) if self.key else None
 
+    def dots(self):
+        return QRectF(self.width()-40, 6, 34, 28)
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         area = QRectF(self.rect()).adjusted(1, 1, -1, -1)
-        holds = bool(self.key and self.key in self.page.current_buckets())
-        painter.setBrush(QColor(HOVER if self.hovered else RAISED if self.key else CONTROL))
-        painter.setPen(QPen(QColor(ACCENT if self.hovered or holds else '#3e3e40'), 2 if self.hovered or holds else 1, Qt.PenStyle.SolidLine if self.key else Qt.PenStyle.DashLine))
-        painter.drawRoundedRect(area, 10, 10)
         bucket = self.bucket()
-        title = bucket['title'] if bucket else 'Ne rien faire'
-        subtitle = bucket.get('subtitle', '') if bucket else 'Pas de bucket : passer à la suivante'
-        inner = area.adjusted(14, 12, -14, -10)
+        holds = bool(self.key and self.key in self.page.current_buckets())
+        tone = QColor(bucket['color']) if bucket else QColor(FAINT)
+        fill = QColor(tone)
+        fill.setAlpha(150 if self.hovered else 70 if holds else 26)
+        painter.setBrush(QColor(RAISED if bucket else CONTROL))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(area, 10, 10)
+        painter.setBrush(fill)
+        painter.setPen(QPen(tone, 3 if self.hovered or holds else 1.5, Qt.PenStyle.SolidLine if bucket else Qt.PenStyle.DashLine))
+        painter.drawRoundedRect(area, 10, 10)
+        if bucket:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(tone)
+            painter.drawRoundedRect(QRectF(area.left()+12, area.top()+14, 6, area.height()-28), 3, 3)
+            painter.setBrush(QColor(TEXT))
+            for offset in (-6, 0, 6):
+                painter.drawEllipse(self.dots().center()+QPointF(offset, 0), 1.7, 1.7)
+        title = bucket['title'] if bucket else 'Ajouter un bucket'
+        subtitle = bucket.get('subtitle', '') if bucket else 'Les buckets se placent ici : glissez-y les photos.'
+        inner = area.adjusted(28 if bucket else 14, 12, -14, -10)
+        heading = inner.adjusted(0, 0, -28, 0)
         font = painter.font()
         font.setPixelSize(15)
         font.setWeight(font.Weight.DemiBold)
         painter.setFont(font)
         painter.setPen(QColor(TEXT))
-        painter.drawText(inner, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, painter.fontMetrics().elidedText(title, Qt.TextElideMode.ElideRight, int(inner.width())))
+        painter.drawText(heading, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, painter.fontMetrics().elidedText(title, Qt.TextElideMode.ElideRight, int(heading.width())))
         font.setPixelSize(12)
         font.setWeight(font.Weight.Normal)
         painter.setFont(font)
-        painter.setPen(QColor(MUTED))
+        painter.setPen(QColor(TEXT if bucket else MUTED))
         painter.drawText(inner.adjusted(0, 24, 0, -22), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap, subtitle)
-        painter.setPen(QColor(FAINT))
+        painter.setPen(QColor(MUTED))
         if self.key:
             count = self.page.session.count(self.key)
             number = self.page.bucket_number(self.key)
@@ -527,15 +591,24 @@ class BucketCard(QWidget):
                 painter.drawText(inner, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom, f'Touche {number}')
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+        if event.button() != Qt.MouseButton.LeftButton or not self.rect().contains(event.position().toPoint()):
+            return
+        if not self.key:
+            self.page.add_bucket()
+        elif self.dots().contains(event.position()):
+            self.show_menu(self.mapToGlobal(self.dots().bottomLeft().toPoint()))
+        else:
             self.page.clicked_card(self.key)
 
-    def contextMenuEvent(self, event):
+    def show_menu(self, where):
         if self.key:
             menu = QMenu(self)
             menu.addAction('Modifier…', lambda: self.page.edit_bucket(self.key))
             menu.addAction('Supprimer…', lambda: self.page.delete_bucket(self.key))
-            menu.exec(event.globalPos())
+            menu.exec(where)
+
+    def contextMenuEvent(self, event):
+        self.show_menu(event.globalPos())
 
 
 class Stage(QWidget):
@@ -610,6 +683,12 @@ class Stage(QWidget):
             painter.drawText(self.room(), Qt.AlignmentFlag.AlignCenter, 'Fichier introuvable pour le moment' if problem is not None else 'Chargement…')
         painter.setPen(hint)
         painter.drawText(QRectF(70, 8, self.width()-140, 22), Qt.AlignmentFlag.AlignCenter, painter.fontMetrics().elidedText(f"{photo['gallery']} · {Path(photo['path']).name}", Qt.TextElideMode.ElideMiddle, self.width()-160))
+        painter.setPen(Qt.PenStyle.NoPen)
+        for index, key in enumerate(self.page.current_buckets()):
+            bucket = self.page.session.bucket(key)
+            if bucket:
+                painter.setBrush(QColor(bucket['color']))
+                painter.drawEllipse(QRectF(72+index*18, 11, 14, 14))
         position, total = self.page.position()
         for rect, shown, sign in zip(self.arrows(), (position > 0, position < total-1), (-1, 1)):
             if shown:
@@ -667,15 +746,22 @@ class SessionRow(QFrame):
         texts.addWidget(QLabel(meta, objectName='faint'))
         row.addLayout(texts, 1)
         row.addWidget(QLabel(age_label(session.data.get('updated', 0)), objectName='faint'))
+        self.more = QPushButton('•••', objectName='ghost')
+        self.more.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.more.clicked.connect(lambda *_: self.show_menu(self.more.mapToGlobal(self.more.rect().bottomLeft())))
+        row.addWidget(self.more)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
             self.page.open_session(self.session)
 
-    def contextMenuEvent(self, event):
+    def show_menu(self, where):
         menu = QMenu(self)
         menu.addAction('Supprimer la session…', lambda: self.page.delete_session(self.session))
-        menu.exec(event.globalPos())
+        menu.exec(where)
+
+    def contextMenuEvent(self, event):
+        self.show_menu(event.globalPos())
 
 
 class CustomPage(QStackedWidget):
@@ -1033,7 +1119,7 @@ class CustomPage(QStackedWidget):
 
     def card_at(self, point):
         for card in self.cards.values():
-            if card.isVisible() and card.rect().contains(card.mapFromGlobal(point)):
+            if card.key and card.isVisible() and card.rect().contains(card.mapFromGlobal(point)):
                 return card
         return None
 
@@ -1061,18 +1147,16 @@ class CustomPage(QStackedWidget):
             widget = self.card_row.takeAt(0).widget()
             widget.setParent(None)
             widget.deleteLater()
-        self.cards = {None: BucketCard(self, None)}
-        self.card_row.addWidget(self.cards[None])
-        for bucket in self.session.buckets:
-            self.cards[bucket['id']] = BucketCard(self, bucket['id'])
-            self.card_row.addWidget(self.cards[bucket['id']])
+        self.cards = {bucket['id']: BucketCard(self, bucket['id']) for bucket in self.session.buckets} or {None: BucketCard(self, None)}
+        for card in self.cards.values():
+            self.card_row.addWidget(card)
 
     def taken(self, ignored=None):
         return {export_folder_name(bucket['title']).lower() for bucket in self.session.buckets if bucket['id'] != ignored}
 
-    def ask_bucket(self, ignored=None, title='', subtitle=''):
-        dialog = BucketDialog(self.window, self.taken(ignored), title, subtitle)
-        return (dialog.title.text().strip(), dialog.subtitle.text().strip()) if dialog.exec() else None
+    def ask_bucket(self, ignored=None, title='', subtitle='', color=None):
+        dialog = BucketDialog(self.window, self.taken(ignored), title, subtitle, color or self.session.free_color())
+        return (dialog.title.text().strip(), dialog.subtitle.text().strip(), dialog.color()) if dialog.exec() else None
 
     def buckets_changed(self):
         self.rebuild_cards()
@@ -1083,14 +1167,14 @@ class CustomPage(QStackedWidget):
     def add_bucket(self):
         answer = self.ask_bucket()
         if answer:
-            self.session.buckets.append({'id': uuid.uuid4().hex, 'title': answer[0], 'subtitle': answer[1]})
+            self.session.buckets.append({'id': uuid.uuid4().hex, 'title': answer[0], 'subtitle': answer[1], 'color': answer[2]})
             self.buckets_changed()
 
     def edit_bucket(self, key):
         bucket = self.session.bucket(key)
-        answer = self.ask_bucket(key, bucket['title'], bucket.get('subtitle', ''))
+        answer = self.ask_bucket(key, bucket['title'], bucket.get('subtitle', ''), bucket.get('color'))
         if answer:
-            bucket['title'], bucket['subtitle'] = answer
+            bucket['title'], bucket['subtitle'], bucket['color'] = answer
             self.buckets_changed()
 
     def delete_bucket(self, key):
