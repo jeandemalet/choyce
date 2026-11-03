@@ -49,7 +49,7 @@ ACTIONS = [
     ('mode_color', 'Vue Couleur', ['Ctrl+3']),
     ('mode_swipe', 'Vue Tindr', ['Ctrl+4']),
     ('mode_instagram', 'Vue Instagram', ['Ctrl+5']),
-    ('mode_custom', 'Vue Custom', ['Ctrl+6']),
+    ('custom_home', 'Accueil et sélections custom', ['Ctrl+6']),
     ('refresh', 'Actualiser le dossier', ['F5']),
     ('open', 'Ouvrir un projet', ['Ctrl+O']),
     ('close', 'Fermer le projet', ['Ctrl+W']),

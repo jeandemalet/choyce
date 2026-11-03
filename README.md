@@ -26,7 +26,7 @@ Dès qu'un travail dure, une petite barre en bas à gauche de la fenêtre indiqu
 
 ## Les vues
 
-Le bandeau du haut porte, au centre, les vues : **Classique**, Grille, Pêle-mêle, Couleur, Tindr, Instagram et **Custom**. La touche `G` bascule entre Classique et la dernière autre vue, et `Ctrl+0` à `Ctrl+6` ouvrent chacune d'elles.
+Le bandeau du haut porte, au centre, les six vues : **Classique**, Grille, Pêle-mêle, Couleur, Tindr et Instagram. La touche `G` bascule entre Classique et la dernière autre vue, et `Ctrl+0` à `Ctrl+5` ouvrent chacune d'elles.
 
 **Filtre**, à côté des vues, rappelle le filtre actif et déplie au survol un panneau, qui se replie quand la souris le quitte. Il donne le filtre par note (par exemple « 5 ★ », ou « 3 ★ » et « et + », chaque note indiquant en tout petit son nombre de photos) le filtre par marqueur, et les filtres Portfolio et À publier, qui s'ajoutent aux autres. Hors de la vue Classique, il donne aussi le noir et blanc pour juger les contrastes, la couleur du fond et le zoom : `−` et `+`, et un clic sur le pourcentage revient à la valeur par défaut, comme la touche `0`.
 
@@ -54,17 +54,21 @@ La barre du bas porte les réglages propres à la vue et, dès qu'une photo est 
 
 Une photo sortie de la grille reçoit l'action choisie. « Réafficher » remet les photos sorties à l'écran sans toucher à leurs notes, et `Ctrl+Z` annule la dernière sortie, note comprise.
 
-## Custom
+## Sélection custom
 
-Custom rassemble des photos de plusieurs galeries pour les ranger dans des buckets, par exemple un par concours. Il ne demande aucun projet ouvert, et on peut créer autant de sessions qu'on veut, chacune avec ses photos et ses buckets. Tout s'enregistre au fur et à mesure.
+Une sélection custom rassemble des photos de plusieurs galeries pour les ranger dans des buckets, par exemple un par concours. Les sélections se trouvent sur l'accueil, sous les projets récents, chacune avec son nom et une de ses photos. On y revient depuis un projet par le menu Projet ou `Ctrl+6`, qui ferment ce projet. On peut en créer autant qu'on veut, et tout s'enregistre au fur et à mesure.
 
-Une nouvelle session demande d'abord son nom et ses galeries : aucune n'est cochée au départ, un clic n'importe où sur une ligne la coche, et des boutons prennent toutes les galeries ou seulement le portfolio. Chacune a ses filtres de note, de marqueur et « à publier ». Une photo présente dans deux galeries ne compte qu'une fois, et une photo rejetée n'entre que si le filtre demande les rejetées. « Modifier la sélection » revient sur ce choix sans perdre les photos déjà rangées.
+Une nouvelle sélection demande d'abord son nom et ses galeries : aucune n'est cochée au départ, un clic n'importe où sur une ligne la coche, et des boutons prennent toutes les galeries ou seulement le portfolio. Chacune a ses filtres de note, de marqueur et « à publier ». Une photo présente dans deux galeries ne compte qu'une fois, et une photo rejetée n'entre que si le filtre demande les rejetées. « Modifier la sélection » revient sur ce choix sans perdre les photos déjà rangées.
 
-La photo occupe le centre et les buckets le bas de l'écran. On passe d'une photo à l'autre avec les flèches de l'écran ou du clavier, ou avec `C` et `V`. On glisse la photo sur un bucket pour l'y ranger et passer à la suivante ; pour ne rien en faire, il suffit de passer à la suivante. Une photo peut aller dans plusieurs buckets. Les touches `1` à `5` rangent aussi dans les cinq premiers, `Maj+C` retire la photo de ses buckets et `Ctrl+Z` annule. Un clic sur un bucket y met la photo ou l'en retire sans changer de photo. Chaque bucket a un titre, s'il le faut une description, et une couleur vive : une couleur libre lui est donnée par défaut et se change parmi dix. Les trois points en haut à droite d'un bucket, ou un clic droit, le modifient ou le suppriment. Les pastilles au-dessus de la photo montrent les buckets où elle se trouve déjà. La liste du haut montre toutes les photos, celles sans bucket ou celles d'un bucket.
+La photo occupe le centre et les buckets le bas de l'écran. On passe d'une photo à l'autre avec les flèches de l'écran, qui apparaissent sous la souris, avec celles du clavier, ou avec `C` et `V`. La molette, `+` et `-` zooment, et le zoom reste d'une photo à l'autre ; `0` ou un clic sur le pourcentage revient à l'ajustement. Le fond se change dans la bande du haut, d'un clic droit ou avec `B`, et cette bande donne aussi le nom de la photo.
 
-Rien ne bouge sur le disque avant **Exporter la sélection…** : on choisit un dossier, qui reçoit un dossier au nom de la session, avec un sous-dossier par bucket portant son titre. Ce sont des copies exactes des originaux. Un export précédent n'est jamais remplacé : le nouveau prend un nom daté.
+On glisse la photo sur un bucket pour l'y ranger et passer à la suivante. Zoomé, glisser déplace la photo, et l'amener jusqu'au bas de la vue la prend pour la ranger. Pour ne rien en faire, il suffit de passer à la suivante. Une photo peut aller dans plusieurs buckets. Les touches `1` à `5` rangent aussi dans les cinq premiers, `Maj+C` retire la photo de ses buckets et `Ctrl+Z` annule. Un clic sur un bucket y met la photo ou l'en retire sans changer de photo.
 
-Les sessions sont des fichiers du dossier de données du programme, `%LOCALAPPDATA%\Vision Board` sous Windows.
+Chaque bucket a un titre, s'il le faut une description, et une couleur pastel en contour : une couleur libre lui est donnée par défaut et se change parmi dix. Les trois points en haut à droite, ou un clic droit, permettent de voir ses photos, de le modifier ou de le supprimer. « Voir les photos » les montre toutes en grand, et une croix sur chacune la retire du bucket ; rien ne bouge sur le disque.
+
+Rien ne bouge non plus avant **Exporter la sélection…** : on choisit un dossier, qui reçoit un dossier au nom de la sélection, avec un sous-dossier par bucket portant son titre. Ce sont des copies exactes des originaux. Un export précédent n'est jamais remplacé : le nouveau prend un nom daté.
+
+Les sélections sont des fichiers du dossier de données du programme, `%LOCALAPPDATA%\Vision Board` sous Windows.
 
 ## Vides et retraits
 
@@ -113,7 +117,8 @@ Tous les raccourcis se changent dans **Préférences** (`Ctrl+,`). Les touches e
 | `Ctrl+A`, `Ctrl+D` | Sélectionner toutes les photos du filtre, désélectionner |
 | `Ctrl+Z` | Annuler la dernière note |
 | `G`, Échap | Basculer de vue, revenir à Classique |
-| `Ctrl+0` à `Ctrl+6` | Vues |
+| `Ctrl+0` à `Ctrl+5` | Vues |
+| `Ctrl+6` | Accueil et sélections custom |
 | `B` | Couleur de fond suivante |
 | `0`, `+`, `-` | Ajuster, zoomer, dézoomer |
 | `F5`, `Ctrl+O`, `Ctrl+W` | Actualiser, ouvrir, fermer le projet |

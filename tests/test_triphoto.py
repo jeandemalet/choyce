@@ -993,7 +993,7 @@ def test_views_and_filter_panel(base):
     window = open_window(root)
     review = window.review
     # One row of views: Classique is the page with the ribbon, the others follow.
-    assert list(window.view_buttons) == ['classic', 'wall', 'toile', 'color', 'swipe', 'instagram', 'custom']
+    assert list(window.view_buttons) == ['classic', 'wall', 'toile', 'color', 'swipe', 'instagram']
     assert [window.view_buttons[key].text() for key in ('toile', 'swipe', 'instagram')] == ['Pêle-mêle', 'Tindr', 'Instagram']
     assert window.view_buttons['classic'].isChecked() and window.pages.currentIndex() == 1
     window.view_buttons['toile'].click()
@@ -2012,18 +2012,11 @@ def test_custom_view(base):
     window.show()
     custom = window.custom
     fired = lambda key: next(s for s in window.shortcuts if s.key().toString() == key).activated.emit()
-    # From a project, and without any project: the button stays on the welcome screen.
-    fired('Ctrl+6')
-    assert window.custom_active and window.pages.currentIndex() == 3 and window.view_buttons['custom'].isChecked()
-    assert custom.currentWidget() is custom.home and not window.export_button.isVisible()
-    window.view_buttons['classic'].click()
-    assert not window.custom_active and window.pages.currentIndex() == 1
+    # On the welcome screen, under the recent projects, whatever the project was.
     window.close_project()
-    assert window.pages.currentIndex() == 0 and window.view_buttons['custom'].isVisible() and not window.view_buttons['wall'].isVisible()
-    window.view_buttons['custom'].click()
-    assert window.custom_active and window.pages.currentIndex() == 3
-    # The first screen: all the galleries, those it knows, then a choice among them.
-    custom.new_session()
+    assert window.pages.currentIndex() == 0 and not window.home.custom_cards
+    window.home.custom_button.click()
+    assert window.custom_active and window.pages.currentIndex() == 3 and not window.export_button.isVisible()
     setup = custom.setup
     settle(window, lambda: not setup.scanning(), 10000)
     assert not setup.go.isEnabled(), 'it needs a name'
@@ -2059,13 +2052,6 @@ def test_custom_view(base):
     assert session.path.exists() and len(session.photos) == 3
     settle(window, lambda: custom.current_image() is not None, 10000)
     wait(50)
-    # Nothing in the session of the open project may change while Custom is shown.
-    window.set_folder(wedding)
-    fired('Ctrl+6')
-    assert custom.current() is not None and window.target_photos() == []
-    stars_before = [p.stars for p in window.session.photos]
-    fired('1')
-    assert [p.stars for p in window.session.photos] == stars_before
     # Buckets: a title, a description, and the same name only once.
     dialog = triphoto_custom.BucketDialog(window, {'fearless'})
     dialog.title.setText('Fearless')
@@ -2109,6 +2095,22 @@ def test_custom_view(base):
     settle(window, lambda: custom.current_image() is not None, 10000)
     wait(250)
     window.grab()
+    # The zoom stays from one photo to the next, and the name of the photo is in the bar.
+    stage = custom.stage
+    assert custom.photo_name.text()
+    width = stage.photo_rect().width()
+    fired('+')
+    assert stage.zoom > 1 and stage.photo_rect().width() > width and custom.zoom_button.text() != '100 %'
+    zoom = stage.zoom
+    fired('V')
+    assert stage.zoom == zoom
+    fired('C')
+    settle(window, lambda: custom.current_image() is not None, 10000)
+    fired('0')
+    assert stage.zoom == 1 and custom.zoom_button.text() == '100 %'
+    # The background is that of the other views.
+    window.set_background('#ffffff')
+    assert custom.picker.swatches[0].isChecked()
     # A real drag from the photo to a bucket: it goes there, and the next photo comes.
     stage = custom.stage
     dragged = custom.current()['path']
@@ -2143,6 +2145,14 @@ def test_custom_view(base):
     assert session.buckets_of(held) == [first]
     QTest.mouseClick(custom.cards[second], Qt.MouseButton.LeftButton)
     assert second in session.buckets_of(held)
+    # Every photo of a bucket, large, to take out those that are there by mistake.
+    sheet = triphoto_custom.BucketSheet(custom, second)
+    assert len(sheet.tiles) == 1 and sheet.tiles[0].photo['path'] == held
+    sheet.remove(held)
+    assert second not in session.buckets_of(held) and not sheet.tiles
+    sheet.restore()
+    assert second in session.buckets_of(held) and len(sheet.tiles) == 1
+    sheet.done(0)
     # Back to the photo for the views: sorted photos leave "Sans bucket" as they are sorted.
     custom.view_combo.setCurrentIndex(custom.view_combo.findData(triphoto_custom.UNSORTED))
     assert custom.position()[1] == 1
@@ -2156,18 +2166,20 @@ def test_custom_view(base):
     custom.save()
     assert triphoto_custom.Sorting.load(session.path).count(first) == 3
     fired('Esc')
-    assert custom.currentWidget() is custom.home and custom.session is None
-    assert custom.session_rows.count() == 2
-    custom.new_session()
+    assert not window.custom_active and window.pages.currentIndex() == 0 and custom.session is None
+    assert len(window.home.custom_cards) == 1
+    card = next(iter(window.home.custom_cards.values()))
+    assert card.name.text() == 'Concours 2027'
+    window.open_custom()
     settle(window, lambda: not setup.scanning(), 10000)
     setup.name.setText('Autre')
     setup.select_portfolio()
     setup.go.click()
     assert len(custom.session.photos) == 1 and custom.session.path != session.path
     fired('Esc')
-    assert custom.session_rows.count() == 3
+    assert len(window.home.custom_cards) == 2
     reopened = next(found for found in custom.store.sessions() if found.name == 'Concours 2027')
-    custom.open_session(reopened)
+    window.open_custom(reopened)
     assert reopened.count(first) == 3 and custom.work_title.text() == 'CONCOURS 2027'
     # Modifying the selection brings back the former choice, and keeps the sorted photos.
     custom.edit_selection()
@@ -2211,10 +2223,10 @@ def test_custom_view(base):
         real_trash = triphoto_custom.move_to_trash
         triphoto_custom.move_to_trash = lambda path: moved.append(path) or Path(path).unlink()
         doomed = custom.session
-        custom.show_home()
+        window.leave_custom()
         custom.delete_session(doomed)
         triphoto_custom.move_to_trash = real_trash
-        assert moved == [doomed.path] and custom.session_rows.count() == 2
+        assert moved == [doomed.path] and len(window.home.custom_cards) == 1
     finally:
         triphoto_custom.ask = real_ask
     window.close()

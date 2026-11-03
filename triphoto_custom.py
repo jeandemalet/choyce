@@ -17,17 +17,25 @@ from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, QObject, QPointF, QRectF, QRunnable, QSize, QStandardPaths, QThreadPool, QTimer, QVariantAnimation, Qt, Signal, Slot
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton, QScrollArea,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea,
     QSizePolicy, QStackedWidget, QVBoxLayout, QWidget)
 from triphoto import PhotoSession, export_folder_name, write_json_atomic
 from triphoto_portfolio import PortfolioSession, move_to_trash, source_key
-from triphoto_prefs import age_label, ask, inform
+from triphoto_prefs import ask, inform
+from triphoto_review import BackgroundPicker
 from triphoto_theme import CONTROL, FAINT, MUTED, RAISED, TEXT, contrast_on
 
 PREVIEW_SIDE = 2000
+DETAIL_SIDE = 6000
 PREVIEWS_KEPT = 12
 ALL, UNSORTED = 'all', 'none'
 BUCKET_COLORS = ['#ff3b30', '#0a84ff', '#ffd60a', '#30d158', '#ff2d92', '#ff9500', '#00d4d8', '#bf5af2', '#a4e000', '#5e5ce6']
+
+
+def pastel(color):
+    """A light tone of a bucket color, which stays discreet beside the photos."""
+    tone = QColor(color)
+    return QColor((tone.red()+2*255)//3, (tone.green()+2*255)//3, (tone.blue()+2*255)//3)
 
 
 class Sorting:
@@ -82,6 +90,10 @@ class Sorting:
 
     def count(self, key):
         return sum(key in keys for keys in self.data['assigned'].values())
+
+    def cover(self):
+        """The photo of its card: the first one sorted, or the first one."""
+        return next((photo['path'] for photo in self.photos if self.buckets_of(photo['path'])), self.photos[0]['path'] if self.photos else None)
 
     def order(self, view=None):
         view = view or self.data.get('view', ALL)
@@ -327,7 +339,7 @@ class SetupPage(QWidget):
         layout.addWidget(self.title)
         self.name = QLineEdit()
         self.name.setMaxLength(80)
-        self.name.setPlaceholderText('Nom de la session, par exemple Concours 2027')
+        self.name.setPlaceholderText('Nom de la sélection, par exemple Concours 2027')
         self.name.textChanged.connect(lambda *_: self.refresh())
         layout.addWidget(self.name)
         quick = QHBoxLayout()
@@ -384,8 +396,8 @@ class SetupPage(QWidget):
             self.list.removeWidget(row)
             row.deleteLater()
         self.rows = {}
-        self.title.setText('Nouvelle session Custom' if session is None else 'Modifier la sélection')
-        self.go.setText('Créer la session' if session is None else 'Enregistrer')
+        self.title.setText('Nouvelle sélection custom' if session is None else 'Modifier la sélection')
+        self.go.setText('Créer la sélection' if session is None else 'Enregistrer')
         self.name.setText('' if session is None else session.name)
         portfolio = self.window.portfolio
         if portfolio.available():
@@ -467,7 +479,7 @@ class ColorChoice(QPushButton):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(area.adjusted(1, 1, -1, -1))
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(self.color))
+        painter.setBrush(pastel(self.color))
         painter.drawEllipse(area.adjusted(6, 6, -6, -6))
 
 
@@ -551,25 +563,26 @@ class BucketCard(QWidget):
         area = QRectF(self.rect()).adjusted(1, 1, -1, -1)
         bucket = self.bucket()
         holds = bool(self.key and self.key in self.page.current_buckets())
-        tone = QColor(bucket['color']) if bucket else QColor(FAINT)
-        fill = QColor(tone)
-        fill.setAlpha(150 if self.hovered else 70 if holds else 26)
+        tone = pastel(bucket['color']) if bucket else QColor(FAINT)
         painter.setBrush(QColor(RAISED if bucket else CONTROL))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawRoundedRect(area, 10, 10)
+        # Only the outline at rest. The photo being in the bucket, or over it, adds a veil of the same tone.
+        fill = QColor(tone)
+        fill.setAlpha(46 if self.hovered else 20 if holds else 0)
+        outline = QColor(tone)
+        outline.setAlpha(255 if self.hovered or holds else 120)
         painter.setBrush(fill)
-        painter.setPen(QPen(tone, 3 if self.hovered or holds else 1.5, Qt.PenStyle.SolidLine if bucket else Qt.PenStyle.DashLine))
+        painter.setPen(QPen(outline, 2 if self.hovered or holds else 1.2, Qt.PenStyle.SolidLine if bucket else Qt.PenStyle.DashLine))
         painter.drawRoundedRect(area, 10, 10)
         if bucket:
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(tone)
-            painter.drawRoundedRect(QRectF(area.left()+12, area.top()+14, 6, area.height()-28), 3, 3)
-            painter.setBrush(QColor(TEXT))
+            painter.setBrush(QColor(MUTED))
             for offset in (-6, 0, 6):
                 painter.drawEllipse(self.dots().center()+QPointF(offset, 0), 1.7, 1.7)
         title = bucket['title'] if bucket else 'Ajouter un bucket'
         subtitle = bucket.get('subtitle', '') if bucket else 'Les buckets se placent ici : glissez-y les photos.'
-        inner = area.adjusted(28 if bucket else 14, 12, -14, -10)
+        inner = area.adjusted(14, 12, -14, -10)
         heading = inner.adjusted(0, 0, -28, 0)
         font = painter.font()
         font.setPixelSize(15)
@@ -580,9 +593,9 @@ class BucketCard(QWidget):
         font.setPixelSize(12)
         font.setWeight(font.Weight.Normal)
         painter.setFont(font)
-        painter.setPen(QColor(TEXT if bucket else MUTED))
-        painter.drawText(inner.adjusted(0, 24, 0, -22), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap, subtitle)
         painter.setPen(QColor(MUTED))
+        painter.drawText(inner.adjusted(0, 24, 0, -22), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap, subtitle)
+        painter.setPen(QColor(FAINT))
         if self.key:
             count = self.page.session.count(self.key)
             number = self.page.bucket_number(self.key)
@@ -596,16 +609,15 @@ class BucketCard(QWidget):
         if not self.key:
             self.page.add_bucket()
         elif self.dots().contains(event.position()):
-            self.show_menu(self.mapToGlobal(self.dots().bottomLeft().toPoint()))
+            self.show_menu(self.mapToGlobal(self.dots().topLeft().toPoint()))
         else:
             self.page.clicked_card(self.key)
 
     def show_menu(self, where):
         if self.key:
-            menu = QMenu(self)
-            menu.addAction('Modifier…', lambda: self.page.edit_bucket(self.key))
-            menu.addAction('Supprimer…', lambda: self.page.delete_bucket(self.key))
-            menu.exec(where)
+            key, page = self.key, self.page
+            PopupMenu(page.window, [('Voir les photos…', lambda: page.show_bucket(key)), ('Modifier…', lambda: page.edit_bucket(key)),
+                                    ('Supprimer…', lambda: page.delete_bucket(key))]).open_at(where)
 
     def contextMenuEvent(self, event):
         self.show_menu(event.globalPos())
@@ -622,6 +634,10 @@ class Stage(QWidget):
         self.leaving = None
         self.direction = 0
         self.progress = 1.
+        # They stay from one photo to the next, as in the other views.
+        self.zoom = 1.
+        self.pan = QPointF()
+        self.hover = False
         self.setMouseTracking(True)
         self.slide = QVariantAnimation(self)
         self.slide.setDuration(170)
@@ -640,16 +656,44 @@ class Stage(QWidget):
         self.slide.stop()
         self.slide.start()
 
+    def zoom_by(self, factor):
+        """What is in the middle of the view stays there, wherever the mouse is."""
+        previous = self.zoom
+        self.zoom = max(.1, min(8., previous*factor))
+        self.pan *= self.zoom/previous
+        self.page.zoom_changed()
+        self.update()
+
+    def zoom_reset(self):
+        self.zoom, self.pan = 1., QPointF()
+        self.page.zoom_changed()
+        self.update()
+
+    def wheelEvent(self, event):
+        self.zoom_by(1.12 if event.angleDelta().y() > 0 else 1/1.12)
+        event.accept()
+
+    def enterEvent(self, event):
+        self.hover = True
+        self.update()
+
+    def leaveEvent(self, event):
+        self.hover = False
+        self.update()
+
+    def contextMenuEvent(self, event):
+        self.page.window.viewer.background_menu(self).exec(event.globalPos())
+
     def arrows(self):
-        return QRectF(14, self.height()/2-30, 44, 60), QRectF(self.width()-58, self.height()/2-30, 44, 60)
+        return QRectF(14, self.height()/2-22, 44, 44), QRectF(self.width()-58, self.height()/2-22, 44, 44)
 
     def room(self):
-        return QRectF(self.rect()).adjusted(70, 34, -70, -8)
+        return QRectF(self.rect()).adjusted(12, 12, -12, -12)
 
     def fitted(self, image, room):
-        scale = min(room.width()/image.width(), room.height()/image.height())
+        scale = min(room.width()/image.width(), room.height()/image.height())*self.zoom
         width, height = image.width()*scale, image.height()*scale
-        return QRectF(room.center().x()-width/2, room.center().y()-height/2, width, height)
+        return QRectF(room.center().x()-width/2+self.pan.x(), room.center().y()-height/2+self.pan.y(), width, height)
 
     def photo_rect(self):
         image = self.page.current_image()
@@ -681,21 +725,20 @@ class Stage(QWidget):
             painter.setPen(hint)
             problem = self.page.failed.get(photo['path'])
             painter.drawText(self.room(), Qt.AlignmentFlag.AlignCenter, 'Fichier introuvable pour le moment' if problem is not None else 'Chargement…')
-        painter.setPen(hint)
-        painter.drawText(QRectF(70, 8, self.width()-140, 22), Qt.AlignmentFlag.AlignCenter, painter.fontMetrics().elidedText(f"{photo['gallery']} · {Path(photo['path']).name}", Qt.TextElideMode.ElideMiddle, self.width()-160))
-        painter.setPen(Qt.PenStyle.NoPen)
-        for index, key in enumerate(self.page.current_buckets()):
-            bucket = self.page.session.bucket(key)
-            if bucket:
-                painter.setBrush(QColor(bucket['color']))
-                painter.drawEllipse(QRectF(72+index*18, 11, 14, 14))
+        if not self.hover or self.dragging:
+            return
         position, total = self.page.position()
         for rect, shown, sign in zip(self.arrows(), (position > 0, position < total-1), (-1, 1)):
             if shown:
-                path = QPainterPath(QPointF(rect.center().x()-sign*7, rect.center().y()-15))
-                path.lineTo(rect.center().x()+sign*7, rect.center().y())
-                path.lineTo(rect.center().x()-sign*7, rect.center().y()+15)
-                painter.setPen(QPen(hint, 2.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                # Discreet, and only under the mouse: the same dark plate as the other controls on a photo.
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(15, 15, 16, 150))
+                painter.drawEllipse(rect)
+                path = QPainterPath(QPointF(rect.center().x()-sign*4, rect.center().y()-8))
+                path.lineTo(rect.center().x()+sign*4, rect.center().y())
+                path.lineTo(rect.center().x()-sign*4, rect.center().y()+8)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(QColor(TEXT), 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
                 painter.drawPath(path)
 
     def mousePressEvent(self, event):
@@ -714,6 +757,12 @@ class Stage(QWidget):
             over_photo = self.page.current_image() is not None and self.photo_rect().contains(event.position())
             self.setCursor(Qt.CursorShape.OpenHandCursor if over_photo else Qt.CursorShape.ArrowCursor)
             return
+        if self.zoom > 1 and not self.dragging and event.position().y() < self.height():
+            # Zoomed in, the hand moves the photo; it takes it to a bucket on leaving the stage downward.
+            self.pan += event.position()-self.press
+            self.press = event.position()
+            self.update()
+            return
         if not self.dragging and (event.position()-self.press).manhattanLength() > 10:
             self.dragging = True
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
@@ -730,38 +779,213 @@ class Stage(QWidget):
             self.update()
 
 
-class SessionRow(QFrame):
-    def __init__(self, page, session):
-        super().__init__(objectName='customRow')
-        self.page, self.session = page, session
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        row = QHBoxLayout(self)
-        row.setContentsMargins(16, 12, 16, 12)
-        texts = QVBoxLayout()
-        texts.setSpacing(2)
-        texts.addWidget(QLabel(session.name))
-        photos, buckets = len(session.photos), len(session.buckets)
-        sorted_count = len(session.data['assigned'])
-        meta = f"{photos} photo{'s' if photos > 1 else ''} · {buckets} bucket{'s' if buckets > 1 else ''} · {sorted_count} rangée{'s' if sorted_count > 1 else ''}"
-        texts.addWidget(QLabel(meta, objectName='faint'))
-        row.addLayout(texts, 1)
-        row.addWidget(QLabel(age_label(session.data.get('updated', 0)), objectName='faint'))
-        self.more = QPushButton('•••', objectName='ghost')
-        self.more.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.more.clicked.connect(lambda *_: self.show_menu(self.more.mapToGlobal(self.more.rect().bottomLeft())))
-        row.addWidget(self.more)
+class PopupMenu(QFrame):
+    """A short list of actions in the design of the program, rather than the system's menu."""
+
+    def __init__(self, parent, actions):
+        super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        frame = QFrame(objectName='dialog')
+        outer.addWidget(frame)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(1)
+        for text, action in actions:
+            button = QPushButton(text, objectName='ghost')
+            button.setStyleSheet('text-align: left; padding: 8px 18px 8px 10px;')
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.clicked.connect(lambda checked=False, run=action: self.choose(run))
+            layout.addWidget(button)
+
+    def choose(self, action):
+        self.close()
+        # Once this list is gone: the action may open a dialog.
+        QTimer.singleShot(0, action)
+
+    def open_at(self, anchor):
+        """Above the point when there is room, as the buckets sit at the bottom of the window."""
+        self.adjustSize()
+        y = anchor.y()-self.height()-4
+        self.move(anchor.x(), y if y >= 0 else anchor.y()+4)
+        self.show()
+
+
+class Tile(QWidget):
+    """A photo of a bucket, with what takes it out. Asks for its image once it is on screen."""
+    SIZE = QSize(226, 196)
+
+    def __init__(self, sheet, photo):
+        super().__init__()
+        self.sheet, self.photo = sheet, photo
+        self.setFixedSize(self.SIZE)
+        self.setMouseTracking(True)
+
+    def photo_area(self):
+        """Where the photo itself lies, so that its cross stays on it whatever its format."""
+        area = QRectF(0, 0, self.width(), self.height()-24)
+        image = self.sheet.images.get(self.photo['path'])
+        if image is None:
+            return area
+        scale = min(area.width()/image.width(), area.height()/image.height())
+        width, height = image.width()*scale, image.height()*scale
+        return QRectF((area.width()-width)/2, (area.height()-height)/2, width, height)
+
+    def remove_rect(self):
+        area = self.photo_area()
+        return QRectF(area.right()-34, area.top()+6, 28, 28)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        area = QRectF(0, 0, self.width(), self.height()-24)
+        clip = QPainterPath()
+        clip.addRoundedRect(area, 7, 7)
+        painter.fillPath(clip, QColor(RAISED))
+        image = self.sheet.image(self.photo['path'])
+        if image is not None:
+            painter.setClipPath(clip)
+            painter.drawImage(self.photo_area(), image)
+            painter.setClipping(False)
+        painter.setPen(QColor(MUTED))
+        painter.drawText(QRectF(2, area.bottom()+4, self.width()-4, 18), Qt.AlignmentFlag.AlignLeft, painter.fontMetrics().elidedText(Path(self.photo['path']).name, Qt.TextElideMode.ElideMiddle, self.width()-4))
+        button = self.remove_rect()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(15, 15, 16, 205))
+        painter.drawEllipse(button)
+        painter.setPen(QPen(QColor(TEXT), 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        center = button.center()
+        for x, y in ((-4.5, -4.5), (-4.5, 4.5)):
+            painter.drawLine(center+QPointF(x, y), center-QPointF(x, y))
+
+    def mouseMoveEvent(self, event):
+        self.setCursor(Qt.CursorShape.PointingHandCursor if self.remove_rect().contains(event.position()) else Qt.CursorShape.ArrowCursor)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
-            self.page.open_session(self.session)
+        if event.button() == Qt.MouseButton.LeftButton and self.remove_rect().contains(event.position()):
+            self.sheet.remove(self.photo['path'])
 
-    def show_menu(self, where):
-        menu = QMenu(self)
-        menu.addAction('Supprimer la session…', lambda: self.page.delete_session(self.session))
-        menu.exec(where)
 
-    def contextMenuEvent(self, event):
-        self.show_menu(event.globalPos())
+class BucketSheet(QDialog):
+    """All the photos of a bucket, large, to take out those that went there by mistake. Nothing moves on disk."""
+
+    def __init__(self, page, key):
+        super().__init__(page.window)
+        self.page, self.key = page, key
+        self.session = page.session
+        self.images = {}
+        self.asked = set()
+        self.removed = []
+        self.tiles = []
+        self.columns = 0
+        self.pool = QThreadPool(self)
+        self.pool.setMaxThreadCount(3)
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        window = page.window
+        self.resize(int(window.width()*.9), int(window.height()*.9))
+        self.move(window.mapToGlobal(window.rect().center())-self.rect().center())
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        frame = QFrame(objectName='dialog')
+        outer.addWidget(frame)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(24, 20, 24, 16)
+        layout.setSpacing(10)
+        bucket = self.session.bucket(key)
+        top = QHBoxLayout()
+        top.addWidget(QLabel(bucket['title'], objectName='dialogTitle'))
+        self.count = QLabel(objectName='muted')
+        top.addSpacing(8)
+        top.addWidget(self.count)
+        top.addStretch(1)
+        self.undo_button = QPushButton('Rétablir la dernière', objectName='ghost')
+        self.undo_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.undo_button.clicked.connect(lambda *_: self.restore())
+        top.addWidget(self.undo_button)
+        close = QPushButton('Fermer', objectName='primary')
+        close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        close.clicked.connect(self.accept)
+        top.addWidget(close)
+        layout.addLayout(top)
+        if bucket.get('subtitle'):
+            layout.addWidget(QLabel(bucket['subtitle'], objectName='muted'))
+        self.area = QScrollArea()
+        self.area.setWidgetResizable(True)
+        self.area.setFrameShape(QFrame.Shape.NoFrame)
+        holder = QWidget(objectName='dialogBody')
+        holder.setStyleSheet('background: transparent;')
+        self.grid = QGridLayout(holder)
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setSpacing(12)
+        self.grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self.area.setWidget(holder)
+        layout.addWidget(self.area, 1)
+        self.rebuild()
+
+    def rebuild(self):
+        while self.grid.count():
+            widget = self.grid.takeAt(0).widget()
+            widget.setParent(None)
+            widget.deleteLater()
+        self.tiles = [Tile(self, photo) for photo in self.session.order(self.key)]
+        self.columns = 0
+        self.arrange()
+        count = len(self.tiles)
+        self.count.setText(f"{count} photo{'s' if count > 1 else ''}")
+        self.undo_button.setVisible(bool(self.removed))
+
+    def arrange(self):
+        columns = max(1, (self.area.viewport().width()+12)//(Tile.SIZE.width()+12))
+        if columns != self.columns:
+            self.columns = columns
+            for index, tile in enumerate(self.tiles):
+                self.grid.addWidget(tile, index//columns, index % columns)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.arrange()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.arrange()
+
+    def image(self, path):
+        image = self.images.get(path)
+        if image is None and path not in self.asked:
+            self.asked.add(path)
+            job = self.page.window.custom_loader(Path(path), 400)
+            job.signals.ready.connect(self.loaded, Qt.ConnectionType.QueuedConnection)
+            self.pool.start(job)
+        return image
+
+    @Slot(str, int, QImage, str, int)
+    def loaded(self, path, side, image, error, generation):
+        if not image.isNull():
+            self.images[path] = image
+            for tile in self.tiles:
+                if tile.photo['path'] == path:
+                    tile.update()
+
+    def remove(self, path):
+        self.session.toggle(path, self.key)
+        self.removed.append(path)
+        self.rebuild()
+        self.page.changed()
+
+    def restore(self):
+        if self.removed:
+            self.session.add(self.removed.pop(), self.key)
+            self.rebuild()
+            self.page.changed()
+
+    def done(self, result):
+        self.pool.clear()
+        self.pool.waitForDone()
+        super().done(result)
 
 
 class CustomPage(QStackedWidget):
@@ -775,6 +999,7 @@ class CustomPage(QStackedWidget):
         self.session = None
         self.index = 0
         self.images = OrderedDict()
+        self.detailed = set()
         self.pending = {}
         self.failed = {}
         self.cards = {}
@@ -784,10 +1009,9 @@ class CustomPage(QStackedWidget):
         self.save_timer.setSingleShot(True)
         self.save_timer.setInterval(400)
         self.save_timer.timeout.connect(self.save)
-        self.home = self.build_home()
         self.setup = SetupPage(self)
         self.work = self.build_work()
-        for page in (self.home, self.setup, self.work):
+        for page in (self.setup, self.work):
             self.addWidget(page)
         self.ghost = QLabel(self)
         self.ghost.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -807,31 +1031,6 @@ class CustomPage(QStackedWidget):
         row.addWidget(button)
         return button
 
-    def build_home(self):
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(40, 26, 40, 22)
-        layout.setSpacing(12)
-        top = QHBoxLayout()
-        top.addWidget(QLabel('Sessions Custom', objectName='dialogTitle'))
-        top.addStretch(1)
-        self.plain_button(top, 'Nouvelle session', self.new_session, 'primary')
-        layout.addLayout(top)
-        note = QLabel('Rassemblez des photos de plusieurs galeries et rangez-les dans vos buckets, par exemple un par concours. Rien ne bouge sur le disque : seul un export copie les photos.', objectName='muted')
-        note.setWordWrap(True)
-        layout.addWidget(note)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        holder = QWidget(objectName='home')
-        self.session_rows = QVBoxLayout(holder)
-        self.session_rows.setContentsMargins(0, 8, 0, 0)
-        self.session_rows.setSpacing(6)
-        self.session_rows.addStretch(1)
-        scroll.setWidget(holder)
-        layout.addWidget(scroll, 1)
-        return page
-
     def build_work(self):
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -840,7 +1039,7 @@ class CustomPage(QStackedWidget):
         bar = QHBoxLayout()
         bar.setContentsMargins(12, 8, 12, 8)
         bar.setSpacing(8)
-        self.plain_button(bar, '‹ Sessions', self.back)
+        self.plain_button(bar, '‹ Retour', self.back)
         self.work_title = QLabel(objectName='section')
         bar.addWidget(self.work_title)
         bar.addSpacing(12)
@@ -851,7 +1050,14 @@ class CustomPage(QStackedWidget):
         bar.addWidget(self.view_combo)
         self.counter = QLabel(objectName='muted')
         bar.addWidget(self.counter)
-        bar.addStretch(1)
+        bar.addSpacing(8)
+        self.photo_name = QLabel(objectName='muted')
+        bar.addWidget(self.photo_name, 1)
+        self.zoom_button = self.plain_button(bar, '100 %', lambda: self.stage.zoom_reset())
+        self.zoom_button.setToolTip('Revenir à la photo ajustée (touche 0)')
+        self.picker = BackgroundPicker(self.window, page)
+        bar.addWidget(self.picker)
+        bar.addSpacing(8)
         self.plain_button(bar, 'Modifier la sélection', self.edit_selection)
         self.plain_button(bar, 'Ajouter un bucket', self.add_bucket)
         self.export_button = self.plain_button(bar, 'Exporter la sélection…', self.export, 'primary')
@@ -871,27 +1077,9 @@ class CustomPage(QStackedWidget):
         layout.addWidget(scroll)
         return page
 
-    # The list of sessions.
-    def enter(self):
-        if self.session is None and self.currentWidget() is not self.setup:
-            self.show_home()
-
-    def show_home(self):
-        self.save()
-        self.session = None
-        self.images.clear()
-        self.failed.clear()
-        self.pool.clear()
-        self.pending.clear()
-        while self.session_rows.count() > 1:
-            widget = self.session_rows.takeAt(0).widget()
-            widget.setParent(None)
-            widget.deleteLater()
-        for session in self.store.sessions():
-            self.session_rows.insertWidget(self.session_rows.count()-1, SessionRow(self, session))
-        self.setCurrentWidget(self.home)
-
+    # Opening and leaving. The list of the selections is on the welcome screen.
     def new_session(self):
+        self.session = None
         self.setup.open(None)
         self.setCurrentWidget(self.setup)
 
@@ -901,13 +1089,22 @@ class CustomPage(QStackedWidget):
         elif self.session is not None:
             self.setCurrentWidget(self.work)
         else:
-            self.show_home()
+            self.window.leave_custom()
+
+    def close_session(self):
+        self.save()
+        self.session = None
+        self.images.clear()
+        self.failed.clear()
+        self.detailed.clear()
+        self.pool.clear()
+        self.pending.clear()
 
     def delete_session(self, session):
-        if ask(self.window, 'Supprimer la session', f'« {session.name} » ira à la corbeille, avec ses buckets. Les photos ne bougent pas.',
+        if ask(self.window, 'Supprimer la sélection', f'« {session.name} » ira à la corbeille, avec ses buckets. Les photos ne bougent pas.',
                [('cancel', 'Annuler', False), ('delete', 'Supprimer', True)]) == 'delete':
             move_to_trash(session.path)
-            self.show_home()
+            self.window.home.refresh()
 
     def open_session(self, session):
         self.session = session
@@ -923,11 +1120,9 @@ class CustomPage(QStackedWidget):
         self.show_photo()
 
     def back(self):
-        """Up one level: from a session to the list, from the list out of Custom."""
+        """Up one level: from the choice of galleries to the sorting, from the sorting out of Custom."""
         if self.currentWidget() is self.setup:
             self.show_after_setup(None)
-        elif self.currentWidget() is self.work:
-            self.show_home()
         else:
             self.window.leave_custom()
 
@@ -983,6 +1178,18 @@ class CustomPage(QStackedWidget):
     def update_counter(self):
         index, total = self.position()
         self.counter.setText(f'{min(index+1, total)} / {total}' if total else '0 photo')
+        photo = self.current()
+        text = f"{photo['gallery']} · {Path(photo['path']).name}" if photo else ''
+        self.photo_name.setText(self.photo_name.fontMetrics().elidedText(text, Qt.TextElideMode.ElideMiddle, max(120, self.photo_name.width())))
+        self.photo_name.setToolTip(photo['path'] if photo else '')
+
+    def zoom_changed(self):
+        self.zoom_button.setText(f'{round(self.stage.zoom*100)} %')
+        self.request_images()
+
+    def background_changed(self):
+        self.picker.sync()
+        self.stage.update()
 
     def sync_views(self):
         self.view_combo.blockSignals(True)
@@ -1020,11 +1227,20 @@ class CustomPage(QStackedWidget):
                 del self.pending[path]
         for rank, path in enumerate(wanted):
             if path not in self.images and path not in self.pending and path not in self.failed:
-                job = self.window.custom_loader(Path(path), PREVIEW_SIDE)
-                job.setAutoDelete(False)
-                job.signals.ready.connect(self.loaded, Qt.ConnectionType.QueuedConnection)
-                self.pending[path] = job
-                self.pool.start(job, -rank)
+                self.start_loading(path, PREVIEW_SIDE, -rank)
+        # Sharper once zoomed in, for the photo shown only.
+        if wanted and self.stage.zoom > 1.2:
+            path = order[self.index]['path']
+            if path in self.images and path not in self.detailed and path not in self.pending:
+                self.detailed.add(path)
+                self.start_loading(path, DETAIL_SIDE, 1)
+
+    def start_loading(self, path, side, priority):
+        job = self.window.custom_loader(Path(path), side)
+        job.setAutoDelete(False)
+        job.signals.ready.connect(self.loaded, Qt.ConnectionType.QueuedConnection)
+        self.pending[path] = job
+        self.pool.start(job, priority)
 
     @Slot(str, int, QImage, str, int)
     def loaded(self, path, side, image, error, generation):
@@ -1034,8 +1250,9 @@ class CustomPage(QStackedWidget):
         else:
             self.images[path] = image
             self.images.move_to_end(path)
-            while len(self.images) > PREVIEWS_KEPT:
-                self.images.popitem(last=False)
+            # The large ones weigh more: fewer of them.
+            while len(self.images) > (PREVIEWS_KEPT if self.stage.zoom <= 1.2 else 6):
+                self.detailed.discard(self.images.popitem(last=False)[0])
         current = self.current()
         if current and current['path'] == path:
             self.stage.update()
@@ -1176,6 +1393,11 @@ class CustomPage(QStackedWidget):
         if answer:
             bucket['title'], bucket['subtitle'], bucket['color'] = answer
             self.buckets_changed()
+
+    def show_bucket(self, key):
+        BucketSheet(self, key).exec()
+        self.sync_views()
+        self.show_photo()
 
     def delete_bucket(self, key):
         bucket = self.session.bucket(key)

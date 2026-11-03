@@ -15,7 +15,7 @@ from io import BytesIO
 from pathlib import Path
 from collections import OrderedDict
 
-from PySide6.QtCore import Qt, QSize, QRectF, QPointF, Signal, Slot, QObject, QRunnable, QThreadPool, QTimer, QItemSelection, QItemSelectionModel, QSettings, QStandardPaths, QUrl
+from PySide6.QtCore import Qt, QPoint, QSize, QRectF, QPointF, Signal, Slot, QObject, QRunnable, QThreadPool, QTimer, QItemSelection, QItemSelectionModel, QSettings, QStandardPaths, QUrl
 from PySide6.QtGui import QCursor, QDesktopServices, QIcon, QImage, QPainter, QPainterPath, QColor, QFont, QShortcut, QKeySequence, QColorSpace, QPen
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QComboBox, QSplitter, QListWidget, QListWidgetItem, QFrame, QScrollArea, QButtonGroup,
@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
 from PIL import Image, ImageCms, ImageWin
 from triphoto import (export_folder_name, APP_NAME, APP_VERSION, PhotoSession, sort_photos, SORT_OPTIONS, load_screen_preview, original_inventory,
     export_original_copy, EXPORT_DIR_NAME, PICK_NEUTRAL, PICK_REJECT, PICK_SELECT, SESSION_DIR_NAME)
-from triphoto_custom import CustomPage
+from triphoto_custom import CustomPage, PopupMenu
 from triphoto_portfolio import MANIFEST_FILE, Portfolio, PortfolioSession, RelocateJob, UNSORTED
 from triphoto_prefs import (ALIASES, PreferencesDialog, Recents, ScanJob, age_label, ask, inform, path_key, shortcut_map)
 from triphoto_review import MODES, BackgroundPicker, ChoiceFilter, MarkerFilter, NoteFilter, RatingBar, ReviewPage
@@ -568,6 +568,39 @@ class RecentCard(QFrame):
         menu.exec(event.globalPos())
 
 
+class CustomCard(RecentCard):
+    """A saved selection: its name and one of its photos."""
+
+    def __init__(self, session, home):
+        super().__init__({'path': session.name}, home)
+        self.session = session
+        photos, buckets = len(session.photos), len(session.buckets)
+        self.name.setText(session.name)
+        self.name.setToolTip(session.name)
+        self.meta.setText(f"{photos} photo{'s' if photos > 1 else ''} · {buckets} bucket{'s' if buckets > 1 else ''} · {age_label(session.data.get('updated'))}")
+        self.more = QPushButton('•••', self, objectName='ghost')
+        self.more.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.more.setFixedSize(38, 26)
+        self.more.setStyleSheet('background: rgba(15, 15, 16, 190); color: #ececec; padding: 0; border-radius: 7px;')
+        self.more.clicked.connect(lambda *_: self.show_menu(self.more.mapToGlobal(self.more.rect().topLeft())+QPoint(0, 34)))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.more.move(self.width()-self.more.width()-8, 8)
+
+    def show_menu(self, where):
+        custom = self.home.window.custom
+        session = self.session
+        PopupMenu(self.home.window, [('Supprimer la sélection…', lambda: custom.delete_session(session))]).open_at(where)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.home.window.open_custom(self.session)
+
+    def contextMenuEvent(self, event):
+        self.show_menu(event.globalPos())
+
+
 class PortfolioCard(QFrame):
     """The portfolio, ahead of the projects and wider than they are."""
     HEIGHT = 176
@@ -689,6 +722,21 @@ class HomePage(QWidget):
         self.grid.setContentsMargins(0, 0, 0, 0)
         self.grid.setSpacing(14)
         self.column.addWidget(self.grid_holder)
+        self.column.addSpacing(34)
+        custom_top = QHBoxLayout()
+        custom_top.addWidget(QLabel('SÉLECTION CUSTOM', objectName='section'))
+        custom_top.addStretch(1)
+        self.custom_button = QPushButton('Nouvelle sélection', objectName='ghost')
+        self.custom_button.clicked.connect(lambda checked=False: window.open_custom())
+        custom_top.addWidget(self.custom_button)
+        self.column.addLayout(custom_top)
+        self.column.addSpacing(10)
+        self.custom_holder = QWidget(objectName='home')
+        self.custom_grid = QGridLayout(self.custom_holder)
+        self.custom_grid.setContentsMargins(0, 0, 0, 0)
+        self.custom_grid.setSpacing(14)
+        self.column.addWidget(self.custom_holder)
+        self.custom_cards = {}
         self.column.addStretch(1)
         self.cover_signals = CoverSignals()
         self.cover_signals.ready.connect(self.cover_ready, Qt.ConnectionType.QueuedConnection)
@@ -715,6 +763,17 @@ class HomePage(QWidget):
             root = Path(entry['path'])
             cover = root/entry['cover'] if entry.get('cover') else None
             self.window.pool.start(CoverJob(path_key(entry['path']), root, cover, self.window.display_profile, self.cover_signals), 2)
+        for card in self.custom_cards.values():
+            self.custom_grid.removeWidget(card)
+            card.deleteLater()
+        self.custom_cards = {}
+        for session in self.window.custom.store.sessions():
+            key = f"custom:{session.data['id']}"
+            self.custom_cards[key] = CustomCard(session, self)
+            cover = session.cover()
+            if cover:
+                self.window.pool.start(CoverJob(key, Path(cover).parent, Path(cover), self.window.display_profile, self.cover_signals), 2)
+        self.custom_holder.setVisible(bool(self.custom_cards))
         self.columns = 0
         self.arrange()
 
@@ -725,8 +784,11 @@ class HomePage(QWidget):
         self.columns = columns
         for index, card in enumerate(self.cards.values()):
             self.grid.addWidget(card, index//columns, index % columns)
+        for index, card in enumerate(self.custom_cards.values()):
+            self.custom_grid.addWidget(card, index//columns, index % columns)
         for column in range(10):
             self.grid.setColumnStretch(column, 1 if column < columns else 0)
+            self.custom_grid.setColumnStretch(column, 1 if column < columns else 0)
 
     def resizeEvent(self, event):
         self.arrange()
@@ -737,7 +799,7 @@ class HomePage(QWidget):
                 self.portfolio_card.covers[int(key[10:])] = image
                 self.portfolio_card.update()
             return
-        card = self.cards.get(key)
+        card = self.cards.get(key) or self.custom_cards.get(key)
         if card is None:
             return
         if error == 'missing':
@@ -1020,7 +1082,7 @@ class Window(QMainWindow):
         segment_row.setSpacing(2)
         group = QButtonGroup(self)
         self.view_buttons = {}
-        for key, label in [('classic', 'Classique'), *MODES, ('custom', 'Custom')]:
+        for key, label in [('classic', 'Classique'), *MODES]:
             button = QPushButton(label, objectName='mainseg', checkable=True)
             group.addButton(button)
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -1170,14 +1232,15 @@ class Window(QMainWindow):
             'prev': lambda: self.navigate(-1), 'next': lambda: self.navigate(1),
             'flag': self.toggle_flag, 'like': self.toggle_like, 'portfolio': self.toggle_portfolio, 'publish': self.toggle_publish, 'select': lambda: self.set_pick(PICK_SELECT),
             'reject': lambda: self.set_pick(PICK_REJECT), 'neutral': lambda: self.set_pick(PICK_NEUTRAL),
-            'select_all': self.select_all, 'deselect': self.deselect, 'undo': self.undo, 'fit': lambda: self.review.zoom_reset() if self.review_active else self.viewer.set_zoom(1),
+            'select_all': self.select_all, 'deselect': self.deselect, 'undo': self.undo, 'fit': self.fit,
             'zoom_in': lambda: self.zoom_by(1.15), 'zoom_out': lambda: self.zoom_by(1/1.15),
             'background': self.cycle_background, 'review': lambda: self.set_review(not self.review_active),
             'shuffle': lambda: self.review.shuffle() if self.review_active else None,
             'mono': lambda: self.review.toggle_mono() if self.review_active else None,
             'refresh': self.refresh, 'open': self.open_folder, 'close': self.close_project, 'preferences': self.open_preferences,
             **{f'rate{value}': (lambda stars=value: self.rate(stars)) for value in range(6)},
-            **{f'mode_{mode}': (lambda value=mode: self.set_view(value)) for mode in ('classic', 'toile', 'swipe', 'color', 'wall', 'instagram', 'custom')}}
+            **{f'mode_{mode}': (lambda value=mode: self.set_view(value)) for mode in ('classic', 'toile', 'swipe', 'color', 'wall', 'instagram')},
+            'custom_home': self.show_custom_home}
         mapping = shortcut_map(self.settings)
         taken = {QKeySequence(key).toString() for keys in mapping.values() for key in keys}
         for name, keys in mapping.items():
@@ -1258,16 +1321,22 @@ class Window(QMainWindow):
         parts = [combo.currentText() for combo in (self.stars, self.flags) if combo.currentIndex() > 0]+self.choices.active_labels()
         self.filter_chip.setText(f"Filtre : {' · '.join(parts)}  ▾" if parts else 'Filtre  ▾')
 
+    def fit(self):
+        if self.custom_active:
+            self.custom.stage.zoom_reset()
+        elif self.review_active:
+            self.review.zoom_reset()
+        else:
+            self.viewer.set_zoom(1)
+
     def set_view(self, key):
-        if key == 'custom':
-            self.open_custom()
-        elif key == 'classic':
+        if key == 'classic':
             self.set_review(False)
         else:
             self.open_review_mode(key)
 
     def sync_view_buttons(self):
-        self.view_buttons['custom' if self.custom_active else self.review.mode if self.review_active else 'classic'].setChecked(True)
+        self.view_buttons[self.review.mode if self.review_active else 'classic'].setChecked(True)
 
     def show_viewer_bar(self):
         self.viewer_bar_timer.start(1700)
@@ -1300,6 +1369,7 @@ class Window(QMainWindow):
         self.place_viewer_bar()
         self.review.sync_toolbar()
         self.review.update_view()
+        self.custom.background_changed()
 
     def cycle_background(self):
         colors = [color for _, color in BACKGROUNDS]
@@ -1307,21 +1377,34 @@ class Window(QMainWindow):
         self.set_background(colors[(current+1) % len(colors)])
 
     def zoom_by(self, factor):
-        if self.review_active:
+        if self.custom_active:
+            self.custom.stage.zoom_by(factor)
+        elif self.review_active:
             self.review.zoom(factor)
         else:
             self.viewer.zoom_from_center(factor)
 
-    def open_custom(self):
+    def open_custom(self, session=None):
+        """A saved selection, or the screen that creates one."""
         self.set_review(False)
         self.custom_active = True
         self.update_project_state()
-        self.custom.enter()
+        if session is None:
+            self.custom.new_session()
+        else:
+            self.custom.open_session(session)
 
     def leave_custom(self):
-        self.custom.save()
+        self.custom.close_session()
         self.custom_active = False
         self.update_project_state()
+
+    def show_custom_home(self):
+        """The selections are on the welcome screen, which shows once no project is open."""
+        if self.custom_active:
+            self.leave_custom()
+        if self.session:
+            self.close_project()
 
     def custom_loader(self, path, side):
         return Loader(path, side, None, self.display_profile, self.color_generation)
@@ -1500,6 +1583,7 @@ class Window(QMainWindow):
         recent_menu.setEnabled(bool(entries))
         menu.addAction("Retrouver d'anciens projets…", self.find_projects)
         menu.addSeparator()
+        menu.addAction('Sélections custom', self.show_custom_home)
         menu.addAction('Portfolio', self.open_portfolio)
         menu.addAction('Ouvrir le dossier du portfolio', self.reveal_portfolio).setEnabled(self.portfolio.available())
         menu.addAction("Emplacement du portfolio…", self.choose_portfolio_folder)
@@ -1548,11 +1632,9 @@ class Window(QMainWindow):
         self.sync_view_buttons()
         in_project = has_photos and not self.custom_active
         self.export_button.setVisible(in_project)
-        # Nothing to filter or switch on the welcome screen. Custom needs no project, and has its own export.
-        for control in (self.sort, self.filter_chip, self.counter):
+        # Nothing to filter or switch on the welcome screen. Custom has its own controls, and its own export.
+        for control in (self.sort, self.segments, self.filter_chip, self.counter):
             control.setVisible(in_project)
-        for key, button in self.view_buttons.items():
-            button.setVisible(has_photos or key == 'custom')
         if not in_project:
             self.filter_timer.stop()
             self.filter_panel.hide()
