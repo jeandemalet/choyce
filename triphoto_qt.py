@@ -396,6 +396,9 @@ class PhotoDelegate(QStyledItemDelegate):
     def heart(self, thumb):
         return QRectF(thumb.right()-19, thumb.top()+6, 13, 12)
 
+    def bookmark(self, thumb):
+        return QRectF(thumb.left()+7, thumb.top()+6, 11, 13)
+
     def paint(self, painter, option, index):
         photo = index.data(Qt.ItemDataRole.UserRole)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
@@ -422,12 +425,12 @@ class PhotoDelegate(QStyledItemDelegate):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(thumb.adjusted(.8, .8, -.8, -.8), 5, 5)
         draw_heart(painter, self.heart(thumb), photo.liked)
-        x = thumb.left()+7
-        if self.window.portfolio.contains(photo.path):
-            draw_bookmark(painter, QRectF(x, thumb.top()+6, 11, 13), '#ffffff', True)
-            x += 16
+        # Always there, to be clicked. A thin dark edge keeps it readable on a light photo, like the heart.
+        keep = self.bookmark(thumb)
+        draw_bookmark(painter, keep.adjusted(-.8, -.8, .8, .8), QColor(0, 0, 0, 110))
+        draw_bookmark(painter, keep, '#ffffff', self.window.in_portfolio(photo))
         if photo.publish:
-            draw_send(painter, QRectF(x, thumb.top()+6, 13, 13), '#ffffff', True)
+            draw_send(painter, QRectF(keep.left()+16, thumb.top()+6, 13, 13), '#ffffff', True)
         middle = rect.bottom()-13
         draw_clear_star(painter, rect.x()+8, middle, 5.5, TEXT if photo.stars else '#4a4a4c')
         draw_stars(painter, rect.x()+24, middle, photo.stars, 5.5, 14.0)
@@ -448,6 +451,10 @@ class PhotoDelegate(QStyledItemDelegate):
             rect = self.card(option)
             x, y = event.position().x(), event.position().y()
             photo = index.data(Qt.ItemDataRole.UserRole)
+            if self.bookmark(rect).adjusted(-4, -4, 4, 4).contains(event.position()):
+                self.window.list.on_control = True
+                self.window.toggle_portfolio(photo)
+                return True
             if self.heart(rect).adjusted(-4, -4, 4, 4).contains(event.position()):
                 self.window.list.on_control = True
                 self.window.change(self.window.with_selection(photo), liked=not photo.liked)
@@ -1983,8 +1990,8 @@ class Window(QMainWindow):
         if not self.viewing_portfolio():
             self.recents.add(self.project_path, self.session.photos, opened)
 
-    def toggle_portfolio(self):
-        photos = self.target_photos()
+    def toggle_portfolio(self, photo=None):
+        photos = self.with_selection(photo) if photo else self.target_photos()
         if not photos:
             return
         if self.viewing_portfolio():

@@ -1710,6 +1710,47 @@ def test_select_all(base):
     clear_settings()
 
 
+def test_ribbon_portfolio_button(base):
+    clear_settings()
+    place = base/'ribbon portfolio'
+    place.mkdir()
+    triphoto_qt.app_settings().setValue('portfolio_folder', str(place))
+    window = open_window(make_project(base/'ribbon', 6))
+    window.show()
+    window.list.doItemsLayout()
+    wait()
+    viewport = window.list.viewport()
+    delegate = window.list.itemDelegate()
+    def button(row):
+        option = QStyleOptionViewItem()
+        option.rect = window.list.visualItemRect(window.list.item(row))
+        return delegate.bookmark(delegate.card(option)).center().toPoint()
+    click = lambda row: QTest.mouseClick(viewport, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, button(row))
+    contains = lambda photo: window.portfolio.contains(photo.path)
+    # On, then off, on the thumbnail clicked even if another photo is on display.
+    window.list.setCurrentRow(0)
+    other = window.photos[1]
+    click(1)
+    assert contains(other) and not contains(window.photos[0])
+    window.grab()
+    click(1)
+    assert not contains(other)
+    # Ctrl+Z takes the click back.
+    click(1)
+    window.undo()
+    assert not contains(other)
+    # A click on a photo of the selection acts on all of it, and keeps it; the clicked photo decides.
+    window.change(window.photos, stars=0)
+    window.select_all()
+    click(2)
+    assert all(contains(p) for p in window.photos) and len(window.target_photos()) == 6
+    click(2)
+    assert not any(contains(p) for p in window.photos) and len(window.target_photos()) == 6
+    settle(window, lambda: not window.portfolio.copying)
+    window.close()
+    clear_settings()
+
+
 def test_defaults_and_viewer_room(base):
     clear_settings()
     project = make_project(base/'defaults', 4)
@@ -1730,7 +1771,7 @@ def main():
     app.setStyleSheet(triphoto_qt.STYLE)
     base = Path(tempfile.mkdtemp(prefix='triphoto-tests-'))
     tests = [test_legacy_session, test_nested_session_ignored, test_dominant_color, test_recents, test_shortcuts,
-             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_export_by_its_button, test_themed_dialog, test_update, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_defaults_and_viewer_room]
+             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_export_by_its_button, test_themed_dialog, test_update, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_defaults_and_viewer_room]
     failures = 0
     try:
         for test in tests:
