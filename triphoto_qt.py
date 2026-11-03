@@ -16,15 +16,16 @@ from pathlib import Path
 from collections import OrderedDict
 
 from PySide6.QtCore import Qt, QSize, QRectF, QPointF, Signal, Slot, QObject, QRunnable, QThreadPool, QTimer, QItemSelectionModel, QSettings, QUrl
-from PySide6.QtGui import QDesktopServices, QIcon, QImage, QPainter, QPainterPath, QColor, QFont, QShortcut, QKeySequence, QColorSpace, QPen
+from PySide6.QtGui import QCursor, QDesktopServices, QIcon, QImage, QPainter, QPainterPath, QColor, QFont, QShortcut, QKeySequence, QColorSpace, QPen
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QComboBox, QSplitter, QListWidget, QListWidgetItem, QFrame, QScrollArea, QButtonGroup,
     QStackedWidget, QAbstractItemView, QFileDialog, QProgressBar, QStyledItemDelegate, QStyle, QMenu, QColorDialog)
 from PIL import Image, ImageCms, ImageWin
-from triphoto import (PhotoSession, sort_photos, SORT_OPTIONS, load_screen_preview, original_inventory,
+from triphoto import (APP_NAME, APP_VERSION, PhotoSession, sort_photos, SORT_OPTIONS, load_screen_preview, original_inventory,
     export_original_copy, EXPORT_DIR_NAME, PICK_NEUTRAL, PICK_REJECT, PICK_SELECT)
 from triphoto_prefs import (ALIASES, PreferencesDialog, Recents, ScanJob, age_label, ask, inform, path_key, shortcut_map)
-from triphoto_review import BackgroundPicker, MarkerFilter, NoteFilter, RatingBar, ReviewPage
+from triphoto_review import MODES, BackgroundPicker, MarkerFilter, NoteFilter, RatingBar, ReviewPage
+from triphoto_update import UpdateCheck, UpdateDownload, can_install, launch_installer, write_installer
 from triphoto_theme import (ACCENT, ASSETS, BACKGROUNDS, FAINT, INK, RAISED, REJECT, SELECT, STYLE, TEXT,
     contrast_on, draw_check, draw_clear_star, draw_cross, draw_flag, draw_heart, draw_stars)
 
@@ -32,6 +33,9 @@ from triphoto_theme import (ACCENT, ASSETS, BACKGROUNDS, FAINT, INK, RAISED, REJ
 SETTINGS_SCOPE = os.environ.get('TRIPHOTO_SETTINGS', 'TriPhoto')
 ROW_HEIGHT = 152
 EXPORT_PICKS_DIR_NAME = 'Export_Retenues'
+# Decoded previews held in memory, most of it for the sharp photos prepared ahead.
+MEMORY_LIMIT = 1200*1024*1024
+AHEAD_MAX, BEHIND = 10, 2
 EXPORT_WORK_DIR_NAME = 'Export_en_cours'
 DATED_EXPORT = re.compile(r'^Export_\d{4}-\d{2}-\d{2}_\d{2}h\d{2}(-\d+)?$')
 
@@ -115,6 +119,7 @@ PICK_FILTERS = {'all': 'Tous les marqueurs', 'select': 'Retenues', 'neutral': 'N
 
 
 def app_settings():
+    # Under its former name, so that recent projects and preferences stay in place.
     return QSettings(SETTINGS_SCOPE, 'TriPhoto')
 
 
@@ -158,6 +163,7 @@ class Loader(QRunnable):
         self.display_profile = display_profile
         self.signals = Signals()
         self.generation = generation
+        self.preview_limit = 512*1024*1024
 
     def run(self):
         try:
@@ -199,7 +205,7 @@ class Loader(QRunnable):
                     entries = [(p.stat().st_mtime, p.stat().st_size, p) for p in self.cache_dir.glob('qt-*.png')]
                     total = sum(size for _, size, _ in entries)
                     for _, size, path in sorted(entries):
-                        if total <= 512*1024*1024:
+                        if total <= self.preview_limit:
                             break
                         try:
                             path.unlink()
@@ -209,6 +215,14 @@ class Loader(QRunnable):
             self.signals.ready.emit(str(self.path), self.side, qt_image(image, self.display_profile), '', self.generation)
         except Exception as error:
             self.signals.ready.emit(str(self.path), self.side, QImage(), str(error), self.generation)
+
+
+class HoverButton(QPushButton):
+    entered = Signal()
+
+    def enterEvent(self, event):
+        self.entered.emit()
+        super().enterEvent(event)
 
 
 class Viewer(QWidget):
@@ -222,7 +236,6 @@ class Viewer(QWidget):
         super().__init__()
         self.image = QImage()
         self.liked = lambda: None
-        self.above = None
         self.zoom = 1.0
         self.pan = QPointF()
         self.drag = None
@@ -253,11 +266,7 @@ class Viewer(QWidget):
     def heart_rect(self):
         # Zoomed in, the corner of the photo may be out of sight: stay in the corner of what is seen.
         shown = self.image_rect().intersected(QRectF(self.rect()))
-        heart = QRectF(shown.right()-23, shown.top()+8, 15, 14)
-        # The filters float over the top of a tall photo: the heart must stay within reach.
-        if self.above is not None and self.above.isVisible() and QRectF(self.above.geometry()).intersects(heart):
-            heart.moveTop(self.above.geometry().bottom()+8)
-        return heart
+        return QRectF(shown.right()-23, shown.top()+8, 15, 14)
 
     def on_heart(self, position):
         return not self.image.isNull() and self.liked() is not None and self.heart_rect().adjusted(-4, -4, 4, 4).contains(position)
@@ -633,8 +642,10 @@ class Window(QMainWindow):
         self.display_signature = None
         self.color_generation = 0
         self.pool = QThreadPool(self)
-        self.pool.setMaxThreadCount(3)
-        self.setWindowTitle('TriPhoto')
+        self.pool.setMaxThreadCount(4)
+        self.direction = 1
+        self.last_row = -1
+        self.setWindowTitle(APP_NAME)
         self.resize(1440, 920)
         self.setMinimumSize(1260, 640)
         central = QWidget()
@@ -651,7 +662,9 @@ class Window(QMainWindow):
         left, right = QHBoxLayout(), QHBoxLayout()
         left.setSpacing(8)
         right.setSpacing(8)
-        left.addWidget(QLabel('TriPhoto', objectName='brand'))
+        brand = QLabel(APP_NAME, objectName='brand')
+        brand.setToolTip(f'Version {APP_VERSION}')
+        left.addWidget(brand)
         left.addSpacing(6)
         self.project_button = QPushButton('Projet', objectName='menu')
         self.project_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -680,21 +693,30 @@ class Window(QMainWindow):
         segment_row = QHBoxLayout(segments)
         segment_row.setContentsMargins(3, 3, 3, 3)
         segment_row.setSpacing(2)
-        self.tri_button = QPushButton('Tri', objectName='mainseg', checkable=True, checked=True)
-        self.review_button = QPushButton('Révision', objectName='mainseg', checkable=True)
         group = QButtonGroup(self)
-        for button, active in ((self.tri_button, False), (self.review_button, True)):
+        self.view_buttons = {}
+        for key, label in [('classic', 'Classique'), *MODES]:
+            button = QPushButton(label, objectName='mainseg', checkable=True)
             group.addButton(button)
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            button.clicked.connect(lambda checked=False, value=active: self.set_review(value))
+            button.clicked.connect(lambda checked=False, value=key: self.set_view(value))
             segment_row.addWidget(button)
+            self.view_buttons[key] = button
+        self.view_buttons['classic'].setChecked(True)
         self.segments = segments
+        self.filter_chip = HoverButton('Filtre  ▾', objectName='ghost')
+        self.filter_chip.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.filter_chip.setToolTip('Notes, marqueurs et réglages de la vue')
+        self.filter_chip.entered.connect(self.show_filter_panel)
+        self.filter_chip.clicked.connect(self.show_filter_panel)
         right.addSpacing(6)
         self.export_button = self.button(right, 'Exporter les 5 étoiles', self.export, 'primary')
         self.prefs_button = self.button(right, 'Préférences', self.open_preferences, 'ghost')
         top.addLayout(left, 1)
         top.addWidget(segments)
+        top.addWidget(self.filter_chip)
         top.addLayout(right, 1)
+        self.header = header
         layout.addWidget(header)
         splitter = QSplitter()
         self.viewer = Viewer()
@@ -717,17 +739,8 @@ class Window(QMainWindow):
         self.viewer_bar.hide()
         self.viewer_picker = BackgroundPicker(self, self.viewer, floating=True)
         self.viewer_picker.hide()
-        self.viewer_filters = QFrame(self.viewer, objectName='pill')
-        filter_row = QHBoxLayout(self.viewer_filters)
-        filter_row.setContentsMargins(8, 6, 12, 6)
-        filter_row.setSpacing(4)
         self.note_filter = NoteFilter(self)
         self.marker_filter = MarkerFilter(self)
-        filter_row.addWidget(self.note_filter)
-        filter_row.addSpacing(6)
-        filter_row.addWidget(self.marker_filter)
-        self.viewer_filters.hide()
-        self.viewer.above = self.viewer_filters
         self.viewer_bar_timer = QTimer(self)
         self.viewer_bar_timer.setSingleShot(True)
         self.viewer_bar_timer.timeout.connect(self.hide_viewer_bar)
@@ -738,10 +751,28 @@ class Window(QMainWindow):
         self.pages.addWidget(self.home)
         self.pages.addWidget(splitter)
         self.pages.addWidget(self.review)
+        # Unfolds under the header on hover, over the photos, so as to take no room from them.
+        self.filter_panel = QFrame(self, objectName='pill')
+        filter_row = QHBoxLayout(self.filter_panel)
+        filter_row.setContentsMargins(8, 6, 12, 6)
+        filter_row.setSpacing(4)
+        filter_row.addWidget(self.note_filter)
+        filter_row.addSpacing(6)
+        filter_row.addWidget(self.marker_filter)
+        filter_row.addWidget(self.review.tools)
+        self.filter_panel.hide()
+        # Where the mouse is, asked regularly: the enter and leave events of a panel full
+        # of buttons, lists and dialogs are not a reliable account of it.
+        self.filter_timer = QTimer(self)
+        self.filter_timer.setInterval(120)
+        self.filter_timer.timeout.connect(self.check_filter_panel)
+        self.filter_outside = 0
         layout.addWidget(self.pages, 1)
         # How many large previews stay in memory: more when a page shows more of them at once.
         self.large_keep = 6
         self.export_job = None
+        self.update_check = None
+        self.update_job = None
         self.export_pool = QThreadPool(self)
         self.export_pool.setMaxThreadCount(1)
         self.export_panel = QFrame(self, objectName='pill')
@@ -755,7 +786,7 @@ class Window(QMainWindow):
         self.export_bar.setFixedSize(260, 6)
         self.export_bar.setTextVisible(False)
         export_row.addWidget(self.export_bar)
-        self.button(export_row, 'Annuler', self.cancel_export, 'ghost')
+        self.export_cancel = self.button(export_row, 'Annuler', self.cancel_export, 'ghost')
         self.export_panel.hide()
         self.toast_frame = QFrame(self, objectName='toast')
         toast_row = QHBoxLayout(self.toast_frame)
@@ -812,7 +843,7 @@ class Window(QMainWindow):
             'mono': lambda: self.review.toggle_mono() if self.review_active else None,
             'refresh': self.refresh, 'open': self.open_folder, 'close': self.close_project, 'preferences': self.open_preferences,
             **{f'rate{value}': (lambda stars=value: self.rate(stars)) for value in range(6)},
-            **{f'mode_{mode}': (lambda value=mode: self.open_review_mode(value)) for mode in ('toile', 'swipe', 'color', 'wall')}}
+            **{f'mode_{mode}': (lambda value=mode: self.set_view(value)) for mode in ('classic', 'toile', 'swipe', 'color', 'wall')}}
         mapping = shortcut_map(self.settings)
         taken = {QKeySequence(key).toString() for keys in mapping.values() for key in keys}
         for name, keys in mapping.items():
@@ -821,6 +852,10 @@ class Window(QMainWindow):
                 self.shortcuts.append(QShortcut(QKeySequence(key), self, activated=commands[name]))
         for key, command in (('Escape', self.leave_review), ('Space', lambda: self.skip_card(1)), ('Backspace', lambda: self.skip_card(-1))):
             self.shortcuts.append(QShortcut(QKeySequence(key), self, activated=command))
+        # Up and down browse like left and right, unless assigned in the preferences.
+        for key, delta in (('Up', -1), ('Down', 1), ('Shift+Up', -1), ('Shift+Down', 1)):
+            if QKeySequence(key).toString() not in taken:
+                self.shortcuts.append(QShortcut(QKeySequence(key), self, activated=lambda value=delta: self.browse(value)))
         lines = [f"{' / '.join(mapping[key])} : {label}" for key, label in [('prev', 'précédente'), ('next', 'suivante')]]
         self.viewer.setToolTip('\n'.join(lines)+'\nClic droit : couleur du fond\nPréférences : tous les raccourcis')
 
@@ -863,11 +898,49 @@ class Window(QMainWindow):
         self.toast_frame.raise_()
         self.toast_timer.start(duration)
 
+    def place_filter_panel(self):
+        self.filter_panel.adjustSize()
+        center = self.filter_chip.mapTo(self, self.filter_chip.rect().center()).x()
+        x = max(8, min(self.width()-self.filter_panel.width()-8, center-self.filter_panel.width()//2))
+        self.filter_panel.move(x, self.header.height()+6)
+        self.filter_panel.raise_()
+
+    def show_filter_panel(self, *args):
+        self.filter_outside = 0
+        self.place_filter_panel()
+        self.filter_panel.show()
+        self.filter_timer.start()
+
+    def over_filter(self, position=None):
+        """Over the button or the panel, or in the small gap that separates them."""
+        position = self.mapFromGlobal(QCursor.pos()) if position is None else position
+        chip = self.filter_chip.rect().translated(self.filter_chip.mapTo(self, self.filter_chip.rect().topLeft()))
+        return chip.adjusted(-6, -6, 6, 10).contains(position) or self.filter_panel.geometry().adjusted(-10, -10, 10, 10).contains(position)
+
+    def check_filter_panel(self):
+        # A list or a color dialog opened from the panel still belongs to it.
+        if self.over_filter() or self.marker_filter.view().isVisible() or QApplication.activeModalWidget() is not None:
+            self.filter_outside = 0
+        else:
+            self.filter_outside += 1
+            if self.filter_outside >= 3:
+                self.filter_timer.stop()
+                self.filter_panel.hide()
+
+    def update_filter_chip(self):
+        parts = [combo.currentText() for combo in (self.stars, self.flags) if combo.currentIndex() > 0]
+        self.filter_chip.setText(f"Filtre : {' · '.join(parts)}  ▾" if parts else 'Filtre  ▾')
+
+    def set_view(self, key):
+        if key == 'classic':
+            self.set_review(False)
+        else:
+            self.open_review_mode(key)
+
+    def sync_view_buttons(self):
+        self.view_buttons[self.review.mode if self.review_active else 'classic'].setChecked(True)
+
     def show_viewer_bar(self):
-        if self.session:
-            self.viewer_filters.show()
-            self.viewer_filters.raise_()
-            self.viewer.update()
         self.viewer_bar_timer.start(1700)
         self.place_viewer_bar()
         if self.viewer.image.isNull():
@@ -877,15 +950,11 @@ class Window(QMainWindow):
         self.viewer_picker.show()
 
     def hide_viewer_bar(self):
-        if (self.viewer_bar.underMouse() or self.viewer_picker.underMouse() or self.viewer_filters.underMouse()
-                or self.marker_filter.view().isVisible()):
+        if self.viewer_bar.underMouse() or self.viewer_picker.underMouse():
             self.viewer_bar_timer.start(1000)
         else:
             self.viewer_bar.hide()
             self.viewer_picker.hide()
-            # With no photo left, this is the only way back from the filter.
-            self.viewer_filters.setVisible(bool(self.session and not self.photos))
-            self.viewer.update()
 
     def place_viewer_bar(self):
         self.viewer_picker.adjustSize()
@@ -893,8 +962,6 @@ class Window(QMainWindow):
         y = self.viewer.height()-self.viewer_bar.height()-16
         self.viewer_bar.move(x, y)
         self.viewer_picker.move(x+self.viewer_bar.width()+8, y)
-        self.viewer_filters.adjustSize()
-        self.viewer_filters.move((self.viewer.width()-self.viewer_filters.width())//2, 12)
 
     def set_background(self, color):
         self.viewer.set_background(color)
@@ -994,11 +1061,17 @@ class Window(QMainWindow):
                 self.request(photo, 1000, priority+1)
             self.request(photo, side, priority)
 
-    def drop_requests(self, wanted):
+    def drop_requests(self, wanted, min_side=0):
         """Forget what was queued for photos no longer on screen, so that it does not delay those that are."""
         for key, job in list(self.pending.items()):
-            if not job.background and key[0] not in wanted and self.pool.tryTake(job):
-                del self.pending[key]
+            if job.background or key[0] in wanted or key[1] < min_side:
+                continue
+            try:
+                if self.pool.tryTake(job):
+                    del self.pending[key]
+            except RuntimeError:
+                # Finished, with its result still on its way: loaded() will take it out.
+                pass
 
     def fill_project_menu(self):
         menu = self.project_menu
@@ -1054,15 +1127,20 @@ class Window(QMainWindow):
         if page == 0:
             self.home.refresh()
         self.pages.setCurrentIndex(page)
-        self.review_button.setEnabled(has_photos)
-        self.tri_button.setEnabled(has_photos)
-        (self.review_button if self.review_active else self.tri_button).setChecked(True)
+        self.sync_view_buttons()
         self.export_button.setVisible(has_photos)
         # Nothing to filter or switch on the welcome screen.
-        for control in (self.sort, self.segments, self.counter):
+        for control in (self.sort, self.segments, self.filter_chip, self.counter):
             control.setVisible(has_photos)
+        if not has_photos:
+            self.filter_timer.stop()
+            self.filter_panel.hide()
+        # Black and white, background and zoom of the panel are those of the other views.
+        self.review.tools.setVisible(self.review_active)
+        if self.filter_panel.isVisible():
+            self.place_filter_panel()
         name = project_label(self.project_path) if self.project_path else ''
-        self.setWindowTitle(f'TriPhoto · {name}' if self.session else 'TriPhoto')
+        self.setWindowTitle(f'{APP_NAME} · {name}' if self.session else APP_NAME)
 
     def save_session(self):
         # Saving takes an inventory of the folder: too slow to do on each note
@@ -1106,7 +1184,6 @@ class Window(QMainWindow):
         self.viewer.zoom = 1
         self.viewer.update()
         self.counter.setToolTip('')
-        self.viewer_filters.hide()
         self.note_filter.sync()
         self.marker_filter.sync()
         self.update_counter()
@@ -1124,7 +1201,7 @@ class Window(QMainWindow):
         combo.setToolTip(label)
         for key, text in values.items():
             combo.addItem(text, key)
-        combo.setFixedWidth({'Tri': 182, 'Notes': 136, 'Marqueurs': 146}[label])
+        combo.setFixedWidth({'Tri': 160, 'Notes': 136, 'Marqueurs': 146}[label])
         combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         combo.currentIndexChanged.connect(self.filters_changed)
         layout.addWidget(combo)
@@ -1172,6 +1249,18 @@ class Window(QMainWindow):
                 combo.blockSignals(False)
             self.apply_filters()
         self.update_project_state()
+
+    def note_counts(self):
+        """Photos per note, among those the marker filter lets through."""
+        session = getattr(self, 'session', None)
+        if not session:
+            return {}
+        flag = self.flags.currentData()
+        counts = {note: 0 for note in range(6)}
+        for photo in session.photos:
+            if marker_matches(photo, flag):
+                counts[photo.stars] += 1
+        return counts
 
     def apply_filters(self, *args):
         self.note_filter.sync()
@@ -1226,8 +1315,6 @@ class Window(QMainWindow):
     def notify_review(self):
         if self.review_active:
             self.review.photos_changed()
-        elif self.session and not self.photos:
-            self.show_viewer_bar()
         self.viewer_bar.update()
         self.viewer.update()
 
@@ -1235,10 +1322,23 @@ class Window(QMainWindow):
         if self.closing:
             return
         key = (str(photo.path), side)
-        if key in self.cache or key in self.pending or key in self.failed:
+        if key in self.cache or key in self.failed:
             return
+        queued = self.pending.get(key)
+        if queued is not None:
+            # Queued long ago for later, and now wanted sooner: it must not keep its old place.
+            try:
+                if priority <= queued.priority or not self.pool.tryTake(queued):
+                    return
+            except RuntimeError:
+                return
+            del self.pending[key]
         job = Loader(photo.path, side, self.cache_dir, self.display_profile, self.color_generation)
         job.background = priority < 0
+        job.priority = priority
+        # The cache on disk follows the gallery, so that every photo keeps its preview.
+        count = len(self.session.photos) if self.session else 0
+        job.preview_limit = int(min(4096, max(512, count*1.2)))*1024*1024
         # A bound QObject slot guarantees that UI/cache changes run on the GUI thread.
         job.signals.ready.connect(self.loaded, Qt.ConnectionType.QueuedConnection)
         self.pending[key] = job
@@ -1260,21 +1360,22 @@ class Window(QMainWindow):
                 self.prepared.add(path)
             # Background previews only fill the disk cache: in memory they would
             # push out the images currently on screen.
-            if job is None or not job.background:
+            protected = self.protected_paths()
+            # A sharp photo that left the anticipated range meanwhile would only push out useful ones.
+            useful = self.review_active or side <= 1000 or path in protected
+            if useful and (job is None or not job.background):
                 self.cache[(path, side)] = image
                 self.cache.move_to_end((path, side))
                 # Keep large previews bounded separately from lightweight thumbnails.
-                large = [key for key in self.cache if key[1] > 1000]
-                for key in large[:-self.large_keep]:
+                others = [key for key in self.cache if key[1] > 1000 and key[0] not in protected]
+                for key in others[:-self.large_keep]:
                     self.cache.pop(key, None)
                 # Also bound actual decoded bytes, especially on large monitors.
                 total = sum(item.sizeInBytes() for item in self.cache.values())
-                current = self.list.currentRow()
-                current_path = str(self.photos[current].path) if 0 <= current < len(self.photos) else None
                 for key in list(self.cache):
-                    if total <= 256*1024*1024:
+                    if total <= MEMORY_LIMIT:
                         break
-                    if key[0] != current_path:
+                    if key[0] not in protected:
                         total -= self.cache.pop(key).sizeInBytes()
         row = self.list.currentRow()
         if 0 <= row < len(self.photos) and str(self.photos[row].path) == path and side > 400:
@@ -1288,6 +1389,8 @@ class Window(QMainWindow):
         self.list.viewport().update()
         if self.review_active:
             self.review.image_ready()
+        elif side > 1000:
+            self.anticipate()
 
     def check_display_profile(self):
         """Resolve the ICC profile for the monitor containing this window."""
@@ -1354,17 +1457,23 @@ class Window(QMainWindow):
         self.viewer.message = 'Préparation de l’aperçu…' if self.photos else 'Aucune photo pour ces filtres'
         self.viewer.update()
         row = self.list.currentRow()
+        if row != self.last_row and row >= 0 and self.last_row >= 0:
+            self.direction = 1 if row > self.last_row else -1
+        self.last_row = row
         if 0 <= row < len(self.photos):
             self.display_best()
-            self.request(self.photos[row], 1000, 10)
-            for i in (row-1, row+1):
+            if not self.review_active:
+                self.drop_requests(self.protected_paths(), 1000)
+            self.request(self.photos[row], 1000, 30)
+            # The small previews of the next ones are quick, and ready if the keys outrun the sharp ones.
+            for i, priority in ((row+self.direction, 12), (row+2*self.direction, 11), (row+3*self.direction, 10), (row-self.direction, 9)):
                 if 0 <= i < len(self.photos):
-                    self.request(self.photos[i], 1000, 1)
+                    self.request(self.photos[i], 1000, priority)
             self.schedule_detail()
         self.update_counter()
 
     def preload_background(self):
-        if self.closing or not self.photos or any(job.background for job in self.pending.values()):
+        if self.closing or not self.photos or any(job.background or key[1] > 1000 for key, job in self.pending.items()):
             return
         row = max(0, self.list.currentRow())
         # One task at a time, nearest photos first, then progressively outward.
@@ -1381,12 +1490,57 @@ class Window(QMainWindow):
         if hasattr(self, 'detail_timer') and not self.review_active:
             self.detail_timer.start(120)
 
+    def detail_side(self):
+        side = max(2000, min(6000, int(max(self.viewer.width(), self.viewer.height())*self.devicePixelRatioF()*self.viewer.zoom)))
+        return ((side+499)//500)*500
+
+    def has_sharp(self, photo, side):
+        path = str(photo.path)
+        return any((path, larger) in self.cache for larger in range(side, 6001, 500))
+
+    def anticipated_rows(self):
+        """The next photos in the direction of travel, nearest first, then a little behind."""
+        row = self.list.currentRow()
+        if not 0 <= row < len(self.photos):
+            return []
+        side = self.detail_side()
+        ahead = max(3, min(AHEAD_MAX, int(MEMORY_LIMIT*.8/(side*side*2.67))-BEHIND-1))
+        rows = [row+self.direction*n for n in range(1, ahead+1)]+[row-self.direction*n for n in range(1, BEHIND+1)]
+        return [r for r in rows if 0 <= r < len(self.photos)]
+
+    def protected_paths(self):
+        row = self.list.currentRow()
+        current = {str(self.photos[row].path)} if 0 <= row < len(self.photos) else set()
+        if self.review_active:
+            return current
+        return current | {str(self.photos[r].path) for r in self.anticipated_rows()}
+
+    def anticipate(self):
+        """Keep the next photos ready, without waiting to reach them.
+
+        One thread stays free, so that a photo reached before its turn starts at once.
+        """
+        if self.closing or self.review_active or not self.photos:
+            return
+        side = self.detail_side()
+        room = self.pool.maxThreadCount()-1-sum(key[1] > 1000 for key in self.pending)
+        for row in self.anticipated_rows():
+            if room <= 0:
+                return
+            photo = self.photos[row]
+            key = (str(photo.path), side)
+            if not self.has_sharp(photo, side) and key not in self.pending and key not in self.failed:
+                self.request(photo, side, 5)
+                room -= 1
+
     def load_detail(self):
         row = self.list.currentRow()
         if 0 <= row < len(self.photos):
-            side = max(2000, min(6000, int(max(self.viewer.width(), self.viewer.height())*self.devicePixelRatioF()*self.viewer.zoom)))
-            side = ((side+499)//500)*500
-            self.request(self.photos[row], side, 20)
+            side = self.detail_side()
+            if not self.has_sharp(self.photos[row], side):
+                self.request(self.photos[row], side, 20)
+            self.drop_requests(self.protected_paths(), 1000)
+            self.anticipate()
 
     def load_visible(self, *args):
         if not self.photos or self.review_active:
@@ -1400,6 +1554,11 @@ class Window(QMainWindow):
     def zoom_changed(self, zoom):
         self.schedule_detail()
 
+    def browse(self, delta):
+        """In Swipe, moving on is a decision: a key meant to browse must not make it."""
+        if not (self.review_active and self.review.mode == 'swipe'):
+            self.navigate(delta)
+
     def navigate(self, delta):
         if self.review_active:
             self.review.navigate(delta)
@@ -1410,6 +1569,7 @@ class Window(QMainWindow):
             self.list.scrollToItem(self.list.item(row))
 
     def update_counter(self):
+        self.update_filter_chip()
         if self.photos:
             five = sum(p.stars == 5 for p in self.photos)
             current = self.current_photo()
@@ -1528,6 +1688,51 @@ class Window(QMainWindow):
         self.export_checking()
         self.export_pool.start(job)
 
+    def check_for_update(self):
+        self.update_check = UpdateCheck(APP_VERSION)
+        self.update_check.signals.found.connect(self.update_found, Qt.ConnectionType.QueuedConnection)
+        QThreadPool.globalInstance().start(self.update_check)
+
+    def update_found(self, release):
+        """A newer version on GitHub. The packaged program installs it; a source folder only says so."""
+        if self.closing or self.export_job or self.update_job:
+            return
+        title = f"{APP_NAME} {release['version']} est disponible"
+        if can_install() and release['url']:
+            if ask(self, title, f'Vous utilisez la version {APP_VERSION}. La mise à jour se télécharge en arrière-plan, puis le programme redémarre. Vos projets ne sont pas touchés.',
+                   [('later', 'Plus tard', False), ('update', 'Mettre à jour', True)]) == 'update':
+                self.start_update(release)
+        elif ask(self, title, f'Vous utilisez la version {APP_VERSION}.', [('later', 'Plus tard', False), ('page', 'Voir la version', True)]) == 'page':
+            QDesktopServices.openUrl(QUrl(release['page']))
+
+    def start_update(self, release):
+        job = UpdateDownload(release['url'], release['digest'])
+        job.signals.progress.connect(self.update_progress, Qt.ConnectionType.QueuedConnection)
+        job.signals.ready.connect(self.update_ready, Qt.ConnectionType.QueuedConnection)
+        self.update_job = job
+        self.export_button.setEnabled(False)
+        self.export_cancel.hide()
+        self.export_checking()
+        self.export_label.setText('Téléchargement de la mise à jour…')
+        QThreadPool.globalInstance().start(job)
+
+    def update_progress(self, done, total):
+        self.export_label.setText(f'Mise à jour : {done//1048576} sur {total//1048576} Mo')
+        self.export_bar.setRange(0, total)
+        self.export_bar.setValue(done)
+
+    def update_ready(self, source, error):
+        self.update_job = None
+        self.export_panel.hide()
+        self.export_cancel.show()
+        self.export_button.setEnabled(True)
+        if error:
+            inform(self, 'Mise à jour impossible', f'{error}\n\nLa version actuelle reste en place.')
+        elif source and ask(self, 'Mise à jour prête', 'Le programme va se fermer et redémarrer sur la nouvelle version.',
+                            [('later', 'Plus tard', False), ('restart', 'Redémarrer', True)]) == 'restart':
+            launch_installer(write_installer(source, Path(sys.executable).parent, os.getpid()))
+            self.close()
+
     def place_export_panel(self):
         self.export_panel.adjustSize()
         self.export_panel.move((self.width()-self.export_panel.width())//2, self.height()-self.export_panel.height()-84)
@@ -1535,6 +1740,7 @@ class Window(QMainWindow):
 
     def resizeEvent(self, event):
         self.place_export_panel()
+        self.place_filter_panel()
         super().resizeEvent(event)
 
     def export_checking(self):
@@ -1579,6 +1785,8 @@ class Window(QMainWindow):
     def closeEvent(self, event):
         self.closing = True
         self.stop_export()
+        if self.update_job:
+            self.update_job.cancelled.set()
         self.detail_timer.stop()
         self.visible_timer.stop()
         self.preload_timer.stop()
@@ -1604,10 +1812,12 @@ def main():
     app.setStyleSheet(STYLE)
     if sys.platform == 'win32':
         # Otherwise the taskbar shows the icon of Python.
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('TriPhoto')
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('VisionBoard')
     app.setWindowIcon(QIcon(str(ASSETS/'triphoto.ico')))
     window = Window(args.folder)
     window.showMaximized()
+    # A few seconds later: opening the project comes first.
+    QTimer.singleShot(4000, window.check_for_update)
     return app.exec()
 
 

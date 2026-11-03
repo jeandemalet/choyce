@@ -21,7 +21,9 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageCms, ImageOps, ImageTk
 
 
-APP_NAME = "TriPhoto"
+# The folder keeps its name: every existing project, export and note refers to it.
+APP_NAME = "Vision Board"
+APP_VERSION = "0.9.0"
 SESSION_DIR_NAME = "TriPhoto_Session"
 SESSION_FILE_NAME = "session.json"
 SESSION_VERSION = 2
@@ -941,7 +943,7 @@ class TriPhotoApp:
         self.session.save()
         originals_after = original_inventory(self.session.root)
         if originals_before != originals_after or originals_after != self.originals_before:
-            messagebox.showerror(APP_NAME, "Contrôle interrompu : l’inventaire des originaux a changé. Aucun original n’a été réécrit par TriPhoto, mais vérifiez le dossier avant de continuer.")
+            messagebox.showerror(APP_NAME, f"Contrôle interrompu : l’inventaire des originaux a changé. Aucun original n’a été réécrit par {APP_NAME}, mais vérifiez le dossier avant de continuer.")
             return
         if errors:
             messagebox.showwarning(APP_NAME, f"Export terminé avec {len(errors)} erreur(s).\n\n" + "\n".join(errors[:8]))
@@ -952,7 +954,7 @@ class TriPhotoApp:
         current = original_inventory(self.session.root)
         before = self.originals_before
         if current == before:
-            messagebox.showinfo(APP_NAME, f"Contrôle terminé : {len(current)} original(aux) inchangé(s).\n\nTriPhoto n’écrit que dans {SESSION_DIR_NAME}.")
+            messagebox.showinfo(APP_NAME, f"Contrôle terminé : {len(current)} original(aux) inchangé(s).\n\n{APP_NAME} n’écrit que dans {SESSION_DIR_NAME}.")
         else:
             removed = sorted(set(before) - set(current))
             added = sorted(set(current) - set(before))

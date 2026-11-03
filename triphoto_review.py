@@ -15,7 +15,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QObject, QPointF, QRectF, QRunnable, QThreadPool, QTimer, QVariantAnimation, QEasingCurve, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup, QColorDialog, QComboBox, QFrame, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup, QStyle, QStyleOptionButton, QColorDialog, QComboBox, QFrame, QHBoxLayout, QLabel,
     QPushButton, QScrollBar, QSlider, QStackedWidget, QWidget)
 from PIL import Image
 from triphoto import PICK_NEUTRAL, PICK_REJECT, PICK_SELECT
@@ -27,7 +27,7 @@ ACTIONS = [('none', 'Ne rien changer'), ('select', 'Retenir'), ('reject', 'Rejet
            ('minus', 'Retirer une étoile'), ('plus', 'Ajouter une étoile'), ('star5', '5 étoiles'), ('star4', '4 étoiles'),
            ('star3', '3 étoiles'), ('star2', '2 étoiles'), ('star1', '1 étoile'), ('star0', '0 étoile')]
 STAGGERED_MODULES = json.loads((ASSETS/'staggered_modules.json').read_text(encoding='utf-8'))
-TOP_CLEARANCE, BOTTOM_CLEARANCE = 66, 76
+TOP_CLEARANCE, BOTTOM_CLEARANCE = 16, 76
 ANALYSIS_FILE = 'colors.json'
 STATE_FILE = 'review_state.json'
 # Name and upper hue of each block of the Couleur mode, in rainbow order from the reds.
@@ -40,12 +40,23 @@ ROW_HEIGHT, WALL_WIDTH = 210, 62
 LARGE_BUDGET = 180*1024*1024
 
 
+def source_aspect(source):
+    width, height = source.size
+    if source.getexif().get(274, 1) in (5, 6, 7, 8):
+        width, height = height, width
+    return width/max(1, height)
+
+
+def read_aspect(path):
+    """Width over height, from the file header alone: far faster than the colors."""
+    with Image.open(path) as source:
+        return source_aspect(source)
+
+
 def analyse_photo(path):
     """Aspect ratio and dominant color, from a heavily reduced decode."""
     with Image.open(path) as source:
-        width, height = source.size
-        if source.getexif().get(274, 1) in (5, 6, 7, 8):
-            width, height = height, width
+        aspect = source_aspect(source)
         try:
             source.draft('RGB', (96, 96))
         except (AttributeError, OSError):
@@ -71,9 +82,9 @@ def analyse_photo(path):
     lightness /= max(1, len(pixels))*255
     if chroma/max(1, len(pixels)) < .05:
         grey = int(lightness*255)
-        return {'aspect': width/max(1, height), 'neutral': True, 'hue': 0, 'light': lightness, 'rgb': [grey]*3}
+        return {'aspect': aspect, 'neutral': True, 'hue': 0, 'light': lightness, 'rgb': [grey]*3}
     best = max(bins, key=lambda slot: slot[0])
-    return {'aspect': width/max(1, height), 'neutral': False, 'hue': best[1]/best[0]*360/256, 'light': lightness,
+    return {'aspect': aspect, 'neutral': False, 'hue': best[1]/best[0]*360/256, 'light': lightness,
             'rgb': [int(best[2]/best[0]), int(best[3]/best[0]), int(best[4]/best[0])]}
 
 
@@ -144,6 +155,7 @@ def color_family(info):
 
 class AnalysisSignals(QObject):
     batch = Signal(dict, int, int, int)
+    aspects = Signal(dict, int)
 
 
 class AnalysisJob(QRunnable):
@@ -154,6 +166,17 @@ class AnalysisJob(QRunnable):
         self.cancelled = threading.Event()
 
     def run(self):
+        # Formats first and all at once: the pages lay out once, and the colors,
+        # however long they take, have nothing left to move.
+        aspects = {}
+        for key, path, _ in self.photos:
+            if self.cancelled.is_set():
+                return
+            try:
+                aspects[key] = read_aspect(path)
+            except Exception:
+                pass
+        self.signals.aspects.emit(aspects, self.token)
         batch = {}
         total = len(self.photos)
         for done, (key, path, signature) in enumerate(self.photos, 1):
@@ -323,7 +346,7 @@ class Surface(QWidget):
         self.setMouseTracking(True)
         self.request_timer = QTimer(self)
         self.request_timer.setSingleShot(True)
-        self.request_timer.timeout.connect(self.request_images)
+        self.request_timer.timeout.connect(self.requests_due)
 
     def rebuild(self):
         self.update()
@@ -333,6 +356,11 @@ class Surface(QWidget):
 
     def request_images(self):
         pass
+
+    def requests_due(self):
+        # A hidden view still gets resized and repainted: it must leave the loading of the shown page alone.
+        if self.window_.review_active and self.review.view() is self:
+            self.request_images()
 
     def navigate(self, delta):
         pass
@@ -1428,6 +1456,36 @@ class SwipeView(Surface):
         self.settle()
 
 
+class NoteButton(QPushButton):
+    """A note and, very small underneath, how many photos it concerns."""
+
+    def __init__(self, label):
+        super().__init__(label, objectName='seg', checkable=True)
+        self.count = ''
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setFixedHeight(34)
+
+    def set_count(self, value):
+        if value != self.count:
+            self.count = value
+            self.update()
+
+    def paintEvent(self, event):
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        option.text = ''
+        painter = QPainter(self)
+        self.style().drawControl(QStyle.ControlElement.CE_PushButton, option, painter, self)
+        painter.setPen(QColor(TEXT if self.isChecked() or self.underMouse() else MUTED))
+        area = QRectF(self.rect())
+        painter.drawText(area.adjusted(0, 3, 0, -13), Qt.AlignmentFlag.AlignCenter, self.text())
+        font = painter.font()
+        font.setPixelSize(9)
+        painter.setFont(font)
+        painter.setPen(QColor(MUTED))
+        painter.drawText(area.adjusted(0, 20, 0, -2), Qt.AlignmentFlag.AlignCenter, self.count)
+
+
 class NoteFilter(QFrame):
     """Quick choice of the notes shown, driving the same filter as the Tri page."""
 
@@ -1440,15 +1498,13 @@ class NoteFilter(QFrame):
         self.group = QButtonGroup(self)
         self.buttons = {}
         for key, label in [('all', 'Toutes'), (0, '0 ★'), (1, '1 ★'), (2, '2 ★'), (3, '3 ★'), (4, '4 ★'), (5, '5 ★')]:
-            button = QPushButton(label, objectName='seg', checkable=True)
-            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button = NoteButton(label)
             button.clicked.connect(self.apply)
             self.group.addButton(button)
             self.buttons[key] = button
             row.addWidget(button)
-        self.and_more = QPushButton('et +', objectName='seg', checkable=True)
+        self.and_more = NoteButton('et +')
         self.and_more.setToolTip('Inclure aussi les notes supérieures')
-        self.and_more.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.and_more.clicked.connect(self.apply)
         row.addWidget(self.and_more)
         self.sync()
@@ -1469,6 +1525,12 @@ class NoteFilter(QFrame):
             self.and_more.setChecked(True)
         elif data in (1, 2, 3, 4):
             self.and_more.setChecked(False)
+        counts = self.window.note_counts()
+        for key, button in self.buttons.items():
+            button.set_count(str(sum(counts.values()) if key == 'all' else counts[key]) if counts else '')
+        # "et +" counts from the note chosen, when it applies to it.
+        chosen = int(data[2:]) if wider else data
+        self.and_more.set_count(str(sum(n for note, n in counts.items() if note >= chosen)) if counts and chosen in (1, 2, 3, 4) else '')
 
 
 class MarkerFilter(QComboBox):
@@ -1502,6 +1564,7 @@ class ReviewPage(QWidget):
         self.mono = False
         self.mono_cache = {}
         self.info = {}
+        self.aspects = {}
         self.analysis = None
         self.analysis_token = 0
         self.analysis_pool = QThreadPool(self)
@@ -1530,37 +1593,13 @@ class ReviewPage(QWidget):
         self.sync_toolbar()
 
     def build_toolbar(self):
-        """Top bar: what applies to every mode. Options of a mode sit at the bottom."""
-        self.pill = QWidget(self)
-        capsules = QHBoxLayout(self.pill)
-        capsules.setContentsMargins(0, 0, 0, 0)
-        capsules.setSpacing(8)
-        modes = QFrame(objectName='pill')
-        capsules.addWidget(modes)
-        row = QHBoxLayout(modes)
-        row.setContentsMargins(8, 6, 8, 6)
+        """What the other views share, in the panel of the header. Options of a view sit at the bottom."""
+        self.note_filter = self.window.note_filter
+        self.marker_filter = self.window.marker_filter
+        self.tools = QWidget()
+        row = QHBoxLayout(self.tools)
+        row.setContentsMargins(10, 0, 0, 0)
         row.setSpacing(4)
-        self.mode_group = QButtonGroup(self)
-        self.mode_buttons = {}
-        for key, label in MODES:
-            button = QPushButton(label, objectName='seg', checkable=True)
-            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            button.setChecked(key == self.mode)
-            button.clicked.connect(lambda checked=False, value=key: self.set_mode(value))
-            self.mode_group.addButton(button)
-            self.mode_buttons[key] = button
-            row.addWidget(button)
-        filters = QFrame(objectName='pill')
-        capsules.addWidget(filters)
-        row = QHBoxLayout(filters)
-        row.setContentsMargins(8, 6, 12, 6)
-        row.setSpacing(4)
-        self.note_filter = NoteFilter(self.window)
-        row.addWidget(self.note_filter)
-        row.addSpacing(6)
-        self.marker_filter = MarkerFilter(self.window)
-        row.addWidget(self.marker_filter)
-        row.addSpacing(10)
         self.mono_button = QPushButton('N&&B', objectName='seg', checkable=True)
         self.mono_button.setToolTip('Noir et blanc, pour juger les contrastes')
         self.mono_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -1720,7 +1759,6 @@ class ReviewPage(QWidget):
     def sync_toolbar(self):
         self.picker.sync()
         self.sync_zoom()
-        self.pill.adjustSize()
         self.place_overlays()
 
     def background_menu(self):
@@ -1732,7 +1770,6 @@ class ReviewPage(QWidget):
         self.place_overlays()
 
     def place_overlays(self):
-        self.pill.move(max(8, (self.width()-self.pill.width())//2), 12)
         options = getattr(self, 'options', {})
         for mode, group in options.items():
             for pill in group:
@@ -1776,7 +1813,7 @@ class ReviewPage(QWidget):
     def set_mode(self, mode):
         self.mode = mode
         self.settings.setValue('review_mode', mode)
-        self.mode_buttons[mode].setChecked(True)
+        self.window.sync_view_buttons()
         self.stack.setCurrentWidget(self.views[mode])
         self.view().active = False
         self.sync_toolbar()
@@ -2005,11 +2042,8 @@ class ReviewPage(QWidget):
 
     def aspect(self, photo):
         info = self.info.get(photo.relative_path)
-        if info:
-            return max(.3, min(4., info['aspect']))
-        # Not analysed yet: a preview already loaded knows the format.
-        image = self.window.best_image(photo)
-        return max(.3, min(4., image.width()/image.height())) if image is not None else 1.5
+        aspect = info['aspect'] if info else self.aspects.get(photo.relative_path, 1.5)
+        return max(.3, min(4., aspect))
 
     def start_analysis(self):
         self.stop_analysis()
@@ -2018,6 +2052,7 @@ class ReviewPage(QWidget):
             self.info = json.loads(self.analysis_path().read_text(encoding='utf-8'))
         except (OSError, ValueError):
             self.info = {}
+        self.aspects = {}
         self.analysis_token += 1
         self.analysis_started = False
         token = self.analysis_token
@@ -2038,6 +2073,7 @@ class ReviewPage(QWidget):
                 return
             self.analysis = AnalysisJob(todo, token)
             self.analysis.signals.batch.connect(self.on_batch, Qt.ConnectionType.QueuedConnection)
+            self.analysis.signals.aspects.connect(self.on_aspects, Qt.ConnectionType.QueuedConnection)
             self.analysis_pool.start(self.analysis, -20)
         QTimer.singleShot(0, launch)
 
@@ -2047,6 +2083,14 @@ class ReviewPage(QWidget):
             self.analysis.cancelled.set()
             self.analysis = None
         self.progress.hide()
+
+    def on_aspects(self, aspects, token):
+        if token != self.analysis_token or self.window.session is None:
+            return
+        self.aspects = aspects
+        if self.window.review_active and self.mode in ('wall', 'color'):
+            self.view().relayout()
+        self.update_view()
 
     def on_batch(self, batch, done, total, token):
         if token != self.analysis_token or self.window.session is None:
@@ -2062,13 +2106,14 @@ class ReviewPage(QWidget):
             self.place_overlays()
             if done % 160 == 0:
                 self.save_analysis()
-        if not self.relayout_timer.isActive():
+        self.update_view()
+        # Only Couleur depends on the colors, and it must not reorder under a reader.
+        color = self.views['color']
+        if self.window.review_active and self.mode == 'color' and (done >= total or color.bar.value() == 0) and not self.relayout_timer.isActive():
             self.relayout_timer.start(700)
 
     def apply_analysis(self):
-        if self.window.review_active and self.mode == 'wall':
-            self.view().relayout()
-        elif self.window.review_active and self.mode in ('color', 'toile'):
+        if self.window.review_active and self.mode == 'color':
             self.view().rebuild()
 
     def save_analysis(self):
@@ -2080,6 +2125,7 @@ class ReviewPage(QWidget):
     def reset(self):
         self.stop_analysis()
         self.info = {}
+        self.aspects = {}
         self.mono_cache.clear()
         toile, swipe = self.views['toile'], self.views['swipe']
         toile.positions, toile.stack, toile.dealt, toile.available = {}, [], [], set()

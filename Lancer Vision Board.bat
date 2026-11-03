@@ -23,7 +23,7 @@ if %errorlevel%==0 (
 )
 if %errorlevel% neq 0 (
     echo.
-    echo TriPhoto n'a pas pu demarrer.
+    echo Vision Board n'a pas pu demarrer.
     echo Python 3, Pillow et PySide6 sont necessaires.
     pause
 )

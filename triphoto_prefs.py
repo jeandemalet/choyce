@@ -36,13 +36,14 @@ ACTIONS = [
     ('zoom_in', 'Zoom avant', ['+']),
     ('zoom_out', 'Zoom arrière', ['-']),
     ('background', 'Changer la couleur du fond', ['B']),
-    ('review', 'Basculer entre Tri et Révision', ['G']),
-    ('shuffle', 'Révision : mélanger', ['R']),
-    ('mono', 'Révision : noir et blanc', ['N']),
-    ('mode_wall', 'Révision : Grille', ['Ctrl+1']),
-    ('mode_toile', 'Révision : Toile', ['Ctrl+2']),
-    ('mode_color', 'Révision : Couleur', ['Ctrl+3']),
-    ('mode_swipe', 'Révision : Swipe', ['Ctrl+4']),
+    ('review', 'Basculer entre Classique et la dernière vue', ['G']),
+    ('shuffle', 'Vues : mélanger', ['R']),
+    ('mono', 'Vues : noir et blanc', ['N']),
+    ('mode_classic', 'Vue Classique', ['Ctrl+0']),
+    ('mode_wall', 'Vue Grille', ['Ctrl+1']),
+    ('mode_toile', 'Vue Toile', ['Ctrl+2']),
+    ('mode_color', 'Vue Couleur', ['Ctrl+3']),
+    ('mode_swipe', 'Vue Swipe', ['Ctrl+4']),
     ('refresh', 'Actualiser le dossier', ['F5']),
     ('open', 'Ouvrir un projet', ['Ctrl+O']),
     ('close', 'Fermer le projet', ['Ctrl+W']),
@@ -178,7 +179,7 @@ def summary(photos):
 
 
 def find_sessions(folder, max_depth=6):
-    """Earlier TriPhoto projects below a folder, from their session files."""
+    """Earlier projects below a folder, from their session files."""
     found = []
     base = len(Path(folder).parts)
     for current, directories, _ in os.walk(folder):
