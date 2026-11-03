@@ -1681,6 +1681,7 @@ class ChoiceFilter(QFrame):
         self.project.currentIndexChanged.connect(lambda *_: self.window.filters_changed())
         row.addSpacing(6)
         row.addWidget(self.project)
+        row.addStretch(1)
         self.project.hide()
 
     def toggle(self, row, text, tip):
@@ -1712,7 +1713,7 @@ class ChoiceFilter(QFrame):
         self.project.blockSignals(False)
 
     def set_buckets(self):
-        """Inside a selection, the filter on its buckets takes the place of these choices."""
+        """Inside a selection, the filter on its buckets takes the place of the choice of a project."""
         self.project.hide()
         self.portfolio.hide()
         self.window.bucket_rule.rebuild()

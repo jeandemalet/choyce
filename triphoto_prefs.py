@@ -10,7 +10,7 @@ from PySide6.QtCore import Qt, QObject, QRunnable, Signal
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (QButtonGroup, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QHeaderView, QKeySequenceEdit,
     QLabel, QLineEdit, QPushButton, QRadioButton, QTableWidget, QVBoxLayout, QWidget)
-from triphoto import SESSION_DIR_NAME, SESSION_FILE_NAME
+from triphoto import SESSION_DIR_NAME, SESSION_FILE_NAME, SUPPORTED_EXTENSIONS
 
 MAX_RECENTS = 30
 SCAN_SKIPPED = {'$recycle.bin', 'system volume information', 'windows', 'program files', 'program files (x86)',
@@ -173,6 +173,68 @@ class Recents:
 
     def remove(self, path):
         self._store([e for e in self.entries() if path_key(e['path']) != path_key(path)])
+
+    def relocate(self, old, new):
+        """The same project at its new place, keeping its figures and its rank."""
+        entries = [e for e in self.entries() if path_key(e['path']) != path_key(new)]
+        for entry in entries:
+            if path_key(entry['path']) == path_key(old):
+                entry['path'] = str(new)
+        self._store(entries)
+
+
+def moved_path(path, old, new):
+    """Where a path below a folder that moved is now, or None if it is not below it."""
+    path, old = os.path.abspath(str(path)), os.path.abspath(str(old))
+    if os.path.normcase(path) == os.path.normcase(old):
+        return str(new)
+    if os.path.normcase(path).startswith(os.path.normcase(old)+os.sep):
+        return str(Path(new)/path[len(old)+1:])
+    return None
+
+
+def photos_below(folder):
+    """The photos of a folder as {lowercase name: [paths]}, without what Vision Board keeps there."""
+    found = {}
+    for current, directories, files in os.walk(folder):
+        directories[:] = [d for d in directories if d != SESSION_DIR_NAME and d.lower() not in SCAN_SKIPPED and not d.startswith('.')]
+        for name in files:
+            if os.path.splitext(name)[1].lower() in SUPPORTED_EXTENSIONS:
+                found.setdefault(name.lower(), []).append(os.path.join(current, name))
+    return found
+
+
+def locate_project(old, chosen):
+    """What a folder chosen by hand holds of a lost project, as (folder, how).
+
+    The chosen folder may be the project itself, hold it further down, or only hold photos
+    without the notes of a project. Several projects inside need a closer choice.
+    """
+    chosen = Path(chosen)
+    if (chosen/SESSION_DIR_NAME/SESSION_FILE_NAME).is_file():
+        return chosen, 'project'
+    found = find_sessions(chosen)
+    same_name = [entry for entry in found if Path(entry['path']).name.lower() == Path(old).name.lower()]
+    candidates = same_name or found
+    if len(candidates) == 1:
+        return Path(candidates[0]['path']), 'inside'
+    if candidates:
+        return None, 'several'
+    return (chosen, 'photos') if photos_below(chosen) else (None, 'empty')
+
+
+def locate_photos(missing, chosen):
+    """Each lost path found by its name below a folder, as {old: new}. Among several, the one in the most similar folders."""
+    below = photos_below(chosen)
+    def closeness(old, candidate):
+        same = 0
+        for a, b in zip(reversed(Path(old).parent.parts), reversed(Path(candidate).parent.parts)):
+            if a.lower() != b.lower():
+                break
+            same += 1
+        return same
+    return {old: max(below[Path(old).name.lower()], key=lambda candidate: closeness(old, candidate))
+            for old in missing if Path(old).name.lower() in below}
 
 
 def summary(photos):

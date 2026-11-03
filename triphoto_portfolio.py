@@ -262,6 +262,19 @@ class Portfolio(QObject):
         projects = {self.project_of(key) for key in self.items}
         return len(self.items), len(projects)
 
+    def repoint(self, moves):
+        """New places of originals, as a function from an old source to a new one or None."""
+        changed = 0
+        for item in self.items.values():
+            new = moves(item.get('source', ''))
+            if new:
+                item['source'] = new
+                changed += 1
+        if changed:
+            self.sources = {source_key(item['source']): key for key, item in self.items.items() if item.get('source')}
+            self.save()
+        return changed
+
     def file_of(self, relative):
         """Where a photo of the portfolio is read from. Touches no disk: one may be asleep or unplugged."""
         item = self.items.get(relative, {})

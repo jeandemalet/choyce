@@ -25,7 +25,7 @@ from triphoto import (export_folder_name, APP_NAME, APP_VERSION, PhotoSession, s
     export_original_copy, EXPORT_DIR_NAME, PICK_NEUTRAL, PICK_REJECT, PICK_SELECT, SESSION_DIR_NAME)
 from triphoto_custom import BucketFilter, BucketStrip, CustomPage, PopupMenu, SelectionSession
 from triphoto_portfolio import MANIFEST_FILE, Portfolio, PortfolioSession, RelocateJob, UNSORTED
-from triphoto_prefs import (ALIASES, PreferencesDialog, Recents, ScanJob, age_label, ask, inform, path_key, shortcut_map)
+from triphoto_prefs import (ALIASES, PreferencesDialog, Recents, ScanJob, age_label, ask, inform, locate_photos, locate_project, moved_path, path_key, shortcut_map)
 from triphoto_review import MODES, BackgroundPicker, ChoiceFilter, MarkerFilter, NoteFilter, RatingBar, ReviewPage
 from triphoto_update import UpdateCheck, UpdateDownload, can_install, launch_installer, write_installer
 from triphoto_theme import (ACCENT, ASSETS, BACKGROUNDS, FAINT, INK, RAISED, REJECT, SELECT, STYLE, TEXT,
@@ -567,6 +567,7 @@ class RecentCard(QFrame):
 
     def contextMenuEvent(self, event):
         menu = QMenu(self)
+        menu.addAction('Retrouver le dossier…', lambda: self.home.window.repair_recent(self.entry['path'], True))
         menu.addAction('Retirer de la liste', lambda: self.home.window.forget_recent(self.entry['path']))
         menu.exec(event.globalPos())
 
@@ -1106,7 +1107,6 @@ class Window(QMainWindow):
         self.filter_chip = HoverButton('Filtre  ▾', objectName='ghost')
         self.filter_chip.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.filter_chip.setToolTip('Notes, marqueurs et réglages de la vue')
-        self.filter_chip.entered.connect(self.show_filter_panel)
         self.filter_chip.clicked.connect(self.show_filter_panel)
         right.addSpacing(6)
         self.export_button = self.button(right, 'Exporter…', self.export, 'primary')
@@ -1161,29 +1161,50 @@ class Window(QMainWindow):
         self.bucket_ghost = QLabel(self)
         self.bucket_ghost.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.bucket_ghost.hide()
-        # Unfolds under the header on hover, over the photos, so as to take no room from them.
-        self.filter_panel = QFrame(self, objectName='pill')
+        # Large and in the center of the window, every filter in view; a click beside it closes it.
+        self.filter_scrim = QPushButton(self, objectName='filterScrim', flat=True)
+        self.filter_scrim.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.filter_scrim.setStyleSheet('QPushButton#filterScrim { background: rgba(0, 0, 0, 120); border: none; border-radius: 0; }')
+        self.filter_scrim.clicked.connect(lambda *_: self.hide_filter_panel())
+        self.filter_scrim.hide()
+        self.filter_panel = QFrame(self, objectName='dialog')
         filter_lines = QVBoxLayout(self.filter_panel)
-        filter_lines.setContentsMargins(8, 6, 12, 6)
-        filter_lines.setSpacing(2)
-        filter_row = QHBoxLayout()
-        filter_lines.addLayout(filter_row)
+        filter_lines.setContentsMargins(26, 22, 26, 20)
+        filter_lines.setSpacing(6)
+        filter_top = QHBoxLayout()
+        filter_top.addWidget(QLabel('Filtres', objectName='dialogTitle'))
+        filter_top.addSpacing(10)
+        self.filter_count = QLabel(objectName='muted')
+        filter_top.addWidget(self.filter_count)
+        filter_top.addStretch(1)
+        self.button(filter_top, 'Tout effacer', self.clear_filters, 'ghost')
+        self.button(filter_top, 'Fermer', self.hide_filter_panel, 'primary')
+        filter_lines.addLayout(filter_top)
+        def section(title, *widgets):
+            holder = QWidget()
+            lines = QVBoxLayout(holder)
+            lines.setContentsMargins(0, 12, 0, 0)
+            lines.setSpacing(6)
+            lines.addWidget(QLabel(title, objectName='section'))
+            for widget in widgets:
+                lines.addWidget(widget)
+            filter_lines.addWidget(holder)
+            return holder
         self.bucket_rule = BucketFilter(self)
-        filter_lines.addWidget(self.bucket_rule)
-        filter_row.setSpacing(4)
-        filter_row.addWidget(self.note_filter)
-        filter_row.addSpacing(6)
-        filter_row.addWidget(self.marker_filter)
-        filter_row.addSpacing(6)
-        filter_row.addWidget(self.choices)
-        filter_row.addWidget(self.review.tools)
+        self.bucket_area = QScrollArea()
+        self.bucket_area.setWidgetResizable(True)
+        self.bucket_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.bucket_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.bucket_area.setStyleSheet('QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }')
+        self.bucket_area.setWidget(self.bucket_rule)
+        self.bucket_section = section('BUCKETS', self.bucket_area)
+        section('NOTE', self.note_filter)
+        section('MARQUEUR', self.marker_filter)
+        section('SEULEMENT', self.choices)
+        self.tools_section = section('AFFICHAGE', self.review.tools)
+        self.review.tools.layout().setContentsMargins(0, 0, 0, 0)
+        self.filter_panel.setMinimumWidth(620)
         self.filter_panel.hide()
-        # Where the mouse is, asked regularly: the enter and leave events of a panel full
-        # of buttons, lists and dialogs are not a reliable account of it.
-        self.filter_timer = QTimer(self)
-        self.filter_timer.setInterval(120)
-        self.filter_timer.timeout.connect(self.check_filter_panel)
-        self.filter_outside = 0
         layout.addWidget(self.pages, 1)
         layout.addWidget(self.bucket_strip)
         # How many large previews stay in memory: more when a page shows more of them at once.
@@ -1312,33 +1333,47 @@ class Window(QMainWindow):
         self.toast_timer.start(duration)
 
     def place_filter_panel(self):
-        self.filter_panel.adjustSize()
-        center = self.filter_chip.mapTo(self, self.filter_chip.rect().center()).x()
-        x = max(8, min(self.width()-self.filter_panel.width()-8, center-self.filter_panel.width()//2))
-        self.filter_panel.move(x, self.header.height()+6)
+        self.filter_scrim.setGeometry(self.rect())
+        # The buckets at full size, and scrolling beyond what the window can show.
+        panel_layout = self.filter_panel.layout()
+        self.bucket_rule.layout().invalidate()
+        self.bucket_rule.layout().activate()
+        wanted = self.bucket_rule.sizeHint()
+        self.bucket_area.setMinimumWidth(wanted.width()+14)
+        self.bucket_area.setFixedHeight(0)
+        panel_layout.invalidate()
+        others = panel_layout.sizeHint().height()
+        self.bucket_area.setFixedHeight(max(80, min(wanted.height()+4, self.height()-16-others)))
+        panel_layout.invalidate()
+        panel_layout.activate()
+        self.filter_panel.resize(panel_layout.sizeHint())
+        self.filter_panel.move((self.width()-self.filter_panel.width())//2, max(8, (self.height()-self.filter_panel.height())//2))
+        self.filter_scrim.raise_()
         self.filter_panel.raise_()
 
     def show_filter_panel(self, *args):
-        self.filter_outside = 0
-        self.place_filter_panel()
+        self.bucket_rule.rebuild()
+        self.update_filter_chip()
+        self.filter_scrim.show()
         self.filter_panel.show()
-        self.filter_timer.start()
+        self.place_filter_panel()
+        # Once its new buttons have taken their style, and so their true size.
+        QTimer.singleShot(0, self.place_filter_panel)
 
-    def over_filter(self, position=None):
-        """Over the button or the panel, or in the small gap that separates them."""
-        position = self.mapFromGlobal(QCursor.pos()) if position is None else position
-        chip = self.filter_chip.rect().translated(self.filter_chip.mapTo(self, self.filter_chip.rect().topLeft()))
-        return chip.adjusted(-6, -6, 6, 10).contains(position) or self.filter_panel.geometry().adjusted(-10, -10, 10, 10).contains(position)
+    def hide_filter_panel(self):
+        self.filter_panel.hide()
+        self.filter_scrim.hide()
 
-    def check_filter_panel(self):
-        # A list or a color dialog opened from the panel still belongs to it.
-        if self.over_filter() or self.marker_filter.view().isVisible() or self.choices.project.view().isVisible() or QApplication.activeModalWidget() is not None:
-            self.filter_outside = 0
-        else:
-            self.filter_outside += 1
-            if self.filter_outside >= 3:
-                self.filter_timer.stop()
-                self.filter_panel.hide()
+    def clear_filters(self):
+        for combo in (self.stars, self.flags):
+            combo.blockSignals(True)
+            combo.setCurrentIndex(0)
+            combo.blockSignals(False)
+        self.choices.reset()
+        if self.selection:
+            self.selection.set_rule(include=[], exclude=[], none=False, all=False)
+            self.bucket_rule.rebuild()
+        self.filters_changed()
 
     def update_filter_chip(self):
         parts = [combo.currentText() for combo in (self.stars, self.flags) if combo.currentIndex() > 0]+self.choices.active_labels()
@@ -1346,6 +1381,8 @@ class Window(QMainWindow):
         text = self.filter_chip.fontMetrics().elidedText(' · '.join(parts), Qt.TextElideMode.ElideRight, 100)
         self.filter_chip.setText(f'Filtre : {text}  ▾' if parts else 'Filtre  ▾')
         self.filter_chip.setToolTip(' · '.join(parts) or 'Notes, marqueurs et réglages de la vue')
+        count = len(self.photos)
+        self.filter_count.setText(f"{count} photo{'s' if count > 1 else ''} affichée{'s' if count > 1 else ''}")
 
     def fit(self):
         if self.custom_active:
@@ -1509,6 +1546,8 @@ class Window(QMainWindow):
             return
         before = len(self.selection.undo_stack)
         adding = key not in self.selection.buckets_of(photos[0].relative_path)
+        count = f'{len(photos)} photos ' if len(photos) > 1 else ''
+        self.toast(f"{count}{'Ajoutée' if adding and not count else 'ajoutées' if adding else 'Retirée' if not count else 'retirées'} {'à' if adding else 'de'} {self.selection.bucket(key)['title']}", 1000)
         for photo in photos:
             if adding:
                 self.selection.add(photo.relative_path, key)
@@ -1565,7 +1604,9 @@ class Window(QMainWindow):
             self.review.set_mode(mode)
 
     def leave_review(self):
-        if self.custom_active:
+        if self.filter_panel.isVisible():
+            self.hide_filter_panel()
+        elif self.custom_active:
             self.custom.back()
         elif self.review_active:
             self.set_review(False)
@@ -1706,6 +1747,8 @@ class Window(QMainWindow):
         recent_menu.setToolTipsVisible(True)
         recent_menu.setEnabled(bool(entries))
         menu.addAction("Retrouver d'anciens projets…", self.find_projects)
+        absent = len(getattr(self.session, 'absent', ()))
+        menu.addAction(f'Retrouver les photos manquantes ({absent})…' if absent else 'Retrouver les photos manquantes…', self.repair_photos).setEnabled(bool(absent))
         menu.addSeparator()
         menu.addAction('Sélections custom', self.show_custom_home)
         menu.addAction('Portfolio', self.open_portfolio)
@@ -1716,9 +1759,76 @@ class Window(QMainWindow):
 
     def open_recent(self, path):
         if not Path(path).is_dir():
-            inform(self, 'Projet introuvable', f'Ce dossier est introuvable pour le moment :\n{path}\n\nSi le disque est débranché, rebranchez-le puis réessayez.')
+            if ask(self, 'Projet introuvable', f'Ce dossier est introuvable :\n{path}\n\nSi le disque est débranché, rebranchez-le puis réessayez. S\'il a été déplacé ou renommé, indiquez où il se trouve maintenant.',
+                   [('close', 'Fermer', False), ('find', 'Retrouver le dossier…', True)]) == 'find':
+                self.repair_recent(path)
             return
         self.set_folder(Path(path))
+
+    def ask_folder(self, title):
+        return QFileDialog.getExistingDirectory(self, title)
+
+    def repair_recent(self, path, opening=True):
+        """Ask where a lost project is now, look there, and bring along everything that refers to it."""
+        chosen = self.ask_folder(f'Où se trouve maintenant « {Path(path).name} » ?')
+        if not chosen:
+            return False
+        self.activity.announce('Recherche du projet…')
+        found, how = locate_project(path, chosen)
+        if how == 'several':
+            inform(self, 'Plusieurs projets', 'Ce dossier contient plusieurs projets. Choisissez directement le dossier du bon projet.')
+            return False
+        if how == 'empty':
+            inform(self, 'Aucune photo ici', f'Ce dossier ne contient ni projet ni photo :\n{chosen}')
+            return False
+        if how == 'photos' and ask(self, 'Pas de notes ici', f'Ce dossier contient des photos, mais pas le dossier {SESSION_DIR_NAME} qui garde les notes du projet :\n{found}\n\nLes notes de ce projet restent introuvables, mais le portfolio et les sélections pointeront vers ces photos.',
+                                   [('cancel', 'Annuler', False), ('use', 'Utiliser ce dossier', True)]) != 'use':
+            return False
+        moved = self.follow_move(path, found)
+        self.recents.relocate(path, found)
+        self.toast(f"Projet retrouvé : {found}"+(f" · {moved} lien{'s' if moved > 1 else ''} réparé{'s' if moved > 1 else ''}" if moved else ''), 4000)
+        if opening:
+            self.set_folder(Path(found))
+        else:
+            self.home.refresh()
+        return True
+
+    def follow_move(self, old, new):
+        """What the portfolio and the selections know of a folder that moved."""
+        return self.repoint(lambda path: moved_path(path, old, new))
+
+    def repoint(self, moves):
+        changed = self.portfolio.repoint(moves)
+        for session in self.custom.store.sessions():
+            changed += session.repoint(moves)
+        return changed
+
+    def repair_photos(self):
+        """Photos of the portfolio or of a selection whose file is lost: looked for by name in a folder chosen by hand."""
+        absent = getattr(self.session, 'absent', set())
+        if not absent:
+            return
+        items = self.portfolio.items
+        missing = [items[key]['source'] for key in absent if key in items] if self.viewing_portfolio() else list(absent)
+        chosen = self.ask_folder('Dossier où chercher les photos manquantes')
+        if not chosen:
+            return
+        self.activity.announce('Recherche des photos…')
+        found = locate_photos(missing, chosen)
+        selection = self.selection
+        if found:
+            self.custom.save()
+            self.portfolio.repoint(found.get)
+            if selection:
+                selection.repoint(found.get)
+            for session in self.custom.store.sessions():
+                if not selection or session.path != selection.path:
+                    session.repoint(found.get)
+            if selection:
+                self.selection_changed()
+            else:
+                self.refresh()
+        self.toast(f'{len(found)} photo{"s" if len(found) > 1 else ""} retrouvée{"s" if len(found) > 1 else ""} sur {len(missing)}.', 4000)
 
     def forget_recent(self, path):
         self.recents.remove(path)
@@ -1767,10 +1877,10 @@ class Window(QMainWindow):
         with_filter = in_project or bool(self.selection and has_photos)
         self.filter_chip.setVisible(with_filter)
         if not with_filter:
-            self.filter_timer.stop()
-            self.filter_panel.hide()
+            self.hide_filter_panel()
         # Black and white, background and zoom of the panel are those of the other views.
-        self.review.tools.setVisible(self.review_active)
+        self.tools_section.setVisible(self.review_active)
+        self.bucket_section.setVisible(bool(self.selection))
         if self.filter_panel.isVisible():
             self.place_filter_panel()
         name = self.selection.name if self.selection else project_label(self.project_path) if self.project_path else ''

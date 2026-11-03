@@ -1009,36 +1009,30 @@ def test_views_and_filter_panel(base):
     assert window.view_buttons['wall'].isChecked()
     # The same filter everywhere.
     assert review.note_filter is window.note_filter and review.marker_filter is window.marker_filter
-    # The panel unfolds on hover, under the header, and folds back once the mouse has left.
+    # A click on Filtre opens the panel in the center, and it stays until closed.
     assert not window.filter_panel.isVisible()
-    window.filter_chip.entered.emit()
-    assert window.filter_panel.isVisible() and window.filter_panel.y() >= window.header.height()
-    assert review.tools.isVisible()
-    # Over the panel, its buttons, its list and the gap under the button, it counts as hovered.
+    window.filter_chip.click()
     panel = window.filter_panel
-    button = window.note_filter.buttons[5]
-    chip = window.filter_chip
-    assert window.over_filter(button.mapTo(window, button.rect().center()))
-    assert window.over_filter(window.marker_filter.mapTo(window, window.marker_filter.rect().center()))
-    assert window.over_filter(review.zoom_label.mapTo(window, review.zoom_label.rect().center()))
-    assert window.over_filter(panel.geometry().topLeft()+QPointF(panel.width()/2, -4).toPoint())
-    assert window.over_filter(chip.mapTo(window, chip.rect().center()))
-    assert not window.over_filter(QPointF(5, window.height()-5).toPoint())
-    # It stays as long as the mouse is there, however long, and goes once it has left.
-    window.over_filter = lambda position=None: True
-    wait(800)
-    assert window.filter_panel.isVisible()
-    window.over_filter = lambda position=None: False
-    wait(150)
-    assert window.filter_panel.isVisible(), 'a short moment outside must not close it'
-    wait(500)
-    assert not window.filter_panel.isVisible()
-    del window.over_filter
+    assert panel.isVisible() and window.filter_scrim.isVisible() and review.tools.isVisible()
+    assert abs(panel.geometry().center().x()-window.rect().center().x()) < 3
+    assert panel.geometry().top() >= 0 and panel.geometry().bottom() <= window.height()
+    wait(300)
+    assert panel.isVisible()
+    window.note_filter.buttons[5].click()
+    assert panel.isVisible() and 'affichée' in window.filter_count.text()
+    window.clear_filters()
+    assert window.stars.currentIndex() == 0
+    # A click beside it, or Échap, closes it.
+    window.filter_scrim.click()
+    assert not panel.isVisible() and not window.filter_scrim.isVisible()
+    window.filter_chip.click()
+    window.leave_review()
+    assert not panel.isVisible() and window.review_active
     # In Classique, no tools of the other views.
     window.set_view('classic')
     window.show_filter_panel()
-    window.filter_timer.stop()
     assert window.filter_panel.isVisible() and not review.tools.isVisible()
+    window.hide_filter_panel()
     window.note_filter.buttons[0].click()
     assert '0 étoile' in window.filter_chip.toolTip()
     window.note_filter.buttons['all'].click()
@@ -2313,39 +2307,46 @@ def test_selection_views(base):
     # The panel of the filter: one click requires a bucket, a second one refuses it, a third forgets it.
     rule = window.bucket_rule
     assert rule.isVisibleTo(window.filter_panel)
-    rule.chips['a'].click()
+    def state(key, value):
+        rule.buttons[key][value].click()
+        wait(10)
+    assert rule.buttons['a'][''].isChecked()
+    state('a', 'include')
+    assert rule.buttons['a']['include'].isChecked() and not rule.buttons['a'][''].isChecked()
     assert {str(p.path) for p in window.photos} == {paths[0], paths[1], paths[3]} and 'AG' in window.filter_chip.toolTip()
-    rule.chips['b'].click()
+    state('b', 'include')
     assert {str(p.path) for p in window.photos} == {paths[0], paths[1], paths[2], paths[3]}
-    assert rule.any_button.isVisibleTo(rule) and 'AG ou WPJA' in window.filter_chip.toolTip()
+    assert rule.any_button and 'AG ou WPJA' in window.filter_chip.toolTip()
     rule.all_button.click()
+    wait(10)
     assert {str(p.path) for p in window.photos} == {paths[3]} and 'AG et WPJA' in window.filter_chip.toolTip()
     rule.any_button.click()
-    rule.chips['b'].click()
+    wait(10)
+    state('b', 'exclude')
     assert {str(p.path) for p in window.photos} == {paths[0], paths[1]} and 'sans WPJA' in window.filter_chip.toolTip()
     rule.none_button.click()
+    wait(10)
     assert {str(p.path) for p in window.photos} == {paths[4], paths[5]}
     rule.none_button.click()
+    wait(10)
     assert len(window.photos) == 6 and not sorting.rule()['include']
     window.grab()
     # The Buckets view shows what the filter lets through, and the filter is at hand there.
-    rule.chips['b'].click()
+    state('b', 'include')
     window.set_view('buckets')
     assert custom.position()[1] == 2 and window.filter_chip.isVisible()
     window.set_view('wall')
-    rule.chips['b'].click()
-    rule.chips['b'].click()
+    state('b', '')
     assert len(window.photos) == 6
     # Seen through a single bucket, a drop moves the photo out of it and leaves its other buckets.
-    rule.chips['a'].click()
+    state('a', 'include')
     both = next(p for p in window.photos if str(p.path) == paths[3])
     window.move_to_bucket(both, 'b')
     assert sorting.buckets_of(paths[3]) == ['b'] and both not in window.photos
     window.undo()
     assert sorting.buckets_of(paths[3]) == ['a', 'b'] and any(p is both for p in window.photos)
     # Seen through all of them, it replaces them; the narrow part of a zone keeps it where it is.
-    rule.chips['a'].click()
-    rule.chips['a'].click()
+    state('a', '')
     assert len(window.photos) == 6
     only = next(p for p in window.photos if str(p.path) == paths[0])
     window.move_to_bucket(only, 'b', True)
@@ -2419,6 +2420,82 @@ def test_selection_views(base):
     clear_settings()
 
 
+def test_repair_links(base):
+    clear_settings()
+    old = make_project(base/'liens'/'avant'/'Mariage', 4)
+    place = base/'liens portfolio'
+    place.mkdir()
+    triphoto_qt.app_settings().setValue('portfolio_folder', str(place))
+    answers = []
+    real_ask, real_inform = triphoto_qt.ask, triphoto_qt.inform
+    triphoto_qt.ask = lambda parent, title, text, buttons: answers.append(title) or 'use'
+    triphoto_qt.inform = lambda parent, title, text: answers.append(title)
+    try:
+        window = open_window(old)
+        photos = list(window.session.photos)
+        names = [p.path.name for p in photos]
+        photos[0].stars = 5
+        window.select_photo(photos[1])
+        window.toggle_portfolio()
+        window.save_session()
+        sorting = window.custom.store.create('Liens')
+        sorting.set_photos([{'path': str(p.path), 'gallery': 'Mariage', 'relative': p.path.name} for p in photos])
+        sorting.buckets.append({'id': 'a', 'title': 'AG', 'subtitle': '', 'color': '#ff3b30'})
+        sorting.add(str(photos[0].path), 'a')
+        sorting.save()
+        window.close_project()
+        window.pool.waitForDone()
+        window.review.analysis_pool.waitForDone()
+        # The project moved somewhere else, deeper: the parent folder is enough to find it.
+        new_parent = base/'liens'/'apres'/'disque'
+        new_parent.mkdir(parents=True)
+        moved = new_parent/'Mariage'
+        os.replace(old, moved)
+        window.ask_folder = lambda title: str(base/'liens'/'apres')
+        recorded = next(e['path'] for e in window.recents.entries() if Path(e['path']).name.lower() == 'mariage')
+        assert window.repair_recent(recorded)
+        assert triphoto.norm_path(window.session.root) == triphoto.norm_path(moved) and len(window.session.photos) == 4
+        assert next(p for p in window.session.photos if p.path.name == names[0]).stars == 5, 'its notes moved with it'
+        # The recent project, the portfolio and the selections follow.
+        assert [e for e in window.recents.entries() if triphoto.norm_path(e['path']) == triphoto.norm_path(moved)]
+        assert not [e for e in window.recents.entries() if e['path'] == recorded]
+        assert Path(next(iter(window.portfolio.items.values()))['source']).is_file()
+        window.close_project()
+        again = next(found for found in window.custom.store.sessions() if found.name == 'Liens')
+        assert all(Path(photo['path']).is_file() for photo in again.photos)
+        assert again.count('a') == 1 and Path(next(iter(again.data['assigned']))).is_file()
+        # An empty folder says so, and changes nothing.
+        empty = base/'liens'/'vide'
+        empty.mkdir()
+        window.ask_folder = lambda title: str(empty)
+        assert not window.repair_recent(str(moved)) and answers[-1] == 'Aucune photo ici'
+        # Two projects inside: a closer choice is asked.
+        make_project(base/'liens'/'deux'/'Un', 1)
+        make_project(base/'liens'/'deux'/'Deux', 1)
+        for name in ('Un', 'Deux'):
+            triphoto.PhotoSession(base/'liens'/'deux'/name).save()
+        window.ask_folder = lambda title: str(base/'liens'/'deux')
+        assert not window.repair_recent(str(moved)) and answers[-1] == 'Plusieurs projets'
+        # Photos alone, without the notes: it says so, and the links are repaired on request.
+        loose = base/'liens'/'en vrac'/'sous dossier'
+        loose.mkdir(parents=True)
+        window.pool.waitForDone()
+        for name in names:
+            os.replace(moved/name, loose/name)
+        window.ask_folder = lambda title: str(base/'liens'/'en vrac')
+        assert window.repair_recent(str(moved), False) and answers[-1] == 'Pas de notes ici'
+        # Photos lost one by one in a selection: found by their name in a folder.
+        window.open_custom(next(found for found in window.custom.store.sessions() if found.name == 'Liens'))
+        assert len(window.session.absent) == 4 and not window.session.photos
+        window.repair_photos()
+        assert not window.session.absent and len(window.session.photos) == 4
+        assert window.selection.count('a') == 1 and Path(next(iter(window.selection.data['assigned']))).parent == loose
+        window.close()
+    finally:
+        triphoto_qt.ask, triphoto_qt.inform = real_ask, real_inform
+    clear_settings()
+
+
 def test_defaults_and_viewer_room(base):
     clear_settings()
     project = make_project(base/'defaults', 4)
@@ -2439,7 +2516,7 @@ def main():
     app.setStyleSheet(triphoto_qt.STYLE)
     base = Path(tempfile.mkdtemp(prefix='triphoto-tests-'))
     tests = [test_legacy_session, test_nested_session_ignored, test_dominant_color, test_recents, test_shortcuts,
-             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_export_by_its_button, test_themed_dialog, test_update, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_defaults_and_viewer_room]
+             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_export_by_its_button, test_themed_dialog, test_update, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_repair_links, test_defaults_and_viewer_room]
     failures = 0
     try:
         for test in tests:

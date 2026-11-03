@@ -66,6 +66,16 @@ QFrame#customRow:hover {{ background: {CONTROL}; }}
 QCheckBox::indicator {{ width: 20px; height: 20px; border: 1px solid {FAINT}; border-radius: 5px; background: transparent; }}
 QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; image: url("{(ASSETS / 'check.svg').as_posix()}"); }}
 QCheckBox::indicator:disabled {{ border-color: {LINE}; }}
+QWidget#filterScrim {{ background: rgba(0, 0, 0, 120); }}
+QPushButton#state {{ background: transparent; color: {FAINT}; border-radius: 6px; padding: 5px 12px; }}
+QPushButton#state:hover {{ color: {TEXT}; }}
+QPushButton#state:checked {{ background: {HOVER}; color: {MUTED}; }}
+QPushButton#stateOn {{ background: transparent; color: {FAINT}; border-radius: 6px; padding: 5px 12px; }}
+QPushButton#stateOn:hover {{ color: {TEXT}; }}
+QPushButton#stateOn:checked {{ background: {ACCENT}; color: {INK}; font-weight: 600; }}
+QPushButton#stateOff {{ background: transparent; color: {FAINT}; border-radius: 6px; padding: 5px 12px; }}
+QPushButton#stateOff:hover {{ color: {TEXT}; }}
+QPushButton#stateOff:checked {{ background: {REJECT}; color: {INK}; font-weight: 600; }}
 QFrame#pill {{ background: rgba(22, 22, 23, 232); border: 1px solid rgba(255, 255, 255, 22); border-radius: 11px; }}
 QFrame#dialog {{ background: {RAISED}; border: 1px solid {LINE}; border-radius: 12px; }}
 QLabel#dialogTitle {{ font-size: 15px; font-weight: 600; }}
@@ -80,7 +90,9 @@ QComboBox::down-arrow {{ image: url("{(ASSETS / 'chevron.svg').as_posix()}"); wi
 QComboBox QAbstractItemView {{ background: {RAISED}; border: 1px solid {LINE}; outline: none; padding: 4px;
     selection-background-color: {HOVER}; selection-color: {TEXT}; }}
 QMenu {{ background: {RAISED}; border: 1px solid {LINE}; padding: 5px; }}
-QMenu::item {{ padding: 7px 26px 7px 12px; border-radius: 5px; }}
+QMenu::item {{ padding: 7px 26px 7px 30px; border-radius: 5px; }}
+QMenu::indicator {{ width: 14px; height: 14px; left: 9px; }}
+QMenu::indicator:checked {{ image: url("{(ASSETS / 'check_light.svg').as_posix()}"); }}
 QMenu::item:selected {{ background: {HOVER}; }}
 QMenu::item:disabled {{ color: {FAINT}; }}
 QMenu::separator {{ height: 1px; background: {LINE}; margin: 5px 8px; }}
@@ -204,6 +216,19 @@ def pastel(color):
     """A light tone of a bucket color, which stays discreet beside the photos."""
     tone = QColor(color)
     return QColor((tone.red()+2*255)//3, (tone.green()+2*255)//3, (tone.blue()+2*255)//3)
+
+
+def draw_tick(painter, x, y, size, color):
+    """A vector tick whose top left corner is at (x, y)."""
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    path = QPainterPath(QPointF(x, y+size*.55))
+    path.lineTo(x+size*.36, y+size*.9)
+    path.lineTo(x+size, y+size*.12)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.setPen(QPen(QColor(color), 1.9, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    painter.drawPath(path)
+    painter.restore()
 
 
 def draw_bucket_chips(painter, x, y, width, chips):
