@@ -1040,7 +1040,7 @@ def test_views_and_filter_panel(base):
     window.filter_timer.stop()
     assert window.filter_panel.isVisible() and not review.tools.isVisible()
     window.note_filter.buttons[0].click()
-    assert '0 étoile' in window.filter_chip.text()
+    assert '0 étoile' in window.filter_chip.toolTip()
     window.note_filter.buttons['all'].click()
     assert window.filter_chip.text() == 'Filtre  ▾'
     # Up and down browse like left and right, except where moving on is a decision.
@@ -1093,7 +1093,7 @@ def test_tri_filters(base):
     window.review.note_filter.buttons[3].click()
     assert not window.photos and window.note_filter.buttons[3].isChecked()
     # With no photo left, the filter stays within reach, and says what hides them.
-    assert window.filter_chip.isVisible() and '3 étoiles' in window.filter_chip.text()
+    assert window.filter_chip.isVisible() and '3 étoiles' in window.filter_chip.toolTip()
     window.note_filter.buttons['all'].click()
     assert len(window.photos) == 6
     window.close()
@@ -1348,7 +1348,7 @@ def test_portfolio(base):
         assert {p.relative_path for p in window.photos} == {first.relative_path, second.relative_path}
         window.choices.publish.click()
         assert [p.relative_path for p in window.photos] == [first.relative_path]
-        assert window.filter_chip.text().count('À publier') == 1
+        assert window.filter_chip.toolTip().count('À publier') == 1
         window.choices.publish.click()
         window.choices.portfolio.click()
         # Undo takes a photo out again, and a publish mark comes back with the session.
@@ -1933,6 +1933,12 @@ def test_activity_bar(base):
     review.analysis_left = 10
     activity.poll()
     assert '30 sur 40' in activity.label.text() and activity.bar.value() == 30
+    # A preview loading on the way does not take the place of the larger work, which keeps its count.
+    real_tasks = window.background_tasks
+    window.background_tasks = lambda: [('Chargement des aperçus', 1), ('Analyse des couleurs', 10)]
+    activity.poll()
+    assert '30 sur 40' in activity.label.text()
+    window.background_tasks = real_tasks
     assert activity.geometry().bottom() <= window.height() and activity.x() == 12
     # Above the settings of the other views, which it must not cover.
     window.set_view('wall')
@@ -1969,7 +1975,21 @@ def test_custom_sorting(base):
     session.add(b0, 'x')
     session.add(a0, 'x')
     assert session.buckets_of(a0) == ['x', 'y'] and session.count('x') == 2
-    assert [p['path'] for p in session.order('none')] == [a1, a2] and [p['path'] for p in session.order('y')] == [a0]
+    assert [p['path'] for p in session.order('y')] == [a0] and len(session.order()) == 4
+    # One bucket, both at once, one or the other, one but not the other, none.
+    passing = lambda: {path for path in (a0, a1, a2, b0) if session.matches(path)}
+    assert passing() == {a0, a1, a2, b0}
+    session.set_rule(include=['x'])
+    assert passing() == {a0, b0}
+    session.set_rule(include=['x', 'y'], all=True)
+    assert passing() == {a0}
+    session.set_rule(all=False)
+    assert passing() == {a0, b0}
+    session.set_rule(include=['x'], exclude=['y'])
+    assert passing() == {b0}
+    session.set_rule(include=[], exclude=[], none=True)
+    assert passing() == {a1, a2}
+    session.set_rule(none=False)
     # The same file name from two galleries, a title Windows would refuse.
     plan = session.export_plan()
     assert ('Concours - Fearless', '0.jpg', a0) in plan and ('Concours - Fearless', '0 (2).jpg', b0) in plan and ('Livre', '0.jpg', a0) in plan
@@ -2161,14 +2181,17 @@ def test_custom_view(base):
     assert second in session.buckets_of(held) and len(sheet.tiles) == 1
     sheet.done(0)
     # Back to the photo for the views: sorted photos leave "Sans bucket" as they are sorted.
-    custom.view_combo.setCurrentIndex(custom.view_combo.findData(triphoto_custom.UNSORTED))
+    window.selection.set_rule(none=True)
+    window.filters_changed()
     assert custom.position()[1] == 1
     custom.key_bucket(1)
     assert custom.position()[1] == 0 and custom.current() is None and session.count(first) == 3
     window.grab()
-    custom.view_combo.setCurrentIndex(custom.view_combo.findData(first))
+    window.selection.set_rule(none=False, include=[first])
+    window.filters_changed()
     assert custom.position()[1] == 3
-    custom.view_combo.setCurrentIndex(custom.view_combo.findData(triphoto_custom.ALL))
+    window.selection.set_rule(include=[])
+    window.filters_changed()
     # It is all saved, and several sessions live side by side.
     custom.save()
     assert triphoto_custom.Sorting.load(session.path).count(first) == 3
@@ -2276,26 +2299,54 @@ def test_selection_views(base):
     wall.resize(1400, 760)
     assert not wall.drop_zones() and window.photo_buckets(next(p for p in window.photos if str(p.path) == paths[3])) == [('AG', '#ff3b30'), ('WPJA', '#0a84ff')]
     window.grab()
-    # A click on the strip shows one bucket, then another, then all.
+    # The strip holds the buckets only, and a click puts the picked photo in one or takes it out.
     strip = window.bucket_strip
     wait(50)
     rects = dict(strip.rects())
-    QTest.mouseClick(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, rects['a'].center().toPoint())
-    assert {str(p.path) for p in window.photos} == {paths[0], paths[1], paths[3]}
-    assert 'AG' in window.filter_chip.text()
+    assert set(rects) == {'a', 'b'}
+    free = next(p for p in window.photos if str(p.path) == paths[4])
+    wall.pick(free)
     QTest.mouseClick(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, rects['b'].center().toPoint())
-    assert {str(p.path) for p in window.photos} == {paths[2], paths[3]}
-    window.set_bucket_filter('none')
+    assert sorting.buckets_of(paths[4]) == ['b']
+    QTest.mouseClick(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, rects['b'].center().toPoint())
+    assert not sorting.buckets_of(paths[4])
+    # The panel of the filter: one click requires a bucket, a second one refuses it, a third forgets it.
+    rule = window.bucket_rule
+    assert rule.isVisibleTo(window.filter_panel)
+    rule.chips['a'].click()
+    assert {str(p.path) for p in window.photos} == {paths[0], paths[1], paths[3]} and 'AG' in window.filter_chip.toolTip()
+    rule.chips['b'].click()
+    assert {str(p.path) for p in window.photos} == {paths[0], paths[1], paths[2], paths[3]}
+    assert rule.any_button.isVisibleTo(rule) and 'AG ou WPJA' in window.filter_chip.toolTip()
+    rule.all_button.click()
+    assert {str(p.path) for p in window.photos} == {paths[3]} and 'AG et WPJA' in window.filter_chip.toolTip()
+    rule.any_button.click()
+    rule.chips['b'].click()
+    assert {str(p.path) for p in window.photos} == {paths[0], paths[1]} and 'sans WPJA' in window.filter_chip.toolTip()
+    rule.none_button.click()
     assert {str(p.path) for p in window.photos} == {paths[4], paths[5]}
-    # Seen through a bucket, a drop moves the photo out of it and leaves its other buckets.
-    window.set_bucket_filter('a')
+    rule.none_button.click()
+    assert len(window.photos) == 6 and not sorting.rule()['include']
+    window.grab()
+    # The Buckets view shows what the filter lets through, and the filter is at hand there.
+    rule.chips['b'].click()
+    window.set_view('buckets')
+    assert custom.position()[1] == 2 and window.filter_chip.isVisible()
+    window.set_view('wall')
+    rule.chips['b'].click()
+    rule.chips['b'].click()
+    assert len(window.photos) == 6
+    # Seen through a single bucket, a drop moves the photo out of it and leaves its other buckets.
+    rule.chips['a'].click()
     both = next(p for p in window.photos if str(p.path) == paths[3])
     window.move_to_bucket(both, 'b')
     assert sorting.buckets_of(paths[3]) == ['b'] and both not in window.photos
     window.undo()
     assert sorting.buckets_of(paths[3]) == ['a', 'b'] and any(p is both for p in window.photos)
     # Seen through all of them, it replaces them; the narrow part of a zone keeps it where it is.
-    window.set_bucket_filter('all')
+    rule.chips['a'].click()
+    rule.chips['a'].click()
+    assert len(window.photos) == 6
     only = next(p for p in window.photos if str(p.path) == paths[0])
     window.move_to_bucket(only, 'b', True)
     assert sorting.buckets_of(paths[0]) == ['a', 'b']
@@ -2305,33 +2356,35 @@ def test_selection_views(base):
     window.undo()
     assert sorting.buckets_of(paths[0]) == ['a']
     # A real drag from the grid to the strip, on each part of a zone.
+    wall.resize(1400, 760)
+    wall.bar.setValue(0)
     wall.relayout()
-    rect, dragged = next(tile for tile in wall.visible_tiles() if str(tile[1].path) == paths[1])
+    rect, dragged = next(tile for tile in wall.visible_tiles() if len(sorting.buckets_of(str(tile[1].path))) == 1 and sorting.buckets_of(str(tile[1].path)) != ['b'])
+    moving = str(dragged.path)
+    home = sorting.buckets_of(moving)
     start = rect.center().toPoint()
-    rects = dict(strip.rects())
-    def drag_to(point):
+    def drag_to(where):
         QTest.mousePress(wall, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
-        global_point = strip.mapToGlobal(point)
         wall.mouseMoveEvent(_Move(QPointF(start)+QPointF(40, 40), wall))
-        assert wall.dragging
+        assert wall.dragging and strip.dragging
+        global_point = strip.mapToGlobal(where(dict(strip.rects())).toPoint())
         local = QPointF(wall.mapFromGlobal(global_point))
         wall.mouseMoveEvent(_Move(local, wall))
-        assert strip.dragging and strip.hovered is not None and window.bucket_ghost.isVisible()
+        assert strip.hovered is not None and window.bucket_ghost.isVisible()
         window.grab()
         wall.mouseReleaseEvent(_Move(local, wall))
         assert not strip.dragging and not window.bucket_ghost.isVisible()
-    zone = rects['b']
-    drag_to(QPointF(zone.right()-10, zone.center().y()).toPoint())
-    assert sorting.buckets_of(paths[1]) == ['a', 'b']
+    drag_to(lambda rects: QPointF(rects['b'].right()-10, rects['b'].center().y()))
+    assert sorting.buckets_of(moving) == [*home, 'b']
     window.undo()
-    drag_to(QPointF(zone.left()+10, zone.center().y()).toPoint())
-    assert sorting.buckets_of(paths[1]) == ['b']
+    drag_to(lambda rects: QPointF(rects['b'].left()+10, rects['b'].center().y()))
+    assert sorting.buckets_of(moving) == ['b']
     window.undo()
-    # Dragging to "Toutes" takes it out of its buckets.
-    drag_to(rects[None].center().toPoint())
-    assert not sorting.buckets_of(paths[1])
+    # While dragging only, one more zone takes it out of its buckets.
+    drag_to(lambda rects: rects[None].center())
+    assert not sorting.buckets_of(moving)
     window.undo()
-    assert sorting.buckets_of(paths[1]) == ['a']
+    assert sorting.buckets_of(moving) == home and None not in dict(strip.rects())
     # Everything picked goes together, and the keys of the notes pick the buckets.
     wall.pick(window.photos[0])
     wall.select_all()

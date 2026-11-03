@@ -1711,25 +1711,19 @@ class ChoiceFilter(QFrame):
         self.project.setCurrentIndex(0)
         self.project.blockSignals(False)
 
-    def set_buckets(self, buckets):
-        """Inside a selection, the buckets take the place of the projects of the portfolio."""
-        self.project.blockSignals(True)
-        wanted = self.project.currentData()
-        self.project.clear()
-        self.project.addItem('Tous les buckets', 'all')
-        self.project.addItem('Sans bucket', 'none')
-        for bucket in buckets:
-            self.project.addItem(bucket['title'].replace('&', '&&'), bucket['id'])
-        self.project.setCurrentIndex(max(0, self.project.findData(wanted)))
-        self.project.blockSignals(False)
-        self.project.setToolTip('Afficher les photos de ce bucket')
-        self.project.show()
+    def set_buckets(self):
+        """Inside a selection, the filter on its buckets takes the place of these choices."""
+        self.project.hide()
         self.portfolio.hide()
+        self.window.bucket_rule.rebuild()
+        self.window.bucket_rule.show()
 
     def active_labels(self):
         labels = [button.text() for button in (self.portfolio, self.publish) if button.isChecked()]
         if self.project.currentIndex() > 0:
             labels.append(self.project.currentText().replace('&&', '&'))
+        if self.window.selection:
+            labels += self.window.bucket_rule.labels()
         return labels
 
 

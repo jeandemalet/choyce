@@ -43,7 +43,7 @@ class Sorting:
     def create(cls, folder, name):
         key = uuid.uuid4().hex
         return cls(Path(folder)/f'{key}.json', {'version': 1, 'id': key, 'name': name, 'created': time.time(), 'updated': time.time(),
-                                                'sources': [], 'photos': [], 'buckets': [], 'assigned': {}, 'position': '', 'view': ALL})
+                                                'sources': [], 'photos': [], 'buckets': [], 'assigned': {}, 'position': ''})
 
     @classmethod
     def load(cls, path):
@@ -89,13 +89,26 @@ class Sorting:
         """The photo of its card: the first one sorted, or the first one."""
         return next((photo['path'] for photo in self.photos if self.buckets_of(photo['path'])), self.photos[0]['path'] if self.photos else None)
 
-    def order(self, view=None):
-        view = view or self.data.get('view', ALL)
-        if view == ALL:
-            return self.photos
-        if view == UNSORTED:
-            return [photo for photo in self.photos if not self.buckets_of(photo['path'])]
-        return [photo for photo in self.photos if view in self.buckets_of(photo['path'])]
+    def order(self, key=ALL):
+        """All the photos, or those of one bucket."""
+        return self.photos if key == ALL else [photo for photo in self.photos if key in self.buckets_of(photo['path'])]
+
+    def rule(self):
+        """The filter on buckets: those required, those refused, whether one or all of the first are enough, or no bucket at all."""
+        return {'include': [], 'exclude': [], 'all': False, 'none': False, **self.data.get('filter', {})}
+
+    def set_rule(self, **changes):
+        self.data['filter'] = {**self.rule(), **changes}
+
+    def matches(self, path):
+        rule = self.rule()
+        keys = set(self.buckets_of(path))
+        if rule['none']:
+            return not keys
+        if keys & set(rule['exclude']):
+            return False
+        required = set(rule['include'])
+        return not required or (required <= keys if rule['all'] else bool(required & keys))
 
     def set_photos(self, photos):
         """A new choice of galleries. A photo already sorted stays: the work done is never lost to a filter."""
@@ -154,8 +167,8 @@ class Sorting:
             else:
                 del self.data['assigned'][path]
         self.undo_stack.clear()
-        if self.data.get('view') == key:
-            self.data['view'] = ALL
+        rule = self.rule()
+        self.set_rule(include=[other for other in rule['include'] if other != key], exclude=[other for other in rule['exclude'] if other != key])
 
     def export_plan(self):
         """(folder of the bucket, name of the file, path of the original). Two galleries may hold the same file name."""
@@ -201,7 +214,7 @@ class SelectionSession(PhotoSession):
 
 
 class BucketStrip(QWidget):
-    """Under the views of a selection: a click filters on a bucket, a photo dragged here moves it or adds it to another one."""
+    """Under the views of a selection: a click puts the photo in a bucket or takes it out, a photo dragged here moves it or adds it to another one."""
     SPLIT = .62
 
     def __init__(self, window):
@@ -214,7 +227,9 @@ class BucketStrip(QWidget):
         self.hide()
 
     def keys(self):
-        return [None]+[bucket['id'] for bucket in self.window.selection.buckets] if self.window.selection else []
+        """The buckets; while a photo is dragged, also the zone that takes it out."""
+        keys = [bucket['id'] for bucket in self.window.selection.buckets] if self.window.selection else []
+        return keys+[None] if self.dragging and keys else keys
 
     def rects(self):
         keys = self.keys()
@@ -246,14 +261,15 @@ class BucketStrip(QWidget):
         selection = self.window.selection
         if not selection:
             return
-        active = self.window.bucket_filter()
+        targets = self.window.target_photos()
+        held = set(selection.buckets_of(targets[0].relative_path)) if targets else set()
         font = painter.font()
         font.setPixelSize(13)
         painter.setFont(font)
         for key, rect in self.rects():
             bucket = selection.bucket(key) if key else None
             tone = pastel(bucket['color']) if bucket else QColor(MUTED)
-            shown = (key or 'all') == active
+            shown = key in held
             fill = QColor(tone)
             fill.setAlpha(36 if shown else 0)
             outline = QColor(tone)
@@ -266,7 +282,7 @@ class BucketStrip(QWidget):
             painter.drawRoundedRect(rect, 9, 9)
             inner = rect.adjusted(12, 0, -12, 0)
             count = selection.count(key) if key else len(selection.photos)
-            title = bucket['title'] if bucket else 'Toutes'
+            title = bucket['title'] if bucket else ''
             if self.dragging:
                 self.paint_drop(painter, key, rect, tone, title)
             else:
@@ -293,8 +309,90 @@ class BucketStrip(QWidget):
 
     def mouseReleaseEvent(self, event):
         hit = self.hit(event.position())
-        if event.button() == Qt.MouseButton.LeftButton and hit:
-            self.window.set_bucket_filter(hit[0] or 'all')
+        if event.button() == Qt.MouseButton.LeftButton and hit and hit[0]:
+            self.window.toggle_bucket(hit[0])
+
+
+class BucketFilter(QFrame):
+    """The second line of the Filtre panel in a selection. A bucket goes from unused to required, to refused, and back."""
+
+    def __init__(self, window):
+        super().__init__()
+        self.window = window
+        self.row = QHBoxLayout(self)
+        self.row.setContentsMargins(0, 4, 0, 0)
+        self.row.setSpacing(4)
+        self.hide()
+
+    def plain(self, text, action, checked=None, tip=''):
+        button = QPushButton(text, objectName='seg' if checked is not None else 'ghost', checkable=checked is not None)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        button.setToolTip(tip)
+        if checked is not None:
+            button.setChecked(checked)
+        button.clicked.connect(lambda *_: action())
+        self.row.addWidget(button)
+        return button
+
+    def rebuild(self):
+        while self.row.count():
+            widget = self.row.takeAt(0).widget()
+            if widget:
+                widget.setParent(None)
+                widget.deleteLater()
+        selection = self.window.selection
+        if not selection:
+            return
+        rule = selection.rule()
+        self.row.addWidget(QLabel('Buckets', objectName='muted'))
+        self.row.addSpacing(4)
+        self.chips = {}
+        for bucket in selection.buckets:
+            state = 'include' if bucket['id'] in rule['include'] else 'exclude' if bucket['id'] in rule['exclude'] else ''
+            chip = QPushButton({'include': '✓ ', 'exclude': '✕ ', '': ''}[state]+bucket['title'].replace('&', '&&'))
+            chip.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            chip.setToolTip('Un clic : seulement ce bucket. Un deuxième : aucune photo de ce bucket. Un troisième : sans effet.')
+            tone = pastel(bucket['color']).name()
+            chip.setStyleSheet(f"QPushButton {{ background: {'rgba(255, 255, 255, 26)' if state == 'include' else 'transparent'}; color: {TEXT if state == 'include' else MUTED if state == 'exclude' else TEXT}; "
+                               f"border: 1px {'dashed' if state == 'exclude' else 'solid'} {tone}; border-radius: 7px; padding: 5px 10px; font-weight: {600 if state == 'include' else 400}; }}")
+            chip.clicked.connect(lambda checked=False, key=bucket['id']: self.cycle(key))
+            self.row.addWidget(chip)
+            self.chips[bucket['id']] = chip
+        self.row.addSpacing(8)
+        self.any_button = self.plain('Au moins un', lambda: self.change(all=False), not rule['all'], 'Les photos dans au moins un des buckets cochés')
+        self.all_button = self.plain('Tous', lambda: self.change(all=True), rule['all'], 'Les photos dans tous les buckets cochés à la fois')
+        for button in (self.any_button, self.all_button):
+            button.setVisible(len(rule['include']) > 1)
+        self.none_button = self.plain('Sans bucket', lambda: self.change(none=not selection.rule()['none'], include=[], exclude=[]), rule['none'], 'Seulement les photos encore sans bucket')
+        if rule['include'] or rule['exclude'] or rule['none']:
+            self.plain('Effacer', lambda: self.change(include=[], exclude=[], none=False, all=False))
+        self.row.addStretch(1)
+
+    def cycle(self, key):
+        rule = self.window.selection.rule()
+        include, exclude = [other for other in rule['include'] if other != key], [other for other in rule['exclude'] if other != key]
+        if key in rule['include']:
+            exclude.append(key)
+        elif key not in rule['exclude']:
+            include.append(key)
+        self.change(include=include, exclude=exclude, none=False)
+
+    def change(self, **changes):
+        self.window.selection.set_rule(**changes)
+        self.rebuild()
+        self.window.custom.save_timer.start()
+        self.window.filters_changed()
+        if self.window.filter_panel.isVisible():
+            self.window.place_filter_panel()
+
+    def labels(self):
+        selection = self.window.selection
+        rule = selection.rule()
+        if rule['none']:
+            return ['Sans bucket']
+        title = lambda key: selection.bucket(key)['title']
+        joined = (' et ' if rule['all'] else ' ou ').join(title(key) for key in rule['include'])
+        return ([joined] if joined else [])+[f'sans {title(key)}' for key in rule['exclude']]
 
 
 class Store:
@@ -1139,6 +1237,7 @@ class CustomPage(QStackedWidget):
         self.save_timer.setSingleShot(True)
         self.save_timer.setInterval(400)
         self.save_timer.timeout.connect(self.save)
+        self.cached_order = None
         self.setup = SetupPage(self)
         self.work = self.build_work()
         for page in (self.setup, self.work):
@@ -1172,11 +1271,6 @@ class CustomPage(QStackedWidget):
         self.work_title = QLabel(objectName='section')
         bar.addWidget(self.work_title)
         bar.addSpacing(12)
-        self.view_combo = QComboBox()
-        self.view_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.view_combo.setMinimumWidth(180)
-        self.view_combo.currentIndexChanged.connect(self.view_changed)
-        bar.addWidget(self.view_combo)
         self.counter = QLabel(objectName='muted')
         bar.addWidget(self.counter)
         bar.addSpacing(8)
@@ -1227,6 +1321,7 @@ class CustomPage(QStackedWidget):
     def close_session(self):
         self.save()
         self.session = None
+        self.cached_order = None
         self.images.clear()
         self.failed.clear()
         self.detailed.clear()
@@ -1246,10 +1341,10 @@ class CustomPage(QStackedWidget):
         self.images.clear()
         self.failed.clear()
         self.work_title.setText(session.name.upper())
+        self.cached_order = None
         self.rebuild_cards()
-        self.sync_views()
         position = session.data.get('position')
-        order = session.order()
+        order = self.order()
         self.index = next((i for i, photo in enumerate(order) if photo['path'] == position), 0)
         self.setCurrentWidget(self.work)
         self.show_photo()
@@ -1278,14 +1373,35 @@ class CustomPage(QStackedWidget):
 
     def changed(self):
         self.save_timer.start()
-        self.update_counter()
         self.window.bucket_strip.update()
+        # A photo may now pass the filter, or no longer.
+        if self.window.selection is self.session:
+            self.window.apply_filters()
+        self.update_counter()
         for card in self.cards.values():
             card.update()
 
     # The sorting.
     def order(self):
-        return self.session.order() if self.session else []
+        """The photos the filters of the window let through, in its order: the same ones in every view."""
+        if self.session is None:
+            return []
+        if self.cached_order is None:
+            known = {photo['path']: photo for photo in self.session.photos}
+            self.cached_order = [known[photo.relative_path] for photo in self.window.photos if photo.relative_path in known]
+        return self.cached_order
+
+    def filters_changed(self):
+        """Stays on the same photo if it is still there. Otherwise the next one has taken its place."""
+        if self.session is None or self.window.selection is not self.session:
+            return
+        current = self.current()
+        self.cached_order = None
+        order = self.order()
+        if current:
+            self.index = next((i for i, photo in enumerate(order) if photo['path'] == current['path']), self.index)
+        if self.currentWidget() is self.work:
+            self.show_photo()
 
     def current(self):
         order = self.order()
@@ -1305,7 +1421,7 @@ class CustomPage(QStackedWidget):
     def empty_text(self):
         if not self.session.photos:
             return 'Aucune photo : « Modifier la sélection » choisit les galeries et les filtres.'
-        return 'Aucune photo dans cette vue.'
+        return 'Aucune photo pour ces filtres.'
 
     def bucket_number(self, key):
         index = next(i for i, bucket in enumerate(self.session.buckets) if bucket['id'] == key)
@@ -1326,26 +1442,6 @@ class CustomPage(QStackedWidget):
     def background_changed(self):
         self.picker.sync()
         self.stage.update()
-
-    def sync_views(self):
-        self.view_combo.blockSignals(True)
-        self.view_combo.clear()
-        self.view_combo.addItem('Toutes les photos', ALL)
-        self.view_combo.addItem('Sans bucket', UNSORTED)
-        for bucket in self.session.buckets:
-            self.view_combo.addItem(bucket['title'], bucket['id'])
-        self.view_combo.setCurrentIndex(max(0, self.view_combo.findData(self.session.data.get('view', ALL))))
-        self.view_combo.blockSignals(False)
-
-    def view_changed(self, *args):
-        if self.session is None:
-            return
-        current = self.current()
-        self.session.data['view'] = self.view_combo.currentData()
-        order = self.order()
-        self.index = next((i for i, photo in enumerate(order) if current and photo['path'] == current['path']), 0)
-        self.show_photo()
-        self.save_timer.start()
 
     def show_photo(self):
         self.index = max(0, min(self.index, len(self.order())-1))
@@ -1513,7 +1609,6 @@ class CustomPage(QStackedWidget):
 
     def buckets_changed(self):
         self.rebuild_cards()
-        self.sync_views()
         self.changed()
         self.show_photo()
         self.window.selection_changed()
@@ -1538,7 +1633,6 @@ class CustomPage(QStackedWidget):
 
     def show_bucket(self, key):
         BucketSheet(self, key).exec()
-        self.sync_views()
         self.show_photo()
 
     def delete_bucket(self, key):
