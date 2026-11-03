@@ -1075,6 +1075,8 @@ def test_keys_undo_and_clipboard(base):
     assert window.stars.currentData() == 'ge3'
     window.note_filter.buttons[5].click()
     assert window.stars.currentData() == 5 and not window.note_filter.and_more.isChecked()
+    # The offscreen platform of the tests crashes on exit if its clipboard still holds something; Windows keeps it.
+    QApplication.clipboard().clear()
     window.close()
     clear_settings()
 
