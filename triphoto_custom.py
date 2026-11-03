@@ -806,10 +806,12 @@ class PopupMenu(QFrame):
         QTimer.singleShot(0, action)
 
     def open_at(self, anchor):
-        """Above the point when there is room, as the buckets sit at the bottom of the window."""
+        """Above the point when there is room, as the buckets sit at the bottom of the window, and always inside it."""
         self.adjustSize()
+        area = self.parentWidget().frameGeometry()
         y = anchor.y()-self.height()-4
-        self.move(anchor.x(), y if y >= 0 else anchor.y()+4)
+        x = max(area.left()+8, min(anchor.x(), area.right()-self.width()-8))
+        self.move(x, y if y >= area.top() else anchor.y()+4)
         self.show()
 
 

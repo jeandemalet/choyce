@@ -20,7 +20,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from PIL import Image
-from PySide6.QtCore import QEventLoop, QPointF, QRectF, QTimer, Qt
+from PySide6.QtCore import QEventLoop, QPoint, QPointF, QRectF, QTimer, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QStyleOptionViewItem
 
@@ -2075,6 +2075,11 @@ def test_custom_view(base):
     assert session.bucket(first)['subtitle'] == 'Mariage, mars' and set(custom.cards) == {first, second}
     assert session.bucket(second)['color'] == '#0a84ff'
     wait(50)
+    # The menu of the bucket at the far right stays inside the window.
+    menu = triphoto_custom.PopupMenu(window, [('Voir les photos…', lambda: None)])
+    menu.open_at(window.frameGeometry().topRight()+QPoint(0, 300))
+    assert menu.frameGeometry().right() <= window.frameGeometry().right() and menu.frameGeometry().top() >= window.frameGeometry().top()
+    menu.close()
     # The three dots open the menu, and do not put the photo in the bucket.
     menus = []
     card = custom.cards[first]
