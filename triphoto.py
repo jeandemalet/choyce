@@ -23,7 +23,7 @@ from PIL import Image, ImageCms, ImageOps, ImageTk
 
 # The folder keeps its name: every existing project, export and note refers to it.
 APP_NAME = "Vision Board"
-APP_VERSION = "0.11.0"
+APP_VERSION = "0.12.0"
 SESSION_DIR_NAME = "TriPhoto_Session"
 SESSION_FILE_NAME = "session.json"
 SESSION_VERSION = 2
@@ -235,6 +235,11 @@ def export_original_copy(source_path: Path, destination_path: Path) -> None:
     """Copy the original bytes without decoding, converting, or re-encoding."""
     destination_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_path, destination_path)
+
+
+def export_folder_name(text: str) -> str:
+    """What Windows accepts as the name of a folder."""
+    return re.sub(r'[<>:"/\\|?*]', '-', text).strip(' .')
 
 
 def write_json_atomic(path: Path, data: dict) -> None:

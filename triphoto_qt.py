@@ -21,8 +21,9 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
     QLabel, QPushButton, QComboBox, QSplitter, QListWidget, QListWidgetItem, QFrame, QScrollArea, QButtonGroup,
     QStackedWidget, QAbstractItemView, QDialog, QFileDialog, QLineEdit, QProgressBar, QStyledItemDelegate, QStyle, QMenu, QColorDialog)
 from PIL import Image, ImageCms, ImageWin
-from triphoto import (APP_NAME, APP_VERSION, PhotoSession, sort_photos, SORT_OPTIONS, load_screen_preview, original_inventory,
+from triphoto import (export_folder_name, APP_NAME, APP_VERSION, PhotoSession, sort_photos, SORT_OPTIONS, load_screen_preview, original_inventory,
     export_original_copy, EXPORT_DIR_NAME, PICK_NEUTRAL, PICK_REJECT, PICK_SELECT, SESSION_DIR_NAME)
+from triphoto_custom import CustomPage
 from triphoto_portfolio import MANIFEST_FILE, Portfolio, PortfolioSession, RelocateJob, UNSORTED
 from triphoto_prefs import (ALIASES, PreferencesDialog, Recents, ScanJob, age_label, ask, inform, path_key, shortcut_map)
 from triphoto_review import MODES, BackgroundPicker, ChoiceFilter, MarkerFilter, NoteFilter, RatingBar, ReviewPage
@@ -232,11 +233,6 @@ class HoverButton(QPushButton):
 
 # Fitted, a photo stops above the floating bar instead of lying under it.
 BAR_ROOM = 66
-
-
-def export_folder_name(text):
-    """What Windows accepts as the name of a folder."""
-    return re.sub(r'[<>:"/\\|?*]', '-', text).strip(' .')
 
 
 class Viewer(QWidget):
@@ -915,7 +911,7 @@ class ActivityBar(QFrame):
     def place(self):
         self.adjustSize()
         # In the other views, above the settings along the bottom.
-        self.move(12, self.window_.height()-self.height()-(68 if self.window_.review_active else 12))
+        self.move(12, self.window_.height()-self.height()-(168 if self.window_.custom_active else 68 if self.window_.review_active else 12))
         self.raise_()
         self.show()
 
@@ -1024,7 +1020,7 @@ class Window(QMainWindow):
         segment_row.setSpacing(2)
         group = QButtonGroup(self)
         self.view_buttons = {}
-        for key, label in [('classic', 'Classique'), *MODES]:
+        for key, label in [('classic', 'Classique'), *MODES, ('custom', 'Custom')]:
             button = QPushButton(label, objectName='mainseg', checkable=True)
             group.addButton(button)
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -1083,6 +1079,9 @@ class Window(QMainWindow):
         self.pages.addWidget(self.home)
         self.pages.addWidget(splitter)
         self.pages.addWidget(self.review)
+        self.custom = CustomPage(self, SETTINGS_SCOPE, project_label)
+        self.custom_active = False
+        self.pages.addWidget(self.custom)
         # Unfolds under the header on hover, over the photos, so as to take no room from them.
         self.filter_panel = QFrame(self, objectName='pill')
         filter_row = QHBoxLayout(self.filter_panel)
@@ -1178,7 +1177,7 @@ class Window(QMainWindow):
             'mono': lambda: self.review.toggle_mono() if self.review_active else None,
             'refresh': self.refresh, 'open': self.open_folder, 'close': self.close_project, 'preferences': self.open_preferences,
             **{f'rate{value}': (lambda stars=value: self.rate(stars)) for value in range(6)},
-            **{f'mode_{mode}': (lambda value=mode: self.set_view(value)) for mode in ('classic', 'toile', 'swipe', 'color', 'wall', 'instagram')}}
+            **{f'mode_{mode}': (lambda value=mode: self.set_view(value)) for mode in ('classic', 'toile', 'swipe', 'color', 'wall', 'instagram', 'custom')}}
         mapping = shortcut_map(self.settings)
         taken = {QKeySequence(key).toString() for keys in mapping.values() for key in keys}
         for name, keys in mapping.items():
@@ -1260,13 +1259,15 @@ class Window(QMainWindow):
         self.filter_chip.setText(f"Filtre : {' · '.join(parts)}  ▾" if parts else 'Filtre  ▾')
 
     def set_view(self, key):
-        if key == 'classic':
+        if key == 'custom':
+            self.open_custom()
+        elif key == 'classic':
             self.set_review(False)
         else:
             self.open_review_mode(key)
 
     def sync_view_buttons(self):
-        self.view_buttons[self.review.mode if self.review_active else 'classic'].setChecked(True)
+        self.view_buttons['custom' if self.custom_active else self.review.mode if self.review_active else 'classic'].setChecked(True)
 
     def show_viewer_bar(self):
         self.viewer_bar_timer.start(1700)
@@ -1311,7 +1312,35 @@ class Window(QMainWindow):
         else:
             self.viewer.zoom_from_center(factor)
 
+    def open_custom(self):
+        self.set_review(False)
+        self.custom_active = True
+        self.update_project_state()
+        self.custom.enter()
+
+    def leave_custom(self):
+        self.custom.save()
+        self.custom_active = False
+        self.update_project_state()
+
+    def custom_loader(self, path, side):
+        return Loader(path, side, None, self.display_profile, self.color_generation)
+
+    def matches_filters(self, photo, stars, marker, publish):
+        """The rule of the export: a rejected photo only leaves when asked for."""
+        return (stars_match(photo, stars) and marker_matches(photo, marker) and (photo.pick != PICK_REJECT or marker == 'reject')
+                and (not publish or photo.publish))
+
+    def start_custom_export(self, job, count):
+        job.signals.progress.connect(self.export_progress, Qt.ConnectionType.QueuedConnection)
+        job.signals.finished.connect(lambda folder, error, total=count: self.export_done(job, folder, error, total), Qt.ConnectionType.QueuedConnection)
+        self.export_job = job
+        self.export_checking()
+        self.export_label.setText('Préparation de l’export…')
+        self.export_pool.start(job)
+
     def set_review(self, active):
+        self.custom_active = False
         if not (self.session and self.session.photos):
             active = False
         changed = active != self.review_active
@@ -1329,7 +1358,9 @@ class Window(QMainWindow):
             self.review.set_mode(mode)
 
     def leave_review(self):
-        if self.review_active:
+        if self.custom_active:
+            self.custom.back()
+        elif self.review_active:
             self.set_review(False)
 
     def skip_card(self, delta):
@@ -1353,7 +1384,9 @@ class Window(QMainWindow):
         return sorted((item.data(Qt.ItemDataRole.UserRole) for item in self.list.selectedItems()), key=lambda photo: photo is not current)
 
     def target_photos(self):
-        """Photos that the keys act on. Swipe and Duel show cards of their own."""
+        """Photos that the keys act on. Swipe and Duel show cards of their own, and Custom leaves the open project alone."""
+        if self.custom_active:
+            return []
         if self.review_active:
             return self.review.targets()
         return self.selected_photos()
@@ -1365,6 +1398,8 @@ class Window(QMainWindow):
         return [photo]+others if len(others) < len(targets) else [photo]
 
     def select_all(self):
+        if self.custom_active:
+            return
         if self.review_active:
             self.review.view().select_all()
         else:
@@ -1506,16 +1541,19 @@ class Window(QMainWindow):
 
     def update_project_state(self):
         has_photos = bool(self.session and self.session.photos)
-        page = (2 if self.review_active else 1) if has_photos else 0
+        page = 3 if self.custom_active else (2 if self.review_active else 1) if has_photos else 0
         if page == 0:
             self.home.refresh()
         self.pages.setCurrentIndex(page)
         self.sync_view_buttons()
-        self.export_button.setVisible(has_photos)
-        # Nothing to filter or switch on the welcome screen.
-        for control in (self.sort, self.segments, self.filter_chip, self.counter):
-            control.setVisible(has_photos)
-        if not has_photos:
+        in_project = has_photos and not self.custom_active
+        self.export_button.setVisible(in_project)
+        # Nothing to filter or switch on the welcome screen. Custom needs no project, and has its own export.
+        for control in (self.sort, self.filter_chip, self.counter):
+            control.setVisible(in_project)
+        for key, button in self.view_buttons.items():
+            button.setVisible(has_photos or key == 'custom')
+        if not in_project:
             self.filter_timer.stop()
             self.filter_panel.hide()
         # Black and white, background and zoom of the panel are those of the other views.
@@ -1538,6 +1576,7 @@ class Window(QMainWindow):
             self.toast(f'Enregistrement impossible : {error}', 6000)
 
     def close_project(self):
+        self.custom_active = False
         self.stop_export()
         if self.session:
             self.save_session()
@@ -1603,7 +1642,8 @@ class Window(QMainWindow):
 
     def background_tasks(self):
         """Long work under way, as (label, how many left), the most telling first."""
-        tasks = [('Corbeille du portfolio', len(self.portfolio.removed)), ('Chargement des aperçus', len(self.pending)),
+        tasks = [('Lecture des galeries', self.custom.setup.scanning()), ('Corbeille du portfolio', len(self.portfolio.removed)),
+                 ('Chargement des aperçus', len(self.pending)+len(self.custom.pending)),
                  ('Analyse des couleurs', self.review.analysis_left)]
         return [task for task in tasks if task[1]]
 
@@ -1960,7 +2000,9 @@ class Window(QMainWindow):
             self.navigate(delta)
 
     def navigate(self, delta):
-        if self.review_active:
+        if self.custom_active:
+            self.custom.navigate(delta)
+        elif self.review_active:
             self.review.navigate(delta)
         elif self.photos:
             row = max(0, min(len(self.photos)-1, self.list.currentRow()+delta))
@@ -2004,6 +2046,9 @@ class Window(QMainWindow):
         self.apply_filters()
 
     def undo(self):
+        if self.custom_active:
+            self.custom.undo()
+            return
         if not self.undo_stack:
             self.toast('Rien à annuler')
             return
@@ -2021,6 +2066,9 @@ class Window(QMainWindow):
         self.toast('Note annulée', 1200)
 
     def rate(self, stars):
+        if self.custom_active:
+            self.custom.key_bucket(stars)
+            return
         self.change(self.target_photos(), stars=stars)
 
     def toggle_like(self):
@@ -2330,7 +2378,7 @@ class Window(QMainWindow):
 
     def place_export_panel(self):
         self.export_panel.adjustSize()
-        self.export_panel.move((self.width()-self.export_panel.width())//2, self.height()-self.export_panel.height()-84)
+        self.export_panel.move((self.width()-self.export_panel.width())//2, self.height()-self.export_panel.height()-(168 if self.custom_active else 84))
         self.export_panel.raise_()
 
     def resizeEvent(self, event):
@@ -2380,6 +2428,7 @@ class Window(QMainWindow):
     def closeEvent(self, event):
         self.closing = True
         self.stop_export()
+        self.custom.shutdown()
         if self.update_job:
             self.update_job.cancelled.set()
         self.detail_timer.stop()

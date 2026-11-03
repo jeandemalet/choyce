@@ -25,6 +25,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QStyleOptionViewItem
 
 import triphoto
+import triphoto_custom
 import triphoto_portfolio
 import triphoto_prefs
 import triphoto_qt
@@ -59,6 +60,7 @@ def settle(window, condition, timeout=8000):
 
 def clear_settings():
     triphoto_qt.app_settings().clear()
+    shutil.rmtree(triphoto_custom.Store(triphoto_qt.SETTINGS_SCOPE).folder, ignore_errors=True)
 
 
 def legacy_session(root, flagged=(), stars=None):
@@ -287,6 +289,17 @@ def test_review_modes(base):
     assert window.pages.currentIndex() == 1
     window.close()
     clear_settings()
+
+
+class _Move:
+    def __init__(self, position, widget):
+        self._position, self._global = position, widget.mapToGlobal(position)
+
+    def position(self):
+        return self._position
+
+    def globalPosition(self):
+        return QPointF(self._global)
 
 
 class _Event:
@@ -980,7 +993,7 @@ def test_views_and_filter_panel(base):
     window = open_window(root)
     review = window.review
     # One row of views: Classique is the page with the ribbon, the others follow.
-    assert list(window.view_buttons) == ['classic', 'wall', 'toile', 'color', 'swipe', 'instagram']
+    assert list(window.view_buttons) == ['classic', 'wall', 'toile', 'color', 'swipe', 'instagram', 'custom']
     assert [window.view_buttons[key].text() for key in ('toile', 'swipe', 'instagram')] == ['Pêle-mêle', 'Tindr', 'Instagram']
     assert window.view_buttons['classic'].isChecked() and window.pages.currentIndex() == 1
     window.view_buttons['toile'].click()
@@ -1939,6 +1952,247 @@ def test_activity_bar(base):
     clear_settings()
 
 
+def test_custom_sorting(base):
+    # The logic alone: what went where, and what an export would write.
+    session = triphoto_custom.Sorting.create(base/'tri seul', 'Concours')
+    photos = [{'path': str(base/'a'/f'{i}.jpg'), 'gallery': 'a', 'relative': f'{i}.jpg'} for i in range(3)]+[{'path': str(base/'b'/'0.jpg'), 'gallery': 'b', 'relative': '0.jpg'}]
+    session.set_photos(photos)
+    session.buckets.extend([{'id': 'x', 'title': 'Concours : Fearless', 'subtitle': ''}, {'id': 'y', 'title': 'Livre', 'subtitle': 'Sélection'}])
+    a0, a1, a2, b0 = [photo['path'] for photo in photos]
+    session.add(a0, 'x')
+    session.add(a0, 'y')
+    session.add(b0, 'x')
+    session.add(a0, 'x')
+    assert session.buckets_of(a0) == ['x', 'y'] and session.count('x') == 2
+    assert [p['path'] for p in session.order('none')] == [a1, a2] and [p['path'] for p in session.order('y')] == [a0]
+    # The same file name from two galleries, a title Windows would refuse.
+    plan = session.export_plan()
+    assert ('Concours - Fearless', '0.jpg', a0) in plan and ('Concours - Fearless', '0 (2).jpg', b0) in plan and ('Livre', '0.jpg', a0) in plan
+    assert session.undo() == b0 and not session.buckets_of(b0)
+    session.add(b0, 'x')
+    assert session.undo() == b0 and session.undo() == a0 and session.buckets_of(a0) == ['x']
+    session.add(b0, 'x')
+    # A narrower choice keeps what has been sorted, and leaves the rest.
+    session.set_photos([photos[1]])
+    assert {p['path'] for p in session.photos} == {a1, a0, b0}
+    session.remove_bucket('x')
+    assert session.buckets_of(a0) == [] and len(session.buckets) == 1
+    session.save()
+    assert triphoto_custom.Sorting.load(session.path).data == session.data
+
+
+def test_custom_view(base):
+    clear_settings()
+    wedding = make_project(base/'custom'/'mariage', 6)
+    baptism = make_project(base/'custom'/'bapteme', 4)
+    place = base/'custom portfolio'
+    place.mkdir()
+    triphoto_qt.app_settings().setValue('portfolio_folder', str(place))
+    before = {str(p): p.read_bytes() for root in (wedding, baptism) for p in root.glob('*.jpg')}
+    window = open_window(baptism)
+    window.session.photos[0].stars = 5
+    window.select_photo(window.session.photos[1])
+    window.toggle_portfolio()
+    window.close_project()
+    window.set_folder(wedding)
+    for photo in window.session.photos[:2]:
+        photo.stars = 5
+    window.session.photos[5].stars, window.session.photos[5].pick = 5, 'reject'
+    project_photos = list(window.session.photos)
+    window.save_session()
+    window.close()
+    baptism_notes = triphoto.PhotoSession(baptism)
+    baptism_notes.photos[0].stars = 5
+    baptism_notes.save()
+    window = open_window(wedding)
+    window.resize(1300, 800)
+    window.show()
+    custom = window.custom
+    fired = lambda key: next(s for s in window.shortcuts if s.key().toString() == key).activated.emit()
+    # From a project, and without any project: the button stays on the welcome screen.
+    fired('Ctrl+6')
+    assert window.custom_active and window.pages.currentIndex() == 3 and window.view_buttons['custom'].isChecked()
+    assert custom.currentWidget() is custom.home and not window.export_button.isVisible()
+    window.view_buttons['classic'].click()
+    assert not window.custom_active and window.pages.currentIndex() == 1
+    window.close_project()
+    assert window.pages.currentIndex() == 0 and window.view_buttons['custom'].isVisible() and not window.view_buttons['wall'].isVisible()
+    window.view_buttons['custom'].click()
+    assert window.custom_active and window.pages.currentIndex() == 3
+    # The first screen: all the galleries, those it knows, then a choice among them.
+    custom.new_session()
+    setup = custom.setup
+    settle(window, lambda: not setup.scanning(), 10000)
+    assert not setup.go.isEnabled(), 'it needs a name'
+    setup.name.setText('Concours 2027')
+    assert setup.go.isEnabled()
+    rows = {row.title: row for row in setup.rows.values()}
+    assert set(rows) == {'Portfolio', 'mariage', 'bapteme'}
+    assert all(row.check.isChecked() for row in rows.values())
+    # Six and four photos, the one of the portfolio being one of the four.
+    assert len(setup.chosen()) == 9, len(setup.chosen())
+    setup.select_portfolio()
+    assert len(setup.chosen()) == 1 and rows['Portfolio'].check.isChecked() and not rows['mariage'].check.isChecked()
+    # A filter per gallery. The rejected photo stays out, as in an export.
+    setup.select_none()
+    rows['mariage'].check.setChecked(True)
+    rows['mariage'].stars.setCurrentIndex(rows['mariage'].stars.findData(5))
+    assert '2 sur 6' in rows['mariage'].count.text()
+    rows['bapteme'].check.setChecked(True)
+    assert len(setup.chosen()) == 6
+    rows['bapteme'].stars.setCurrentIndex(rows['bapteme'].stars.findData(5))
+    assert len(setup.chosen()) == 3
+    setup.go.click()
+    assert custom.currentWidget() is custom.work and custom.session.name == 'Concours 2027'
+    session = custom.session
+    assert session.path.exists() and len(session.photos) == 3
+    settle(window, lambda: custom.current_image() is not None, 10000)
+    wait(50)
+    # Nothing in the session of the open project may change while Custom is shown.
+    window.set_folder(wedding)
+    fired('Ctrl+6')
+    assert custom.current() is not None and window.target_photos() == []
+    stars_before = [p.stars for p in window.session.photos]
+    fired('1')
+    assert [p.stars for p in window.session.photos] == stars_before
+    # Buckets: a title, a description, and the same name only once.
+    dialog = triphoto_custom.BucketDialog(window, {'fearless'})
+    dialog.title.setText('Fearless')
+    assert not dialog.go.isEnabled()
+    dialog.title.setText('Fearless 2027')
+    assert dialog.go.isEnabled()
+    answers = [('Fearless', 'Mariage, mars'), ('Livre', '')]
+    custom.ask_bucket = lambda *args: answers.pop(0)
+    custom.add_bucket()
+    custom.add_bucket()
+    first, second = [bucket['id'] for bucket in session.buckets]
+    assert session.bucket(first)['subtitle'] == 'Mariage, mars' and set(custom.cards) == {None, first, second}
+    # The keys of the ribbon, in both directions, at the ends too.
+    assert custom.position() == (0, 3)
+    fired('V')
+    assert custom.position() == (1, 3)
+    fired('Right')
+    assert custom.position() == (2, 3)
+    fired('V')
+    assert custom.position() == (2, 3)
+    fired('C')
+    fired('Left')
+    assert custom.position() == (0, 3)
+    settle(window, lambda: custom.current_image() is not None, 10000)
+    wait(250)
+    window.grab()
+    # A real drag from the photo to a bucket: it goes there, and the next photo comes.
+    stage = custom.stage
+    dragged = custom.current()['path']
+    start = stage.photo_rect().center().toPoint()
+    card = custom.cards[first]
+    target = card.mapToGlobal(card.rect().center())
+    QTest.mousePress(stage, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+    stage.mouseMoveEvent(_Move(QPointF(start)+QPointF(30, 30), stage))
+    assert stage.dragging and custom.ghost.isVisible()
+    stage.mouseMoveEvent(_Move(QPointF(stage.mapFromGlobal(target)), stage))
+    assert card.hovered
+    stage.mouseReleaseEvent(_Move(QPointF(stage.mapFromGlobal(target)), stage))
+    assert not custom.ghost.isVisible() and not card.hovered
+    assert session.buckets_of(dragged) == [first] and custom.position() == (1, 3)
+    # Dropped outside a zone, nothing happens.
+    custom.drop_at(custom.work.mapToGlobal(custom.work.rect().topLeft()))
+    assert custom.position() == (1, 3)
+    # By key too, and Ctrl+Z takes it back.
+    fired('2')
+    second_photo = next(p['path'] for p in session.photos if second in session.buckets_of(p['path']))
+    assert custom.position() == (2, 3)
+    fired('Ctrl+Z')
+    assert not session.buckets_of(second_photo) and custom.position() == (1, 3)
+    # "Ne rien faire" leaves the photo without a bucket and moves on; a click changes it in place.
+    custom.key_bucket(0)
+    assert custom.position() == (2, 3) and not session.buckets_of(second_photo)
+    held = custom.current()['path']
+    custom.clicked_card(first)
+    custom.clicked_card(second)
+    assert session.buckets_of(held) == [first, second] and custom.position() == (2, 3)
+    custom.clicked_card(second)
+    assert session.buckets_of(held) == [first]
+    QTest.mouseClick(custom.cards[second], Qt.MouseButton.LeftButton)
+    assert second in session.buckets_of(held)
+    # Back to the photo for the views: sorted photos leave "Sans bucket" as they are sorted.
+    custom.view_combo.setCurrentIndex(custom.view_combo.findData(triphoto_custom.UNSORTED))
+    assert custom.position()[1] == 1
+    custom.key_bucket(1)
+    assert custom.position()[1] == 0 and custom.current() is None and session.count(first) == 3
+    window.grab()
+    custom.view_combo.setCurrentIndex(custom.view_combo.findData(first))
+    assert custom.position()[1] == 3
+    custom.view_combo.setCurrentIndex(custom.view_combo.findData(triphoto_custom.ALL))
+    # It is all saved, and several sessions live side by side.
+    custom.save()
+    assert triphoto_custom.Sorting.load(session.path).count(first) == 3
+    fired('Esc')
+    assert custom.currentWidget() is custom.home and custom.session is None
+    assert custom.session_rows.count() == 2
+    custom.new_session()
+    settle(window, lambda: not setup.scanning(), 10000)
+    setup.name.setText('Autre')
+    setup.select_portfolio()
+    setup.go.click()
+    assert len(custom.session.photos) == 1 and custom.session.path != session.path
+    fired('Esc')
+    assert custom.session_rows.count() == 3
+    reopened = next(found for found in custom.store.sessions() if found.name == 'Concours 2027')
+    custom.open_session(reopened)
+    assert reopened.count(first) == 3 and custom.work_title.text() == 'CONCOURS 2027'
+    # Modifying the selection brings back the former choice, and keeps the sorted photos.
+    custom.edit_selection()
+    settle(window, lambda: not setup.scanning(), 10000)
+    rows = {row.title: row for row in setup.rows.values()}
+    assert rows['mariage'].check.isChecked() and rows['mariage'].stars.currentData() == 5 and not rows['Portfolio'].check.isChecked()
+    assert len(setup.chosen()) == 3
+    setup.select_portfolio()
+    setup.go.click()
+    # The one of the portfolio joins the three already sorted, which stay.
+    assert len(custom.session.photos) == 4 and custom.session.count(first) == 3
+    # The export: a folder per bucket, under their titles as typed, originals untouched.
+    out = base/'custom export'
+    out.mkdir()
+    custom.ask_export_folder = lambda: str(out)
+    custom.export()
+    settle(window, lambda: window.export_job is None, 15000)
+    finished = out/'Concours 2027'
+    assert {p.name for p in finished.iterdir()} == {'Fearless', 'Livre'}
+    assert len(list((finished/'Fearless').iterdir())) == 3 and len(list((finished/'Livre').iterdir())) == 1
+    # Two photos of the same name from two galleries both arrive.
+    assert {p.read_bytes() for p in (finished/'Fearless').iterdir()} <= set(before.values())
+    # A second export takes a dated name and leaves the first one.
+    custom.export()
+    settle(window, lambda: window.export_job is None, 15000)
+    assert len(list(out.iterdir())) == 2 and not [p for p in out.iterdir() if p.name.endswith('.en_cours')]
+    # Cancelled, it leaves nothing.
+    job = triphoto_custom.ExportJob(custom.session.export_plan(), out/'annule')
+    job.cancelled.set()
+    job.run()
+    assert not (out/'annule').exists() and not (out/'annule.en_cours').exists()
+    assert {str(p): p.read_bytes() for root in (wedding, baptism) for p in root.glob('*.jpg')} == before, 'originals changed'
+    # A bucket removed takes no photo with it.
+    real_ask = triphoto_custom.ask
+    triphoto_custom.ask = lambda *args: 'delete'
+    try:
+        custom.delete_bucket(first)
+        assert custom.session.bucket(first) is None and len(custom.session.photos) == 4
+        # And a session goes to the bin, from the list.
+        moved = []
+        real_trash = triphoto_custom.move_to_trash
+        triphoto_custom.move_to_trash = lambda path: moved.append(path) or Path(path).unlink()
+        doomed = custom.session
+        custom.show_home()
+        custom.delete_session(doomed)
+        triphoto_custom.move_to_trash = real_trash
+        assert moved == [doomed.path] and custom.session_rows.count() == 2
+    finally:
+        triphoto_custom.ask = real_ask
+    window.close()
+    clear_settings()
+
+
 def test_defaults_and_viewer_room(base):
     clear_settings()
     project = make_project(base/'defaults', 4)
@@ -1959,7 +2213,7 @@ def main():
     app.setStyleSheet(triphoto_qt.STYLE)
     base = Path(tempfile.mkdtemp(prefix='triphoto-tests-'))
     tests = [test_legacy_session, test_nested_session_ignored, test_dominant_color, test_recents, test_shortcuts,
-             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_export_by_its_button, test_themed_dialog, test_update, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_defaults_and_viewer_room]
+             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_export_by_its_button, test_themed_dialog, test_update, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_defaults_and_viewer_room]
     failures = 0
     try:
         for test in tests:
