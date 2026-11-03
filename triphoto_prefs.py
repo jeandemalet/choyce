@@ -46,7 +46,6 @@ ACTIONS = [
     ('mode_classic', 'Vue Classique', ['Ctrl+0']),
     ('mode_wall', 'Vue Grille', ['Ctrl+1']),
     ('mode_toile', 'Vue Pêle-mêle', ['Ctrl+2']),
-    ('mode_color', 'Vue Couleur', ['Ctrl+3']),
     ('mode_swipe', 'Vue Tindr', ['Ctrl+4']),
     ('mode_instagram', 'Vue Instagram', ['Ctrl+5']),
     ('custom_home', 'Accueil et sélections custom', ['Ctrl+6']),

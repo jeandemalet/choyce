@@ -422,9 +422,9 @@ def test_grid(base):
     assert color.headings[0][1] != 'Rouges' and color.headings[-1][1] == 'Neutres'
     # The order is a criterion and a direction.
     review.flip_color_order()
-    assert color.order == 'hue' and review.order_button.text() == 'Rouge → violet'
-    review.order_combo.setCurrentIndex(1)
-    assert color.order == 'light' and review.order_button.text() == 'Clair → sombre'
+    assert color.order == 'hue' and review.order_button.text() == 'Croissant' and review.order_button.toolTip() == 'Du rouge au violet'
+    review.order_combo.setCurrentIndex(2)
+    assert color.order == 'light' and review.order_button.text() == 'Décroissant'
     lights = [review.info[p.relative_path]['light'] for p in color.ordered]
     assert lights == sorted(lights, reverse=True)
     review.set_color_order('hue')
@@ -993,7 +993,18 @@ def test_views_and_filter_panel(base):
     window = open_window(root)
     review = window.review
     # One row of views: Classique is the page with the ribbon, the others follow.
-    assert list(window.view_buttons) == ['buckets', 'classic', 'wall', 'toile', 'color', 'swipe', 'instagram']
+    assert list(window.view_buttons) == ['buckets', 'classic', 'wall', 'toile', 'swipe', 'instagram']
+    # In the grid, Trier par leads to the sorts by color and back to the name.
+    window.set_view('wall')
+    review.wall_sort.setCurrentIndex(review.wall_sort.findData('contrast'))
+    assert review.mode == 'color' and review.views['color'].order == 'contrast' and window.view_buttons['wall'].isChecked()
+    assert review.order_combo.currentData() == 'contrast'
+    review.order_combo.setCurrentIndex(0)
+    assert review.mode == 'wall' and review.wall_sort_button.text() == 'Croissant'
+    review.wall_sort_button.click()
+    assert window.sort.currentData() == 'name_desc' and review.wall_sort_button.text() == 'Décroissant'
+    review.wall_sort_button.click()
+    window.set_view('classic')
     assert not window.view_buttons['buckets'].isVisible()
     assert window.home_button.isVisible()
     assert [window.view_buttons[key].text() for key in ('toile', 'swipe', 'instagram')] == ['Pêle-mêle', 'Tindr', 'Instagram']
@@ -1004,7 +1015,7 @@ def test_views_and_filter_panel(base):
     window.view_buttons['classic'].click()
     assert not window.review_active and window.view_buttons['classic'].isChecked()
     window.set_view('color')
-    assert window.view_buttons['color'].isChecked()
+    assert window.view_buttons['wall'].isChecked(), 'the grid sorted by color'
     review.set_mode('wall')
     assert window.view_buttons['wall'].isChecked()
     # The same filter everywhere.
@@ -1013,7 +1024,7 @@ def test_views_and_filter_panel(base):
     assert not window.filter_panel.isVisible()
     window.filter_chip.click()
     panel = window.filter_panel
-    assert panel.isVisible() and window.filter_scrim.isVisible() and review.tools.isVisible()
+    assert panel.isVisible() and window.filter_scrim.isVisible() and not review.tools.isVisibleTo(panel)
     assert abs(panel.geometry().center().x()-window.rect().center().x()) < 3
     assert panel.geometry().top() >= 0 and panel.geometry().bottom() <= window.height()
     wait(300)
@@ -1028,10 +1039,17 @@ def test_views_and_filter_panel(base):
     window.filter_chip.click()
     window.leave_review()
     assert not panel.isVisible() and window.review_active
+    # What is displayed has its own button, apart from the filters.
+    assert window.display_button.isVisible()
+    window.show_display_panel()
+    assert window.display_panel.isVisible() and review.tools.isVisible()
+    window.display_panel.hide()
     # In Classique, no tools of the other views.
     window.set_view('classic')
+    assert not window.display_button.isVisible()
+    window.note_filter.buttons[0].click() if False else None
     window.show_filter_panel()
-    assert window.filter_panel.isVisible() and not review.tools.isVisible()
+    assert window.filter_panel.isVisible()
     window.hide_filter_panel()
     window.note_filter.buttons[0].click()
     assert '0 étoile' in window.filter_chip.toolTip()
@@ -1518,16 +1536,16 @@ def test_color_orders(base):
     review = window.review
     window.set_view('color')
     color = review.views['color']
-    assert color.order == 'hue' and review.order_combo.currentText() == 'Tri par couleur'
+    assert color.order == 'hue' and review.order_combo.currentText() == 'Couleur'
     settle(window, lambda: len(review.info) == 3)
     names = lambda: [p.path.name for p in color.ordered]
     review.set_color_order('contrast')
-    assert names()[0] == 'hard.jpg' and review.order_button.text() == 'Fort → faible'
+    assert names()[0] == 'hard.jpg' and review.order_button.text() == 'Décroissant'
     assert not review.groups_button.isVisibleTo(review.options['color'][0])
     review.flip_color_order()
     assert color.order == 'flat' and names()[-1] == 'hard.jpg'
     review.set_color_order('vivid')
-    assert names()[0] == 'vivid.jpg' and review.order_combo.currentText() == 'Tri par saturation'
+    assert names()[0] == 'vivid.jpg' and review.order_combo.currentText() == 'Saturation'
     review.set_color_order('light')
     # The cursor only varies along what is sorted: same grey scale, or the same strength of any hue.
     assert triphoto_review.order_tint({'light': 0}, 'light').name() == '#000000'
@@ -2316,7 +2334,10 @@ def test_selection_views(base):
     assert {str(p.path) for p in window.photos} == {paths[0], paths[1], paths[3]} and 'AG' in window.filter_chip.toolTip()
     state('b', 'include')
     assert {str(p.path) for p in window.photos} == {paths[0], paths[1], paths[2], paths[3]}
-    assert rule.any_button and 'AG ou WPJA' in window.filter_chip.toolTip()
+    assert rule.options.isVisibleTo(rule) and 'AG ou WPJA' in window.filter_chip.toolTip()
+    assert window.filter_chip.text() == 'Filtre  ▾', 'Revoir tells which bucket is shown'
+    # Two of them included stay so, each with its own state.
+    assert rule.buttons['a']['include'].isChecked() and rule.buttons['b']['include'].isChecked()
     rule.all_button.click()
     wait(10)
     assert {str(p.path) for p in window.photos} == {paths[3]} and 'AG et WPJA' in window.filter_chip.toolTip()
@@ -2324,11 +2345,9 @@ def test_selection_views(base):
     wait(10)
     state('b', 'exclude')
     assert {str(p.path) for p in window.photos} == {paths[0], paths[1]} and 'sans WPJA' in window.filter_chip.toolTip()
-    rule.none_button.click()
-    wait(10)
+    window.review_tabs.tabs['none'].click()
     assert {str(p.path) for p in window.photos} == {paths[4], paths[5]}
-    rule.none_button.click()
-    wait(10)
+    window.review_tabs.tabs['all'].click()
     assert len(window.photos) == 6 and not sorting.rule()['include']
     window.grab()
     # The Buckets view shows what the filter lets through, and the filter is at hand there.
@@ -2349,7 +2368,7 @@ def test_selection_views(base):
     state('a', '')
     assert len(window.photos) == 6
     only = next(p for p in window.photos if str(p.path) == paths[0])
-    window.move_to_bucket(only, 'b', True)
+    window.move_to_bucket(only, 'b', 'add')
     assert sorting.buckets_of(paths[0]) == ['a', 'b']
     window.undo()
     window.move_to_bucket(only, 'b')
@@ -2381,11 +2400,11 @@ def test_selection_views(base):
     drag_to(lambda rects: QPointF(rects['b'].left()+10, rects['b'].center().y()))
     assert sorting.buckets_of(moving) == ['b']
     window.undo()
-    # While dragging only, one more zone takes it out of its buckets.
-    drag_to(lambda rects: rects[None].center())
+    # On the bucket it is already in, a drop takes it out, wherever it falls.
+    drag_to(lambda rects: QPointF(rects[home[0]].right()-10, rects[home[0]].center().y()))
     assert not sorting.buckets_of(moving)
     window.undo()
-    assert sorting.buckets_of(moving) == home and None not in dict(strip.rects())
+    assert sorting.buckets_of(moving) == home
     # Everything picked goes together, and the keys of the notes pick the buckets.
     wall.pick(window.photos[0])
     wall.select_all()
@@ -2399,10 +2418,41 @@ def test_selection_views(base):
     toile.resize(1400, 760)
     wait(50)
     window.grab()
-    for mode in ('color', 'swipe', 'instagram'):
-        window.set_view(mode)
-        wait(50)
-        window.grab()
+    # On the table, all the prints have the size of the best ones.
+    assert max(toile.tile_rect(window.photos[0]).width(), toile.tile_rect(window.photos[0]).height()) == 400
+    window.set_view('color')
+    wait(50)
+    window.grab()
+    # Tindr decides about one bucket, without the strip.
+    window.set_view('swipe')
+    swipe = review.view()
+    assert not strip.isVisible() and window.review_tabs.isVisible() and review.swipe_bucket_pill.isVisible() and not review.swipe_left.parentWidget().isVisible()
+    review.swipe_bucket.setCurrentIndex(review.swipe_bucket.findData('b'))
+    assert review.swipe_labels() == ('Retirer de WPJA', 'Ajouter à WPJA')
+    card = swipe.current()
+    keys = list(sorting.buckets_of(card.relative_path))
+    review.apply_swipe(card, 1)
+    assert 'b' in sorting.buckets_of(card.relative_path)
+    window.undo()
+    assert sorting.buckets_of(card.relative_path) == keys
+    review.apply_swipe(card, -1)
+    assert 'b' not in sorting.buckets_of(card.relative_path)
+    window.undo()
+    assert sorting.buckets_of(card.relative_path) == keys
+    # Instagram has its own light and dark, apart from the background of the other views.
+    window.set_view('instagram')
+    insta = review.view()
+    background = window.viewer.background
+    was = insta.light
+    insta.theme_button.click()
+    assert insta.light != was and window.viewer.background == background
+    insta.set_light(True)
+    assert insta.CARD == '#ffffff' and insta.SCREEN == '#000000'
+    window.grab()
+    insta.set_light(False)
+    assert insta.CARD == '#000000' and insta.SCREEN != '#000000'
+    window.grab()
+    assert strip.isVisible()
     window.set_view('classic')
     window.grab()
     assert window.bucket_strip.isVisible() and not window.review_active
@@ -2555,7 +2605,7 @@ def test_selection_review_and_health(base):
         assert strip.dragging and window.bucket_ghost.isVisible()
         over = strip.mapToGlobal(QPointF(target.left()+10, target.center().y()).toPoint())
         window.list.mouseMoveEvent(Drag(over))
-        assert strip.hovered == ('b', False)
+        assert strip.hovered == ('b', 'move')
         QTest.mouseRelease(viewport, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, viewport.mapFromGlobal(over))
         assert sorting.buckets_of(moved.relative_path) == ['b'] and len(window.photos) == 2 and not strip.dragging
         window.undo()

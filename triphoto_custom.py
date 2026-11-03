@@ -277,13 +277,13 @@ class SelectionSession(PhotoSession):
 
 class BucketStrip(QWidget):
     """Under the views of a selection: a click puts the photo in a bucket or takes it out, a photo dragged here moves it or adds it to another one."""
-    SPLIT = .62
 
     def __init__(self, window):
         super().__init__()
         self.window = window
         self.dragging = False
         self.hovered = None
+        self.held = set()
         self.mouse = None
         self.setMouseTracking(True)
         self.setFixedHeight(66)
@@ -291,9 +291,7 @@ class BucketStrip(QWidget):
         self.hide()
 
     def keys(self):
-        """The buckets; while a photo is dragged, also the zone that takes it out."""
-        keys = [bucket['id'] for bucket in self.window.selection.buckets] if self.window.selection else []
-        return keys+[None] if self.dragging and keys else keys
+        return [bucket['id'] for bucket in self.window.selection.buckets] if self.window.selection else []
 
     def rects(self):
         keys = self.keys()
@@ -301,14 +299,19 @@ class BucketStrip(QWidget):
         return [(key, QRectF(12+index*(width+8), 8, width, self.height()-16)) for index, key in enumerate(keys)]
 
     def hit(self, point):
-        """(bucket, whether this keeps the photo where it is as well), or None."""
+        """(bucket, what happens there): a click toggles; a drop moves, adds, or takes out of a bucket the photo is already in."""
         for key, rect in self.rects():
             if rect.contains(point):
-                return key, bool(key and self.dragging and point.x() > rect.left()+rect.width()*self.SPLIT)
+                if not self.dragging:
+                    return key, 'toggle'
+                if key in self.held:
+                    return key, 'remove'
+                return key, 'add' if point.x() > rect.center().x() else 'move'
         return None
 
-    def drag_to(self, point):
+    def drag_to(self, point, photo):
         self.dragging = True
+        self.held = set(self.window.selection.buckets_of(photo.relative_path))
         self.hovered = self.hit(QPointF(self.mapFromGlobal(point)))
         self.update()
 
@@ -362,20 +365,30 @@ class BucketStrip(QWidget):
                 painter.drawText(inner, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, hint)
 
     def paint_drop(self, painter, key, rect, tone, title):
-        """Moving is the wide part, as it is what one mostly wants; keeping it here too is the narrow one."""
-        parts = [(rect, 'Retirer du bucket', False)] if not key else [
-            (QRectF(rect.left(), rect.top(), rect.width()*self.SPLIT, rect.height()), title, False),
-            (QRectF(rect.left()+rect.width()*self.SPLIT, rect.top(), rect.width()*(1-self.SPLIT), rect.height()), '+ Aussi', True)]
-        for part, text, duplicate in parts:
-            lit = self.hovered == (key, duplicate)
+        """Its name stays in place. Below it, what a drop does there, according to where the photo already is."""
+        font = painter.font()
+        painter.setPen(QColor(TEXT))
+        painter.drawText(rect.adjusted(8, 5, -8, 0), Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, painter.fontMetrics().elidedText(title, Qt.TextElideMode.ElideRight, int(rect.width()-16)))
+        font.setPixelSize(12)
+        painter.setFont(font)
+        if key in self.held:
+            parts = [(rect, 'Retirer du bucket', 'remove')]
+        else:
+            middle = rect.center().x()
+            parts = [(QRectF(rect.left(), rect.top(), middle-rect.left(), rect.height()), 'Déplacer', 'move'),
+                     (QRectF(middle, rect.top(), rect.right()-middle, rect.height()), 'Ajouter aussi', 'add')]
+        for part, text, mode in parts:
+            lit = self.hovered == (key, mode)
             if lit:
                 veil = QColor(tone)
-                veil.setAlpha(120)
+                veil.setAlpha(110)
                 painter.setBrush(veil)
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.drawRoundedRect(part, 9, 9)
-            painter.setPen(QColor(TEXT if lit or not duplicate else MUTED))
-            painter.drawText(part.adjusted(8, 0, -8, 0), Qt.AlignmentFlag.AlignCenter, painter.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, int(part.width()-16)))
+            painter.setPen(QColor(TEXT if lit else MUTED))
+            painter.drawText(part.adjusted(6, 0, -6, -5), Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom, text)
+        font.setPixelSize(13)
+        painter.setFont(font)
 
     def mouseMoveEvent(self, event):
         self.mouse = event.position()
@@ -445,13 +458,13 @@ class ReviewTabs(QFrame):
     def show_only(self, key):
         self.window.selection.set_rule(include=[] if key in (ALL, UNSORTED) else [key], exclude=[], none=key == UNSORTED, all=False)
         self.window.custom.save_timer.start()
-        self.window.bucket_rule.rebuild()
+        self.window.bucket_rule.sync()
         self.window.filters_changed()
 
 
 class BucketFilter(QFrame):
-    """The buckets in the Filtre panel: for each one, plainly, whether it is ignored, required or refused."""
-    STATES = (('', 'Indifférent', 'state'), ('include', 'Seulement', 'stateOn'), ('exclude', 'Exclure', 'stateOff'))
+    """The buckets in the Filtre panel: for each one, plainly, whether its photos are left out, kept in, or whether it does not matter."""
+    STATES = (('exclude', 'Exclure', 'stateOff'), ('include', 'Inclure', 'stateOn'), ('', 'Peu importe', 'state'))
 
     def __init__(self, window):
         super().__init__()
@@ -460,17 +473,10 @@ class BucketFilter(QFrame):
         self.lines.setContentsMargins(0, 0, 0, 0)
         self.lines.setSpacing(4)
         self.buttons = {}
+        self.counts = {}
+        self.groups = []
+        self.any_button = self.all_button = self.options = None
         self.hide()
-
-    def plain(self, row, text, action, checked=None, tip=''):
-        button = QPushButton(text, objectName='seg' if checked is not None else 'ghost', checkable=checked is not None)
-        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        button.setToolTip(tip)
-        if checked is not None:
-            button.setChecked(checked)
-        button.clicked.connect(lambda *_: action())
-        row.addWidget(button)
-        return button
 
     def clear_layout(self, layout):
         while layout.count():
@@ -478,77 +484,90 @@ class BucketFilter(QFrame):
             if item.layout():
                 self.clear_layout(item.layout())
             elif item.widget():
-                widget = item.widget()
-                widget.setParent(None)
-                widget.deleteLater()
+                item.widget().hide()
+                item.widget().deleteLater()
 
     def rebuild(self):
+        """Only for another list of buckets: a click on a choice changes it in place."""
         self.clear_layout(self.lines)
-        self.buttons = {}
+        for group in self.groups:
+            group.deleteLater()
+        self.buttons, self.counts, self.groups = {}, {}, []
+        self.options = None
         selection = self.window.selection
         if not selection:
             return
-        rule = selection.rule()
         if not selection.buckets:
             self.lines.addWidget(QLabel('Aucun bucket pour le moment.', objectName='muted'))
+            return
         for bucket in selection.buckets:
             key = bucket['id']
-            state = 'include' if key in rule['include'] else 'exclude' if key in rule['exclude'] else ''
             row = QHBoxLayout()
             row.setSpacing(2)
             title = QLabel(bucket['title'])
             title.setStyleSheet(f'color: {pastel(bucket["color"]).name()};')
             row.addWidget(title)
             row.addSpacing(8)
-            row.addWidget(QLabel(str(selection.count(key)), objectName='faint'))
+            self.counts[key] = QLabel(objectName='faint')
+            row.addWidget(self.counts[key])
             row.addStretch(1)
             self.buttons[key] = {}
             group = QButtonGroup(self)
+            self.groups.append(group)
             for value, label, name in self.STATES:
                 button = QPushButton(label, objectName=name, checkable=True)
                 button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-                button.setChecked(value == state)
                 group.addButton(button)
                 button.clicked.connect(lambda checked=False, k=key, v=value: self.set_state(k, v))
                 row.addWidget(button)
                 self.buttons[key][value] = button
             self.lines.addLayout(row)
-        options = QHBoxLayout()
-        options.setSpacing(4)
-        self.any_button = self.all_button = None
-        if len(rule['include']) > 1:
-            options.addWidget(QLabel('Une photo doit être dans', objectName='muted'))
-            self.any_button = self.plain(options, 'au moins un', lambda: self.change(all=False), not rule['all'])
-            self.all_button = self.plain(options, 'tous à la fois', lambda: self.change(all=True), rule['all'])
-            options.addSpacing(12)
-        self.none_button = self.plain(options, 'Seulement les photos sans bucket', lambda: self.change(none=not selection.rule()['none'], include=[], exclude=[]), rule['none'])
-        options.addStretch(1)
-        self.lines.addSpacing(6)
-        self.lines.addLayout(options)
+        self.options = QWidget()
+        row = QHBoxLayout(self.options)
+        row.setContentsMargins(0, 6, 0, 0)
+        row.setSpacing(4)
+        row.addWidget(QLabel('Avec plusieurs buckets inclus, afficher les photos', objectName='muted'))
+        self.any_button = self.choice(row, "dans l'un d'eux", False)
+        self.all_button = self.choice(row, 'dans tous à la fois', True)
+        row.addStretch(1)
+        self.lines.addWidget(self.options)
+        self.sync()
+
+    def choice(self, row, text, value):
+        button = QPushButton(text, objectName='seg', checkable=True)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        button.clicked.connect(lambda *_: self.change(all=value))
+        row.addWidget(button)
+        return button
+
+    def sync(self):
+        selection = self.window.selection
+        if not selection or not self.options:
+            return
+        rule = selection.rule()
+        for key, buttons in self.buttons.items():
+            state = 'include' if key in rule['include'] else 'exclude' if key in rule['exclude'] else ''
+            buttons[state].setChecked(True)
+            self.counts[key].setText(str(selection.count(key)))
+        self.any_button.setChecked(not rule['all'])
+        self.all_button.setChecked(bool(rule['all']))
+        self.options.setVisible(len(rule['include']) > 1)
 
     def set_state(self, key, value):
         rule = self.window.selection.rule()
         include = [other for other in rule['include'] if other != key]
         exclude = [other for other in rule['exclude'] if other != key]
-        (include if value == 'include' else exclude if value == 'exclude' else []).append(key)
-        # Rebuilt once this click is over: it comes from a button of the list.
-        self.window.selection.set_rule(include=include, exclude=exclude, none=False)
-        self.applied()
-
-    def applied(self):
-        self.window.custom.save_timer.start()
-        self.window.filters_changed()
-        QTimer.singleShot(0, self.refresh_panel)
-
-    def refresh_panel(self):
-        self.rebuild()
-        if self.window.filter_panel.isVisible():
-            self.window.place_filter_panel()
-            QTimer.singleShot(0, self.window.place_filter_panel)
+        if value:
+            (include if value == 'include' else exclude).append(key)
+        self.change(include=include, exclude=exclude, none=False)
 
     def change(self, **changes):
         self.window.selection.set_rule(**changes)
-        self.applied()
+        self.window.custom.save_timer.start()
+        self.window.filters_changed()
+        self.sync()
+        if self.window.filter_panel.isVisible():
+            self.window.place_filter_panel()
 
     def labels(self):
         selection = self.window.selection
