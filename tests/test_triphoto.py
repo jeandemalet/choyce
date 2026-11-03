@@ -1325,9 +1325,9 @@ def test_portfolio(base):
         window.select_photo(second)
         window.toggle_portfolio()
         assert window.portfolio.contains(first.path) and window.in_portfolio(second)
-        settle(window, lambda: (place/'mariage'/first.path.name).exists() and (place/'mariage'/second.path.name).exists())
-        assert not list(place.rglob('*.part'))
-        assert (place/'mariage'/first.path.name).read_bytes() == before[first.path.name]
+        # Nothing is copied: a list, and no photo written anywhere.
+        window.portfolio.wait()
+        assert not [p for p in place.rglob('*') if p.suffix.lower() == '.jpg']
         # Portfolio, À publier and the note filter independently of each other.
         window.choices.portfolio.click()
         assert {p.relative_path for p in window.photos} == {first.relative_path, second.relative_path}
@@ -1340,11 +1340,10 @@ def test_portfolio(base):
         window.select_photo(third)
         window.toggle_publish()
         window.toggle_portfolio()
-        settle(window, lambda: (place/'mariage'/third.path.name).exists())
+        assert window.portfolio.contains(third.path)
         window.undo()
-        settle(window, lambda: not (place/'mariage'/third.path.name).exists())
         assert not window.portfolio.contains(third.path) and third.publish
-        assert binned == [third.path.name]
+        assert not binned
         window.save_session()
         window.close_project()
         # The home page shows it apart from the recent projects.
@@ -1367,26 +1366,22 @@ def test_portfolio(base):
         assert not any(window.is_portfolio_path(e['path']) for e in window.recents.entries())
         copy = next(p for p in window.session.photos if p.relative_path == f'mariage/{first.path.name}')
         assert copy.stars == 5 and copy.publish and window.in_portfolio(copy)
+        assert triphoto.norm_path(copy.path) == triphoto.norm_path(first.path), 'read from the original'
         assert window.photo_project(copy) == 'mariage'
         window.choices.project.setCurrentIndex(names.index('bapteme'))
         assert [window.portfolio.project_of(p.relative_path) for p in window.photos] == ['bapteme']
         window.choices.project.setCurrentIndex(0)
-        # Sorted again here without touching the project, then taken out: the file goes to the bin.
+        # Sorted again here without touching the project, then taken out: the original stays, nothing goes to the bin.
         window.change([copy], stars=2)
         window.select_photo(copy)
         window.toggle_portfolio()
-        settle(window, lambda: not copy.path.exists(), 12000)
-        assert first.path.name in binned and len(window.session.photos) == 2
+        window.portfolio.wait()
+        wait(50)
+        assert copy.path.exists() and not binned and len(window.session.photos) == 2
         window.close_project()
         window.set_folder(project)
         assert next(p for p in window.session.photos if p.relative_path == first.relative_path).stars == 5
         assert not window.portfolio.contains(first.path) and window.portfolio.contains(second.path)
-        # Deleted by hand in the folder: no longer in the portfolio at the next opening.
-        window.close_project()
-        window.pool.waitForDone()
-        (place/'mariage'/second.path.name).unlink()
-        window.set_folder(project)
-        assert not window.portfolio.contains(second.path)
         assert {p.name: p.read_bytes() for p in project.glob('*.jpg')} == before, 'originals changed'
         window.close()
     finally:
@@ -1406,10 +1401,14 @@ def test_trash_refused_brings_photo_back(base):
     triphoto_qt.app_settings().setValue('portfolio_folder', str(place))
     original, naps = triphoto_portfolio.move_to_trash, triphoto_portfolio.time.sleep
     try:
+        # A copy made by an earlier version, the only thing that ever goes to the bin.
+        for photo in triphoto.discover_photos(project):
+            (place/'refus').mkdir(exist_ok=True)
+            shutil.copy2(photo.path, place/'refus'/photo.path.name)
+        (place/triphoto.SESSION_DIR_NAME).mkdir()
+        (place/triphoto.SESSION_DIR_NAME/triphoto_portfolio.MANIFEST_FILE).write_text(json.dumps({'version': 1, 'items': {
+            f'refus/{photo.path.name}': {'source': str(photo.path), 'project': 'refus'} for photo in triphoto.discover_photos(project)}}), encoding='utf-8')
         window = open_window(project)
-        for index in (0, 1):
-            window.select_photo(window.session.photos[index])
-            window.toggle_portfolio()
         window.open_portfolio()
         photo = window.session.photos[0]
         triphoto_portfolio.move_to_trash = lambda path: False
@@ -1439,7 +1438,7 @@ def test_portfolio_relocate(base):
     window.relocate_portfolio(old, new)
     settle(window, lambda: window.relocating is None)
     assert window.portfolio.folder == new and window.portfolio.contains(window.session.photos[0].path)
-    assert (new/'reloc'/name).exists() and (old/'reloc'/name).exists()
+    assert not (new/'reloc').exists(), 'nothing to copy but the list'
     window.close()
 
 
@@ -1678,7 +1677,7 @@ def test_select_all(base):
     triphoto_qt.ask = lambda parent, title, text, buttons: answers.append(text) or 'cancel'
     try:
         window.toggle_portfolio()
-        assert len(answers) == 1 and '12 copies' in answers[0] and not taken
+        assert len(answers) == 1 and '12 photos' in answers[0] and not taken
         triphoto_qt.ask = lambda parent, title, text, buttons: 'remove'
         window.toggle_portfolio()
         assert len(taken) == 1 and len(taken[0]) == 12
@@ -1746,7 +1745,196 @@ def test_ribbon_portfolio_button(base):
     assert all(contains(p) for p in window.photos) and len(window.target_photos()) == 6
     click(2)
     assert not any(contains(p) for p in window.photos) and len(window.target_photos()) == 6
-    settle(window, lambda: not window.portfolio.copying)
+    window.close()
+    clear_settings()
+
+
+def test_portfolio_without_copies(base):
+    clear_settings()
+    project = make_project(base/'noces'/'Output', 6)
+    place = base/'sans copies'
+    place.mkdir()
+    before = {p.name: p.read_bytes() for p in project.glob('*.jpg')}
+    binned = []
+    original_trash = triphoto_portfolio.move_to_trash
+    def fake_trash(path):
+        binned.append(Path(path).name)
+        Path(path).unlink()
+        return True
+    triphoto_portfolio.move_to_trash = fake_trash
+    triphoto_qt.app_settings().setValue('portfolio_folder', str(place))
+    answers = []
+    real_ask = triphoto_qt.ask
+    triphoto_qt.ask = lambda parent, title, text, buttons: answers.append(title) or 'close'
+    try:
+        window = open_window(project)
+        # Adding many photos saves the list once, and at once.
+        saves = []
+        real_save = window.portfolio.save
+        window.portfolio.save = lambda: saves.append(1) or real_save()
+        window.select_all()
+        window.toggle_portfolio()
+        assert len(saves) == 1 and len(window.portfolio.items) == 6
+        window.portfolio.save = real_save
+        window.session.photos[0].stars = 5
+        assert not [p for p in place.rglob('*') if p.suffix.lower() == '.jpg']
+        window.close_project()
+        # The manifest holds the references across a restart.
+        window.close()
+        window = open_window(project)
+        assert all(window.portfolio.contains(p.path) for p in window.session.photos)
+        window.open_portfolio()
+        assert window.viewing_portfolio() and len(window.session.photos) == 6
+        # Exporting: everything by default, not the 5 stars, in a folder per project.
+        dialog = triphoto_qt.ExportDialog(window)
+        assert len(dialog.photos()) == 6 and dialog.folder_name() == 'Portfolio'
+        window.run_export(dialog.photos(), dialog.folder_name())
+        settle(window, lambda: window.export_job is None, 15000)
+        exported = window.session.session_dir/triphoto_qt.EXPORT_ROOT_NAME/'Portfolio'/'noces'
+        assert {p.name: p.read_bytes() for p in exported.glob('*.jpg')} == before
+        # An original out of reach: its photo leaves the view, not the portfolio, and keeps its notes.
+        marked = window.session.photos[0]
+        window.change([marked], stars=4)
+        relative, source = marked.relative_path, marked.path
+        def quiet():
+            # Windows refuses to move a file being read.
+            settle(window, lambda: not window.background_tasks(), 15000)
+            window.pool.waitForDone()
+            window.review.analysis_pool.waitForDone()
+        window.close_project()
+        quiet()
+        hidden = source.with_name(source.name+'.away')
+        os.replace(source, hidden)
+        window.open_portfolio()
+        assert len(window.session.photos) == 5 and relative in window.portfolio.items
+        assert relative in window.session.absent
+        dialog = triphoto_qt.ExportDialog(window)
+        assert len(dialog.photos()) == 5
+        window.close_project()
+        os.replace(hidden, source)
+        window.open_portfolio()
+        back = next(p for p in window.session.photos if p.relative_path == relative)
+        assert back.stars == 4 and not window.session.absent, 'the notes come back with the file'
+        # It comes back too through a refresh, without closing the project.
+        quiet()
+        os.replace(source, hidden)
+        window.refresh()
+        assert len(window.session.photos) == 5
+        os.replace(hidden, source)
+        window.refresh()
+        assert next(p for p in window.session.photos if p.relative_path == relative).stars == 4
+        # Taking a reference out never sends anything to the bin.
+        window.select_all()
+        triphoto_qt.ask = lambda parent, title, text, buttons: 'remove'
+        window.toggle_portfolio()
+        window.portfolio.wait()
+        wait(50)
+        assert not binned and not window.portfolio.items
+        assert {p.name: p.read_bytes() for p in project.glob('*.jpg')} == before, 'originals changed'
+        window.close()
+    finally:
+        triphoto_portfolio.move_to_trash = original_trash
+        triphoto_qt.ask = real_ask
+    clear_settings()
+
+
+def test_portfolio_older_copies(base):
+    # A portfolio made by an earlier version keeps working, on its copies.
+    clear_settings()
+    project = make_project(base/'ancien projet', 3)
+    place = base/'ancien portfolio'
+    (place/'ancien projet').mkdir(parents=True)
+    (place/triphoto.SESSION_DIR_NAME).mkdir()
+    items = {}
+    for photo in triphoto.discover_photos(project):
+        shutil.copy2(photo.path, place/'ancien projet'/photo.path.name)
+        items[f'ancien projet/{photo.path.name}'] = {'source': str(photo.path), 'project': 'ancien projet', 'seed': {'stars': 5, 'pick': 'neutral', 'liked': False, 'publish': False}}
+    (place/triphoto.SESSION_DIR_NAME/triphoto_portfolio.MANIFEST_FILE).write_text(json.dumps({'version': 1, 'items': items}), encoding='utf-8')
+    binned = []
+    original_trash = triphoto_portfolio.move_to_trash
+    def fake_trash(path):
+        binned.append(Path(path).name)
+        Path(path).unlink()
+        return True
+    triphoto_portfolio.move_to_trash = fake_trash
+    triphoto_qt.app_settings().setValue('portfolio_folder', str(place))
+    try:
+        window = open_window(project)
+        assert all(window.portfolio.contains(p.path) for p in window.session.photos)
+        window.open_portfolio()
+        assert len(window.session.photos) == 3 and all(p.stars == 5 for p in window.session.photos)
+        assert all(triphoto.is_inside(p.path, place) for p in window.session.photos), 'read from the copies'
+        # A photo added now sits beside them as a reference.
+        window.close_project()
+        window.set_folder(project)
+        extra = project/'nouvelle.jpg'
+        shutil.copy2(window.session.photos[0].path, extra)
+        window.refresh()
+        fresh = next(p for p in window.session.photos if p.path.name == 'nouvelle.jpg')
+        window.select_photo(fresh)
+        window.toggle_portfolio()
+        assert not (place/'ancien projet'/'nouvelle.jpg').exists()
+        window.close_project()
+        window.open_portfolio()
+        assert len(window.session.photos) == 4
+        # Taken out, a copy goes to the bin, its original stays.
+        copy = next(p for p in window.session.photos if p.path.name != 'nouvelle.jpg')
+        name = copy.path.name
+        window.select_photo(copy)
+        window.toggle_portfolio()
+        settle(window, lambda: not window.portfolio.removed)
+        assert binned == [name] and (project/name).exists() and len(window.session.photos) == 3
+        # A copy deleted by hand leaves the portfolio; an absent original would not.
+        window.close_project()
+        window.pool.waitForDone()
+        other = next(p.name for p in (place/'ancien projet').glob('*.jpg'))
+        (place/'ancien projet'/other).unlink()
+        window.set_folder(project)
+        assert not window.portfolio.contains(project/other)
+        assert window.portfolio.contains(extra)
+        window.close()
+    finally:
+        triphoto_portfolio.move_to_trash = original_trash
+    clear_settings()
+
+
+def test_activity_bar(base):
+    clear_settings()
+    root = make_project(base/'activite', 4)
+    window = open_window(root)
+    window.show()
+    activity = window.activity
+    settle(window, lambda: not window.background_tasks() and window.review.analysis is None, 15000)
+    activity.poll()
+    assert not activity.isVisible()
+    # Silent at first, for what ends quickly, then with its figures; gone with the work.
+    review = window.review
+    review.analysis_left = 40
+    activity.poll()
+    assert not activity.isVisible()
+    activity.since -= activity.DELAY+.1
+    activity.poll()
+    assert activity.isVisible() and 'Analyse' in activity.label.text() and '0 sur 40' in activity.label.text()
+    review.analysis_left = 10
+    activity.poll()
+    assert '30 sur 40' in activity.label.text() and activity.bar.value() == 30
+    assert activity.geometry().bottom() <= window.height() and activity.x() == 12
+    # Above the settings of the other views, which it must not cover.
+    window.set_view('wall')
+    activity.poll()
+    wait(50)
+    assert activity.geometry().bottom() < review.mapTo(window, review.options['wall'][0].geometry().topLeft()).y()
+    window.set_view('classic')
+    review.analysis_left = 0
+    activity.poll()
+    assert not activity.isVisible() and not activity.peaks
+    # It never takes a click from what lies under it.
+    assert activity.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+    # What blocks the interface is said at once, and the next look clears it.
+    activity.announce('Ouverture du projet…')
+    assert activity.isVisible()
+    activity.poll()
+    assert not activity.isVisible()
     window.close()
     clear_settings()
 
@@ -1771,7 +1959,7 @@ def main():
     app.setStyleSheet(triphoto_qt.STYLE)
     base = Path(tempfile.mkdtemp(prefix='triphoto-tests-'))
     tests = [test_legacy_session, test_nested_session_ignored, test_dominant_color, test_recents, test_shortcuts,
-             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_export_by_its_button, test_themed_dialog, test_update, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_defaults_and_viewer_room]
+             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_export_by_its_button, test_themed_dialog, test_update, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_defaults_and_viewer_room]
     failures = 0
     try:
         for test in tests:

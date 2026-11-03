@@ -2074,8 +2074,7 @@ class ReviewPage(QWidget):
         self.bar.marked.connect(window.set_pick)
         self.bar.portfolio.connect(window.toggle_portfolio)
         self.bar.publish.connect(window.toggle_publish)
-        self.progress = QLabel(self, objectName='faint')
-        self.progress.hide()
+        self.analysis_left = 0
         self.build_toolbar()
         self.build_options()
         self.relayout_timer = QTimer(self)
@@ -2312,8 +2311,6 @@ class ReviewPage(QWidget):
                 if pill is not None:
                     pill.move(x, above)
                     x += pill.width()+8
-        self.progress.adjustSize()
-        self.progress.move(self.width()-self.progress.width()-22, self.height()-34)
 
     def resizeEvent(self, event):
         self.stack.setGeometry(self.rect())
@@ -2601,6 +2598,7 @@ class ReviewPage(QWidget):
                     todo.append((photo.relative_path, photo.path, signature))
             if not todo:
                 return
+            self.analysis_left = len(todo)
             self.analysis = AnalysisJob(todo, token)
             self.analysis.signals.batch.connect(self.on_batch, Qt.ConnectionType.QueuedConnection)
             self.analysis.signals.aspects.connect(self.on_aspects, Qt.ConnectionType.QueuedConnection)
@@ -2612,7 +2610,7 @@ class ReviewPage(QWidget):
         if self.analysis:
             self.analysis.cancelled.set()
             self.analysis = None
-        self.progress.hide()
+        self.analysis_left = 0
 
     def on_aspects(self, aspects, token):
         if token != self.analysis_token or self.window.session is None:
@@ -2626,16 +2624,12 @@ class ReviewPage(QWidget):
         if token != self.analysis_token or self.window.session is None:
             return
         self.info.update(batch)
+        self.analysis_left = total-done
         if done >= total:
-            self.progress.hide()
             self.analysis = None
             self.save_analysis()
-        else:
-            self.progress.setText(f'Analyse des formats et des couleurs : {done} sur {total}')
-            self.progress.show()
-            self.place_overlays()
-            if done % 160 == 0:
-                self.save_analysis()
+        elif done % 160 == 0:
+            self.save_analysis()
         self.update_view()
         # Only Couleur depends on the colors, and it must not reorder under a reader.
         color = self.views['color']

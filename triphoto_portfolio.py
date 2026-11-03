@@ -1,8 +1,9 @@
-"""The portfolio: a plain folder of copies chosen across projects.
+"""The portfolio: photos chosen across projects, kept as references to their originals.
 
-It opens like any project, so its photos can be sorted again in every view. Copies
-go in a subfolder named after their project, and the manifest next to its session
-remembers where each one came from. Originals are only ever read.
+It opens like any project, so its photos can be sorted again in every view. Nothing is
+copied when a photo is added: the manifest next to its session remembers where each one
+is, and files are only written by an export. Copies made by earlier versions stay in the
+folder and keep being used. Originals are only ever read.
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QFile, QObject, QRunnable, QThreadPool, Qt, Signal
-from triphoto import SESSION_DIR_NAME, write_json_atomic
+from triphoto import SESSION_DIR_NAME, Photo, PhotoSession, discover_photos, write_json_atomic
 
 MANIFEST_FILE = 'portfolio.json'
 UNSORTED = 'Sans projet'
@@ -54,35 +55,28 @@ def trash_patiently(path):
     raise OSError('la corbeille a refusé cette photo')
 
 
-class TransferSignals(QObject):
-    done = Signal(str, str, str)
+class TrashSignals(QObject):
+    done = Signal(str, str)
 
 
-class TransferJob(QRunnable):
-    """One copy, or one copy sent to the recycle bin. They run in the order asked."""
+class TrashJob(QRunnable):
+    """A copy of the portfolio folder sent to the recycle bin. Never an original."""
 
-    def __init__(self, action, source, destination, relative, signals):
+    def __init__(self, destination, relative, signals):
         super().__init__()
-        self.action, self.source, self.destination, self.relative, self.signals = action, source, destination, relative, signals
+        self.destination, self.relative, self.signals = destination, relative, signals
 
     def run(self):
         try:
-            if self.action == 'copy':
-                self.destination.parent.mkdir(parents=True, exist_ok=True)
-                # Under another name until complete: the folder never shows half a photo.
-                part = self.destination.with_name(self.destination.name+'.part')
-                shutil.copy2(self.source, part)
-                os.replace(part, self.destination)
-            else:
-                if self.destination.exists():
-                    trash_patiently(self.destination)
-                try:
-                    self.destination.parent.rmdir()
-                except OSError:
-                    pass
-            self.signals.done.emit(self.action, self.relative, '')
+            if self.destination.exists():
+                trash_patiently(self.destination)
+            try:
+                self.destination.parent.rmdir()
+            except OSError:
+                pass
+            self.signals.done.emit(self.relative, '')
         except Exception as error:
-            self.signals.done.emit(self.action, self.relative, str(error))
+            self.signals.done.emit(self.relative, str(error))
 
 
 class RelocateSignals(QObject):
@@ -113,8 +107,32 @@ class RelocateJob(QRunnable):
             self.signals.finished.emit(str(self.new), str(error))
 
 
+class PortfolioSession(PhotoSession):
+    """The files of the folder, and the originals the portfolio refers to."""
+
+    def __init__(self, root, portfolio):
+        self.portfolio = portfolio
+        self.absent = set()
+        super().__init__(root)
+
+    def discover(self):
+        found = {photo.relative_path: photo for photo in discover_photos(self.root)}
+        self.absent = set()
+        for relative, item in self.portfolio.items.items():
+            if relative not in found and item.get('linked'):
+                source = Path(item.get('source', ''))
+                if source.is_file():
+                    found[relative] = Photo(path=source, relative_path=relative)
+                else:
+                    self.absent.add(relative)
+        return list(found.values())
+
+    def out_of_reach(self, relative_path):
+        return relative_path in self.absent
+
+
 class Portfolio(QObject):
-    """What the portfolio holds. The interface reads it at once; files follow in the background."""
+    """What the portfolio holds. Adding and removing only change the list: the caller saves it once, whatever the number of photos."""
     changed = Signal()
     failed = Signal(str)
 
@@ -123,13 +141,12 @@ class Portfolio(QObject):
         self.settings = settings
         self.items = {}
         self.sources = {}
-        self.copying = set()
         # Sent to the recycle bin, until it confirms.
         self.removed = {}
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)
-        self.signals = TransferSignals()
-        self.signals.done.connect(self.transferred, Qt.ConnectionType.QueuedConnection)
+        self.signals = TrashSignals()
+        self.signals.done.connect(self.trashed, Qt.ConnectionType.QueuedConnection)
         self.load()
 
     @property
@@ -169,7 +186,7 @@ class Portfolio(QObject):
         """A copy deleted by hand from the folder is no longer in the portfolio. An unplugged disk says nothing."""
         if not self.available():
             return
-        gone = [key for key in self.items if key not in self.copying and not (self.folder/key).exists()]
+        gone = [key for key, item in self.items.items() if not item.get('linked') and not (self.folder/key).exists()]
         for key in gone:
             self.sources.pop(source_key(self.items.pop(key).get('source', '')), None)
         if gone:
@@ -186,16 +203,13 @@ class Portfolio(QObject):
         return relative
 
     def add(self, photo, project_root):
-        """Note it now and copy it in the background; the notes given to the copy start from those of the photo."""
+        """Only a reference to the file; its notes in the portfolio start from those of the photo."""
         if self.contains(photo.path):
             return
         relative = self.unique_relative(project_folder_name(project_root), photo.path.name)
-        self.items[relative] = {'source': str(photo.path), 'project': project_folder_name(project_root), 'added': time.time(),
+        self.items[relative] = {'source': str(photo.path), 'project': project_folder_name(project_root), 'added': time.time(), 'linked': True,
                                 'seed': {'stars': photo.stars, 'pick': photo.pick, 'liked': photo.liked, 'publish': photo.publish}}
         self.sources[source_key(photo.path)] = relative
-        self.copying.add(relative)
-        self.pool.start(TransferJob('copy', photo.path, self.folder/relative, relative, self.signals))
-        self.save()
 
     def remove_source(self, path):
         relative = self.sources.get(source_key(path))
@@ -203,31 +217,24 @@ class Portfolio(QObject):
             self.remove_relative(relative)
 
     def remove_relative(self, relative):
-        """The copy goes to the recycle bin: the original, or a mistake, is never lost."""
+        """A reference is simply forgotten. A copy in the folder goes to the recycle bin: a mistake is never lost."""
         item = self.items.pop(relative, None)
         if item is not None:
             self.sources.pop(source_key(item.get('source', '')), None)
+            if item.get('linked'):
+                return
             self.removed[relative] = item
-        self.pool.start(TransferJob('trash', None, self.folder/relative, relative, self.signals))
-        self.save()
+        self.pool.start(TrashJob(self.folder/relative, relative, self.signals))
 
-    def transferred(self, action, relative, error):
-        if action == 'copy':
-            self.copying.discard(relative)
-            if error and relative in self.items:
-                item = self.items.pop(relative)
-                self.sources.pop(source_key(item.get('source', '')), None)
+    def trashed(self, relative, error):
+        item = self.removed.pop(relative, None)
+        if error:
+            # Still in the folder, so still in the portfolio.
+            if item is not None:
+                self.items[relative] = item
+                self.sources[source_key(item.get('source', ''))] = relative
                 self.save()
-                self.failed.emit(f'Copie vers le portfolio impossible : {error}')
-        else:
-            item = self.removed.pop(relative, None)
-            if error:
-                # Still in the folder, so still in the portfolio.
-                if item is not None:
-                    self.items[relative] = item
-                    self.sources[source_key(item.get('source', ''))] = relative
-                    self.save()
-                self.failed.emit(f'Photo laissée dans le portfolio : {error}')
+            self.failed.emit(f'Photo laissée dans le portfolio : {error}')
         self.changed.emit()
 
     def project_of(self, relative):
@@ -255,10 +262,14 @@ class Portfolio(QObject):
         projects = {self.project_of(key) for key in self.items}
         return len(self.items), len(projects)
 
+    def file_of(self, relative):
+        """Where a photo of the portfolio is read from. Touches no disk: one may be asleep or unplugged."""
+        item = self.items.get(relative, {})
+        return Path(item['source']) if item.get('linked') else self.folder/relative
+
     def covers(self, limit=6):
         """The latest additions."""
-        latest = sorted(self.items, key=lambda key: self.items[key].get('added', 0), reverse=True)
-        return [key for key in latest if key not in self.copying][:limit]
+        return sorted(self.items, key=lambda key: self.items[key].get('added', 0), reverse=True)[:limit]
 
     def wait(self):
         self.pool.waitForDone()

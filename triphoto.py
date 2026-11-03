@@ -249,15 +249,24 @@ class PhotoSession:
         self.session_dir = ensure_writable_session_dir(self.root)
         self.session_file = self.session_dir / SESSION_FILE_NAME
         self.sort_mode = "name_asc"
-        self.photos = sort_photos(discover_photos(self.root), self.sort_mode)
+        # Saved notes of photos out of reach for now, written back as they were.
+        self.kept: list[dict] = []
+        self.photos = sort_photos(self.discover(), self.sort_mode)
         self.created_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         self.load()
+
+    def discover(self) -> list[Photo]:
+        return discover_photos(self.root)
+
+    def out_of_reach(self, relative_path: str) -> bool:
+        return False
 
     def load(self) -> None:
         if not self.session_file.exists():
             return
         try:
             data = json.loads(self.session_file.read_text(encoding="utf-8"))
+            self.kept = [item for item in data.get("photos", []) if self.out_of_reach(item.get("relative_path"))]
             self.sort_mode = data.get("sort_mode", "name_asc") if data.get("sort_mode", "name_asc") in SORT_OPTIONS else "name_asc"
             if int(data.get("version", 1)) < SESSION_VERSION:
                 # First opening by this version: keep the older file once.
@@ -301,18 +310,23 @@ class PhotoSession:
                 {"relative_path": photo.relative_path, "stars": photo.stars,
                  "flagged": photo.flagged, "pick": photo.pick, "liked": photo.liked, "publish": photo.publish}
                 for photo in self.photos
-            ],
+            ]+self.kept,
         }
         write_json_atomic(self.session_file, payload)
 
     def refresh(self) -> None:
         saved = {
-            photo.relative_path: (photo.stars, photo.pick, photo.liked, photo.publish)
+            photo.relative_path: {"relative_path": photo.relative_path, "stars": photo.stars, "flagged": photo.flagged,
+                                  "pick": photo.pick, "liked": photo.liked, "publish": photo.publish}
             for photo in self.photos
         }
-        self.photos = sort_photos(discover_photos(self.root), self.sort_mode)
+        saved.update({item["relative_path"]: item for item in self.kept})
+        self.photos = sort_photos(self.discover(), self.sort_mode)
         for photo in self.photos:
-            photo.stars, photo.pick, photo.liked, photo.publish = saved.get(photo.relative_path, (0, PICK_NEUTRAL, False, False))
+            state = saved.get(photo.relative_path, {})
+            photo.stars, photo.pick = state.get("stars", 0), state.get("pick", PICK_NEUTRAL)
+            photo.liked, photo.publish = state.get("liked", False), state.get("publish", False)
+        self.kept = [item for relative, item in saved.items() if self.out_of_reach(relative)]
 
 
 class ImageCache:

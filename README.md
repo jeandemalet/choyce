@@ -20,6 +20,10 @@ Quelques secondes après son ouverture, le programme demande à GitHub si une ve
 
 Pour publier une version : changer `APP_VERSION` dans `triphoto.py`, commiter, puis pousser l'étiquette correspondante, par exemple `v1.0.0`. GitHub teste, construit et publie le programme Windows.
 
+## Travaux en arrière-plan
+
+Dès qu'un travail dure, une petite barre en bas à gauche de la fenêtre indique où il en est : ouverture d'un projet, chargement des aperçus, analyse des couleurs, envoi à la corbeille. Les travaux de moins d'une seconde n'affichent rien. L'export, le déplacement du portfolio et le téléchargement d'une mise à jour gardent leur propre barre, avec leur bouton Annuler quand ils en ont un.
+
 ## Les vues
 
 Le bandeau du haut porte, au centre, les six vues : **Classique**, Grille, Pêle-mêle, Couleur, Tindr et Instagram. La touche `G` bascule entre Classique et la dernière autre vue, et `Ctrl+0` à `Ctrl+5` ouvrent chacune d'elles.
@@ -64,9 +68,11 @@ Un petit cœur en haut à droite de chaque photo se remplit d'un clic ou avec la
 
 ## Portfolio
 
-Le portfolio rassemble vos meilleures photos, tous projets confondus. Le signet de la barre flottante, celui de chaque vignette du ruban de la vue Classique ou la touche `K` y ajoute la photo, et un second appui l'en retire ; `Ctrl+Z` annule. Au premier ajout, Vision Board demande où placer le dossier, un dossier ordinaire que vous pouvez ouvrir et sauvegarder comme les autres. L'emplacement se change ensuite dans les Préférences, le menu Projet ou d'un clic droit sur la carte du portfolio : les photos sont recopiées et l'ancien dossier reste en place.
+Le portfolio rassemble vos meilleures photos, tous projets confondus. Le signet de la barre flottante, celui de chaque vignette du ruban de la vue Classique ou la touche `K` y ajoute la photo, et un second appui l'en retire ; `Ctrl+Z` annule. Au premier ajout, Vision Board demande où placer son dossier, qui reçoit sa liste, ses notes et ses exports. L'emplacement se change ensuite dans les Préférences, le menu Projet ou d'un clic droit sur la carte du portfolio : le portfolio y est reporté et l'ancien dossier reste en place.
 
-La copie se fait en arrière-plan, dans un sous-dossier au nom du projet. L'original n'est jamais touché, et une photo retirée part à la corbeille. Le portfolio s'ouvre depuis sa carte, en tête de l'accueil, comme un projet à part : on y retrouve toutes les vues et les filtres, plus un choix du projet d'origine dans **Filtre**. Une photo y arrive avec ses notes, puis on la note librement sans que cela change le projet d'origine. Une photo supprimée à la main du dossier sort du portfolio à la prochaine ouverture d'un projet. Une photo déplacée ou renommée à la main y reste comme une photo ordinaire, mais perd le lien vers son original.
+Ajouter une photo ne copie rien : le portfolio retient seulement où elle se trouve, et aucun fichier n'est écrit avant un export. L'original n'est jamais touché, et retirer une photo l'enlève simplement de la liste. Le bouton **Exporter…** du portfolio copie ses photos, toutes par défaut ou selon les réglages choisis, dans un sous-dossier par projet. Le portfolio s'ouvre depuis sa carte, en tête de l'accueil, comme un projet à part : on y retrouve toutes les vues et les filtres, plus un choix du projet d'origine dans **Filtre**. Une photo y arrive avec ses notes, puis on la note librement sans que cela change le projet d'origine. Si un original est introuvable, par exemple sur un disque débranché, la photo disparaît de la vue et Vision Board le signale, mais elle reste dans le portfolio avec ses notes, et revient quand le fichier est de nouveau là.
+
+Les copies faites par les versions précédentes restent dans le dossier et servent toujours d'images : une copie retirée part à la corbeille, et une copie supprimée à la main sort du portfolio à la prochaine ouverture d'un projet. Une photo déposée à la main dans le dossier y compte comme une photo ordinaire.
 
 ## À publier
 
@@ -112,7 +118,7 @@ Les originaux ne sont jamais réécrits, renommés, déplacés ni supprimés. To
 - `Exportation` reçoit des copies exactes des originaux, un sous-dossier par export ;
 - `Export_5_Etoiles` et `Export_Retenues`, s'ils existent, sont les exports des versions précédentes, laissés à leur place.
 
-Le dossier du portfolio contient ses copies, par projet, et son propre `TriPhoto_Session`, où `portfolio.json` retient l'origine de chaque copie.
+Le dossier du portfolio contient son propre `TriPhoto_Session`, où `portfolio.json` retient l'emplacement de chaque photo et où `Exportation` reçoit ses exports, ainsi que les copies faites par les versions précédentes, par projet.
 
 Les galeries créées avec une ancienne version s'ouvrent telles quelles. Une ancienne version peut aussi relire une session récente, mais elle y verra les photos rejetées comme neutres.
 
@@ -124,7 +130,7 @@ Formats pris en charge : JPEG, PNG, TIFF, WebP et BMP. Les fichiers RAW ne sont 
 - `triphoto_qt.py` : fenêtre principale et vue Classique ;
 - `triphoto_review.py` : autres vues et analyse des couleurs ;
 - `assets/staggered_modules.json` : proportions des modules de la grille décalée ;
-- `triphoto_portfolio.py` : dossier du portfolio et copies en arrière-plan ;
+- `triphoto_portfolio.py` : liste du portfolio et ouverture de ses photos ;
 - `triphoto_prefs.py` : projets récents, raccourcis et préférences ;
 - `triphoto_update.py` : détection et installation des nouvelles versions ;
 - `triphoto_theme.py` : palette, feuille de style et icônes vectorielles.

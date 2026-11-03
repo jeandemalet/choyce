@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
 from PIL import Image, ImageCms, ImageWin
 from triphoto import (APP_NAME, APP_VERSION, PhotoSession, sort_photos, SORT_OPTIONS, load_screen_preview, original_inventory,
     export_original_copy, EXPORT_DIR_NAME, PICK_NEUTRAL, PICK_REJECT, PICK_SELECT, SESSION_DIR_NAME)
-from triphoto_portfolio import MANIFEST_FILE, Portfolio, RelocateJob, UNSORTED
+from triphoto_portfolio import MANIFEST_FILE, Portfolio, PortfolioSession, RelocateJob, UNSORTED
 from triphoto_prefs import (ALIASES, PreferencesDialog, Recents, ScanJob, age_label, ask, inform, path_key, shortcut_map)
 from triphoto_review import MODES, BackgroundPicker, ChoiceFilter, MarkerFilter, NoteFilter, RatingBar, ReviewPage
 from triphoto_update import UpdateCheck, UpdateDownload, can_install, launch_installer, write_installer
@@ -610,7 +610,7 @@ class PortfolioCard(QFrame):
                               else 'Vide pour le moment : touche K, ou le signet sous une photo')
             self.place.setText(self.place.fontMetrics().elidedText(str(folder), Qt.TextElideMode.ElideMiddle, self.text_width))
             for index, relative in enumerate(portfolio.covers()):
-                self.home.window.pool.start(CoverJob(f'portfolio:{index}', folder, folder/relative, self.home.window.display_profile, self.home.cover_signals), 2)
+                self.home.window.pool.start(CoverJob(f'portfolio:{index}', folder, portfolio.file_of(relative), self.home.window.display_profile, self.home.cover_signals), 2)
         self.update()
 
     def paintEvent(self, event):
@@ -821,7 +821,14 @@ class ExportDialog(QDialog):
         self.go.clicked.connect(self.accept)
         buttons.addWidget(self.go)
         layout.addLayout(buttons)
-        if not (window.stars.currentIndex() > 0 or window.flags.currentIndex() > 0 or choices.active_labels()):
+        absent = len(getattr(window.session, 'absent', ()))
+        if absent:
+            note = QLabel(f"{absent} photo{'s' if absent > 1 else ''} du portfolio introuvable{'s' if absent > 1 else ''} pour le moment, disque débranché ou fichier déplacé : {'elles ne seront pas exportées' if absent > 1 else 'elle ne sera pas exportée'}.", objectName='faint')
+            note.setWordWrap(True)
+            note.setFixedWidth(440)
+            layout.insertWidget(layout.count()-2, note)
+        # The portfolio is what one exports whole; elsewhere, the usual export is the 5 stars.
+        if not window.viewing_portfolio() and not (window.stars.currentIndex() > 0 or window.flags.currentIndex() > 0 or choices.active_labels()):
             # No filter in use: the usual export, which one click leaves as it is.
             self.stars.setCurrentIndex(self.stars.findData(5))
         for combo in (self.stars, self.marker, self.project):
@@ -865,7 +872,7 @@ class ExportDialog(QDialog):
         parts += [button.text() for button in (self.portfolio, self.publish) if button.isChecked()]
         if self.project and self.project.currentIndex() > 0:
             parts.append(self.project.currentData())
-        return ', '.join(parts) or 'Toutes les photos'
+        return ', '.join(parts) or ('Portfolio' if self.owner.viewing_portfolio() else 'Toutes les photos')
 
     def folder_name(self):
         return export_folder_name(self.name.text())
@@ -878,6 +885,64 @@ class ExportDialog(QDialog):
         name = self.folder_name()
         self.place.setText(str(self.owner.session.session_dir/EXPORT_ROOT_NAME/name).replace('\\', '\\\u200b'))
         self.go.setEnabled(bool(count and name))
+
+
+class ActivityBar(QFrame):
+    """What is working in the background, at the bottom of the window. Short tasks stay silent: a flash at every photo would only distract."""
+    DELAY = .7
+
+    def __init__(self, window):
+        super().__init__(window, objectName='toast')
+        self.window_ = window
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(12, 6, 12, 6)
+        row.setSpacing(10)
+        self.label = QLabel()
+        row.addWidget(self.label)
+        self.bar = QProgressBar()
+        self.bar.setFixedSize(130, 5)
+        self.bar.setTextVisible(False)
+        row.addWidget(self.bar)
+        self.peaks = {}
+        self.since = None
+        self.hide()
+        self.timer = QTimer(self)
+        self.timer.setInterval(200)
+        self.timer.timeout.connect(self.poll)
+        self.timer.start()
+
+    def place(self):
+        self.adjustSize()
+        # In the other views, above the settings along the bottom.
+        self.move(12, self.window_.height()-self.height()-(68 if self.window_.review_active else 12))
+        self.raise_()
+        self.show()
+
+    def announce(self, text):
+        """For what blocks the interface: shown at once, with no progress to tell."""
+        self.label.setText(text)
+        self.bar.setRange(0, 0)
+        self.place()
+        self.repaint()
+
+    def poll(self):
+        tasks = self.window_.background_tasks()
+        self.peaks = {label: max(self.peaks.get(label, 0), left) for label, left in tasks}
+        if not tasks:
+            self.since = None
+            self.hide()
+            return
+        now = time.monotonic()
+        self.since = self.since or now
+        if now-self.since < self.DELAY:
+            return
+        label, left = tasks[0]
+        peak = self.peaks[label]
+        self.label.setText(f'{label} : {peak-left} sur {peak}')
+        self.bar.setRange(0, peak)
+        self.bar.setValue(peak-left)
+        self.place()
 
 
 class Window(QMainWindow):
@@ -1057,6 +1122,7 @@ class Window(QMainWindow):
         export_row.addWidget(self.export_bar)
         self.export_cancel = self.button(export_row, 'Annuler', self.cancel_export, 'ghost')
         self.export_panel.hide()
+        self.activity = ActivityBar(self)
         self.toast_frame = QFrame(self, objectName='toast')
         toast_row = QHBoxLayout(self.toast_frame)
         toast_row.setContentsMargins(14, 8, 14, 8)
@@ -1535,9 +1601,16 @@ class Window(QMainWindow):
         if self.review_active:
             self.review.rebuild()
 
+    def background_tasks(self):
+        """Long work under way, as (label, how many left), the most telling first."""
+        tasks = [('Corbeille du portfolio', len(self.portfolio.removed)), ('Chargement des aperçus', len(self.pending)),
+                 ('Analyse des couleurs', self.review.analysis_left)]
+        return [task for task in tasks if task[1]]
+
     def set_folder(self, path):
+        self.activity.announce('Ouverture du projet…')
         try:
-            session = PhotoSession(path)
+            session = PortfolioSession(path, self.portfolio) if self.is_portfolio_path(path) else PhotoSession(path)
         except Exception as error:
             inform(self, 'Ouverture impossible', str(error))
             return
@@ -1551,6 +1624,9 @@ class Window(QMainWindow):
         self.choices.set_projects(sorted({self.portfolio.project_of(p.relative_path) for p in session.photos}) if self.viewing_portfolio() else [])
         if session.photos:
             self.remember_project(time.time())
+        absent = len(getattr(session, 'absent', ()))
+        if absent:
+            self.toast(f"{absent} photo{'s' if absent > 1 else ''} du portfolio introuvable{'s' if absent > 1 else ''} : disque débranché ou fichier déplacé. {'Elles restent' if absent > 1 else 'Elle reste'} dans le portfolio.", 5000)
         self.review.start_analysis()
         self.cache_dir = session.session_dir / 'Previews'
         self.cache_dir.mkdir(exist_ok=True)
@@ -1995,7 +2071,7 @@ class Window(QMainWindow):
         if not photos:
             return
         if self.viewing_portfolio():
-            if len(photos) == 1 or ask(self, 'Retirer du portfolio', f"{len(photos)} copies iront à la corbeille. Les fichiers d'origine ne bougent pas.",
+            if len(photos) == 1 or ask(self, 'Retirer du portfolio', f"{len(photos)} photos quitteront le portfolio. Les fichiers d'origine ne bougent pas.",
                                        [('cancel', 'Annuler', False), ('remove', 'Retirer', True)]) == 'remove':
                 self.take_out_of_portfolio(photos)
             return
@@ -2016,14 +2092,16 @@ class Window(QMainWindow):
                 self.portfolio.add(photo, self.project_path)
             else:
                 self.portfolio.remove_source(photo.path)
+        self.portfolio.save()
         self.apply_filters()
 
     def take_out_of_portfolio(self, photos):
         leaving = {id(photo) for photo in photos}
         for photo in photos:
             self.portfolio.remove_relative(photo.relative_path)
+        self.portfolio.save()
         self.session.photos = [photo for photo in self.session.photos if id(photo) not in leaving]
-        self.toast('Copie envoyée à la corbeille. Le fichier d\'origine n\'a pas bougé.', 2600)
+        self.toast('Retirée du portfolio. Le fichier d\'origine n\'a pas bougé.', 2600)
         if self.session.photos:
             self.choices.set_projects(sorted({self.portfolio.project_of(p.relative_path) for p in self.session.photos}))
             self.apply_filters()
@@ -2064,8 +2142,8 @@ class Window(QMainWindow):
         self.portfolio.wait()
         adopted = (new/SESSION_DIR_NAME/MANIFEST_FILE).exists()
         if old is not None and self.portfolio.items and old.is_dir() and not adopted:
-            choice = ask(self, 'Déplacer le portfolio', f'Copier ses {len(self.portfolio.items)} photos vers ce nouveau dossier ?\n{new}\n\nL\'ancien dossier reste tel quel, à vous de le supprimer si vous le souhaitez.',
-                         [('cancel', 'Annuler', False), ('empty', 'Repartir de zéro', False), ('copy', 'Copier', True)])
+            choice = ask(self, 'Déplacer le portfolio', f'Reporter ses {len(self.portfolio.items)} photos dans ce nouveau dossier ?\n{new}\n\nL\'ancien dossier reste tel quel, à vous de le supprimer si vous le souhaitez.',
+                         [('cancel', 'Annuler', False), ('empty', 'Repartir de zéro', False), ('copy', 'Reporter', True)])
             if choice not in ('copy', 'empty'):
                 return False
             if choice == 'copy':
