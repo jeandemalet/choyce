@@ -57,7 +57,7 @@ QPushButton#primary:hover {{ background: #ffffff; }}
 QPushButton#seg {{ background: transparent; color: {MUTED}; border-radius: 6px; padding: 5px 13px; }}
 QPushButton#seg:hover {{ color: {TEXT}; }}
 QPushButton#seg:checked {{ background: {HOVER}; color: {TEXT}; }}
-QPushButton#mainseg {{ background: transparent; color: {MUTED}; border-radius: 6px; padding: 6px 14px; font-weight: 600; }}
+QPushButton#mainseg {{ background: transparent; color: {MUTED}; border-radius: 6px; padding: 6px 10px; font-weight: 600; }}
 QPushButton#mainseg:hover {{ color: {TEXT}; }}
 QPushButton#mainseg:checked {{ background: {HOVER}; color: {TEXT}; }}
 QFrame#segments {{ background: {RAISED}; border-radius: 8px; }}
@@ -197,6 +197,35 @@ def draw_bookmark(painter, rect, color, filled=False):
     painter.setBrush(QColor(color) if filled else Qt.BrushStyle.NoBrush)
     painter.setPen(QPen(QColor(color), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
     painter.drawPolygon(points)
+    painter.restore()
+
+
+def pastel(color):
+    """A light tone of a bucket color, which stays discreet beside the photos."""
+    tone = QColor(color)
+    return QColor((tone.red()+2*255)//3, (tone.green()+2*255)//3, (tone.blue()+2*255)//3)
+
+
+def draw_bucket_chips(painter, x, y, width, chips):
+    """The buckets of a photo, as (title, color), on small dark plates. Those without room are left out."""
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    font = painter.font()
+    font.setPixelSize(10)
+    painter.setFont(font)
+    metrics = painter.fontMetrics()
+    limit = x+width
+    for title, color in chips:
+        text = metrics.elidedText(title, Qt.TextElideMode.ElideRight, 90)
+        chip = QRectF(x, y, metrics.horizontalAdvance(text)+12, 17)
+        if chip.right() > limit:
+            break
+        painter.setBrush(QColor(15, 15, 16, 205))
+        painter.setPen(QPen(pastel(color), 1))
+        painter.drawRoundedRect(chip, 5, 5)
+        painter.setPen(pastel(color))
+        painter.drawText(chip, Qt.AlignmentFlag.AlignCenter, text)
+        x = chip.right()+4
     painter.restore()
 
 

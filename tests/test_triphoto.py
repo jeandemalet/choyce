@@ -993,7 +993,9 @@ def test_views_and_filter_panel(base):
     window = open_window(root)
     review = window.review
     # One row of views: Classique is the page with the ribbon, the others follow.
-    assert list(window.view_buttons) == ['classic', 'wall', 'toile', 'color', 'swipe', 'instagram']
+    assert list(window.view_buttons) == ['buckets', 'classic', 'wall', 'toile', 'color', 'swipe', 'instagram']
+    assert not window.view_buttons['buckets'].isVisible()
+    assert window.home_button.isVisible()
     assert [window.view_buttons[key].text() for key in ('toile', 'swipe', 'instagram')] == ['Pêle-mêle', 'Tindr', 'Instagram']
     assert window.view_buttons['classic'].isChecked() and window.pages.currentIndex() == 1
     window.view_buttons['toile'].click()
@@ -2230,14 +2232,136 @@ def test_custom_view(base):
         # And a session goes to the bin, from the list.
         moved = []
         real_trash = triphoto_custom.move_to_trash
-        triphoto_custom.move_to_trash = lambda path: moved.append(path) or Path(path).unlink()
+        triphoto_custom.move_to_trash = lambda path: moved.append(path) or (shutil.rmtree(path) if Path(path).is_dir() else Path(path).unlink())
         doomed = custom.session
-        window.leave_custom()
+        window.go_home()
         custom.delete_session(doomed)
         triphoto_custom.move_to_trash = real_trash
-        assert moved == [doomed.path] and len(window.home.custom_cards) == 1
+        assert moved == [doomed.path, doomed.path.with_suffix('')] and len(window.home.custom_cards) == 1
     finally:
         triphoto_custom.ask = real_ask
+    window.close()
+    clear_settings()
+
+
+def test_selection_views(base):
+    clear_settings()
+    root = make_project(base/'vues custom', 6)
+    window = open_window(root)
+    window.resize(1400, 900)
+    window.show()
+    paths = [str(photo.path) for photo in window.session.photos]
+    window.close_project()
+    assert not window.home_button.isVisible()
+    custom = window.custom
+    sorting = custom.store.create('Revue')
+    sorting.set_photos([{'path': path, 'gallery': 'vues custom', 'relative': Path(path).name} for path in paths])
+    sorting.buckets.extend([{'id': 'a', 'title': 'AG', 'subtitle': '', 'color': '#ff3b30'}, {'id': 'b', 'title': 'WPJA', 'subtitle': '', 'color': '#0a84ff'}])
+    sorting.add(paths[0], 'a')
+    sorting.add(paths[1], 'a')
+    sorting.add(paths[2], 'b')
+    sorting.add(paths[3], 'a')
+    sorting.add(paths[3], 'b')
+    sorting.save()
+    # It opens on its buckets, and the other views are there, with the way back.
+    window.open_custom(sorting)
+    assert window.custom_active and window.pages.currentIndex() == 3 and window.home_button.isVisible()
+    assert window.view_buttons['buckets'].isVisible() and window.view_buttons['buckets'].isChecked()
+    assert not window.bucket_strip.isVisible() and len(window.session.photos) == 6
+    window.set_view('wall')
+    review = window.review
+    assert window.review_active and not window.custom_active and window.bucket_strip.isVisible()
+    settle(window, lambda: len(review.info) == 6, 15000)
+    wall = review.view()
+    wall.resize(1400, 760)
+    assert not wall.drop_zones() and window.photo_buckets(next(p for p in window.photos if str(p.path) == paths[3])) == [('AG', '#ff3b30'), ('WPJA', '#0a84ff')]
+    window.grab()
+    # A click on the strip shows one bucket, then another, then all.
+    strip = window.bucket_strip
+    wait(50)
+    rects = dict(strip.rects())
+    QTest.mouseClick(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, rects['a'].center().toPoint())
+    assert {str(p.path) for p in window.photos} == {paths[0], paths[1], paths[3]}
+    assert 'AG' in window.filter_chip.text()
+    QTest.mouseClick(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, rects['b'].center().toPoint())
+    assert {str(p.path) for p in window.photos} == {paths[2], paths[3]}
+    window.set_bucket_filter('none')
+    assert {str(p.path) for p in window.photos} == {paths[4], paths[5]}
+    # Seen through a bucket, a drop moves the photo out of it and leaves its other buckets.
+    window.set_bucket_filter('a')
+    both = next(p for p in window.photos if str(p.path) == paths[3])
+    window.move_to_bucket(both, 'b')
+    assert sorting.buckets_of(paths[3]) == ['b'] and both not in window.photos
+    window.undo()
+    assert sorting.buckets_of(paths[3]) == ['a', 'b'] and any(p is both for p in window.photos)
+    # Seen through all of them, it replaces them; the narrow part of a zone keeps it where it is.
+    window.set_bucket_filter('all')
+    only = next(p for p in window.photos if str(p.path) == paths[0])
+    window.move_to_bucket(only, 'b', True)
+    assert sorting.buckets_of(paths[0]) == ['a', 'b']
+    window.undo()
+    window.move_to_bucket(only, 'b')
+    assert sorting.buckets_of(paths[0]) == ['b']
+    window.undo()
+    assert sorting.buckets_of(paths[0]) == ['a']
+    # A real drag from the grid to the strip, on each part of a zone.
+    wall.relayout()
+    rect, dragged = next(tile for tile in wall.visible_tiles() if str(tile[1].path) == paths[1])
+    start = rect.center().toPoint()
+    rects = dict(strip.rects())
+    def drag_to(point):
+        QTest.mousePress(wall, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+        global_point = strip.mapToGlobal(point)
+        wall.mouseMoveEvent(_Move(QPointF(start)+QPointF(40, 40), wall))
+        assert wall.dragging
+        local = QPointF(wall.mapFromGlobal(global_point))
+        wall.mouseMoveEvent(_Move(local, wall))
+        assert strip.dragging and strip.hovered is not None and window.bucket_ghost.isVisible()
+        window.grab()
+        wall.mouseReleaseEvent(_Move(local, wall))
+        assert not strip.dragging and not window.bucket_ghost.isVisible()
+    zone = rects['b']
+    drag_to(QPointF(zone.right()-10, zone.center().y()).toPoint())
+    assert sorting.buckets_of(paths[1]) == ['a', 'b']
+    window.undo()
+    drag_to(QPointF(zone.left()+10, zone.center().y()).toPoint())
+    assert sorting.buckets_of(paths[1]) == ['b']
+    window.undo()
+    # Dragging to "Toutes" takes it out of its buckets.
+    drag_to(rects[None].center().toPoint())
+    assert not sorting.buckets_of(paths[1])
+    window.undo()
+    assert sorting.buckets_of(paths[1]) == ['a']
+    # Everything picked goes together, and the keys of the notes pick the buckets.
+    wall.pick(window.photos[0])
+    wall.select_all()
+    window.rate_key(2)
+    assert all('b' in sorting.buckets_of(path) for path in paths)
+    window.undo()
+    assert not sorting.buckets_of(paths[4])
+    # The table too, and the views without a drag keep their keys.
+    window.set_view('toile')
+    toile = review.view()
+    toile.resize(1400, 760)
+    wait(50)
+    window.grab()
+    for mode in ('color', 'swipe', 'instagram'):
+        window.set_view(mode)
+        wait(50)
+        window.grab()
+    window.set_view('classic')
+    window.grab()
+    assert window.bucket_strip.isVisible() and not window.review_active
+    # Back on the buckets, on the photo left in the other view.
+    current = window.current_photo()
+    window.set_view('buckets')
+    assert window.custom_active and custom.current()['path'] == current.relative_path
+    # The way back, from every mode, and the project list knows nothing of it.
+    window.home_button.click()
+    assert window.pages.currentIndex() == 0 and window.selection is None and not window.home_button.isVisible()
+    assert not window.bucket_strip.isVisible()
+    assert not any(entry['path'] == str(sorting.path.with_suffix('')) for entry in window.recents.entries())
+    assert triphoto_custom.Sorting.load(sorting.path).buckets_of(paths[1]) == ['a']
     window.close()
     clear_settings()
 
@@ -2262,7 +2386,7 @@ def main():
     app.setStyleSheet(triphoto_qt.STYLE)
     base = Path(tempfile.mkdtemp(prefix='triphoto-tests-'))
     tests = [test_legacy_session, test_nested_session_ignored, test_dominant_color, test_recents, test_shortcuts,
-             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_export_by_its_button, test_themed_dialog, test_update, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_defaults_and_viewer_room]
+             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_export_by_its_button, test_themed_dialog, test_update, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_defaults_and_viewer_room]
     failures = 0
     try:
         for test in tests:

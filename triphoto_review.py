@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup, QSty
     QLineEdit, QPushButton, QScrollBar, QSlider, QStackedWidget, QWidget)
 from PIL import Image, ImageStat
 from triphoto import PICK_NEUTRAL, PICK_REJECT, PICK_SELECT
-from triphoto_theme import ACCENT, ASSETS, BACKGROUNDS, FAINT, MUTED, REJECT, SELECT, TEXT, contrast_on, draw_bookmark, draw_check, draw_clear_star, draw_comment, draw_cross, draw_flag, draw_heart, draw_send, draw_stars
+from triphoto_theme import ACCENT, ASSETS, BACKGROUNDS, FAINT, MUTED, REJECT, SELECT, TEXT, contrast_on, draw_bookmark, draw_bucket_chips, draw_check, draw_clear_star, draw_comment, draw_cross, draw_flag, draw_heart, draw_send, draw_stars
 
 MODES = [('wall', 'Grille'), ('toile', 'Pêle-mêle'), ('color', 'Couleur'), ('swipe', 'Tindr'), ('instagram', 'Instagram')]
 # What a swipe or a drag out of the grid does to a photo. Offered in both places.
@@ -570,8 +570,16 @@ class Surface(QWidget):
         scale = min(rect.width()/aspect, rect.height())
         return QRectF(rect.center().x()-scale*aspect/2, rect.center().y()-scale/2, scale*aspect, scale)
 
+    def pick_for_drag(self, photo, extend):
+        """In a selection, pressing a photo already picked keeps the others, so that they can be dragged together."""
+        if extend or not self.window_.selection or not any(other is photo for other in self.targets()):
+            self.pick(photo, extend)
+
     def paint_badges(self, painter, rect, photo):
         """Stars and marker on a small dark plate, readable on any photo or background."""
+        chips = self.window_.photo_buckets(photo)
+        if chips:
+            draw_bucket_chips(painter, rect.left()+6, rect.top()+6, rect.width()-34, chips)
         heart = self.heart_rect(rect)
         if heart is not None:
             draw_heart(painter, heart, photo.liked)
@@ -878,6 +886,9 @@ class WallView(Surface):
             painter.restore()
 
     def drop_zones(self):
+        # In a selection, a photo goes to the buckets under the view.
+        if self.window_.selection:
+            return []
         left, width = self.content_box()
         side = max(96., left-6)
         return [QRectF(0, TOP_CLEARANCE, side, self.height()-TOP_CLEARANCE),
@@ -888,6 +899,8 @@ class WallView(Surface):
         return any(zone.contains(position) for zone in self.drop_zones())
 
     def paint_drag(self, painter):
+        if self.window_.selection:
+            return
         label = self.review.drop_label()
         hovered = self.zone_at(self.drag_position)
         painter.save()
@@ -959,8 +972,8 @@ class WallView(Surface):
             photo = self.tile_at(event.position())
             if photo:
                 extend = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
-                self.pick(photo, extend)
-                self.press = (photo, event.position()) if not extend and not self.by_color else None
+                self.pick_for_drag(photo, extend)
+                self.press = (photo, event.position()) if not extend and (not self.by_color or self.window_.selection) else None
             else:
                 self.unpick()
 
@@ -975,6 +988,8 @@ class WallView(Surface):
         if self.dragging:
             self.drag_position = event.position()
             self.update()
+            if self.window_.selection:
+                self.window_.bucket_drag(event.globalPosition().toPoint(), self.press[0])
 
     def mouseReleaseEvent(self, event):
         press, dragging = self.press, self.dragging
@@ -983,7 +998,9 @@ class WallView(Surface):
             self.unsetCursor()
             self.review.set_bottom_visible(True)
             self.update()
-            if self.zone_at(event.position()):
+            if self.window_.selection:
+                self.window_.bucket_drop(event.globalPosition().toPoint(), press[0])
+            elif self.zone_at(event.position()):
                 self.review.drop_out(press[0])
 
     def mouseDoubleClickEvent(self, event):
@@ -1189,7 +1206,7 @@ class ToileView(Surface):
         self.moved = False
         if photo:
             self.bring_front(photo)
-            self.pick(photo, bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier))
+            self.pick_for_drag(photo, bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier))
         self.setCursor(Qt.CursorShape.ClosedHandCursor)
         self.update()
 
@@ -1205,6 +1222,8 @@ class ToileView(Surface):
             position = self.positions[photo.relative_path]
             position[0] += delta.x()/self.scale_
             position[1] += delta.y()/self.scale_
+            if self.window_.selection:
+                self.window_.bucket_drag(event.globalPosition().toPoint(), photo)
         else:
             self.pan += delta
             self.fresh = False
@@ -1214,6 +1233,8 @@ class ToileView(Surface):
     def mouseReleaseEvent(self, event):
         if self.drag is not None and self.drag[0] is None and not self.moved:
             self.unpick()
+        if self.drag is not None and self.drag[0] is not None and self.moved and self.window_.selection:
+            self.window_.bucket_drop(event.globalPosition().toPoint(), self.drag[0])
         self.drag = None
         self.unsetCursor()
 
@@ -1690,10 +1711,25 @@ class ChoiceFilter(QFrame):
         self.project.setCurrentIndex(0)
         self.project.blockSignals(False)
 
+    def set_buckets(self, buckets):
+        """Inside a selection, the buckets take the place of the projects of the portfolio."""
+        self.project.blockSignals(True)
+        wanted = self.project.currentData()
+        self.project.clear()
+        self.project.addItem('Tous les buckets', 'all')
+        self.project.addItem('Sans bucket', 'none')
+        for bucket in buckets:
+            self.project.addItem(bucket['title'].replace('&', '&&'), bucket['id'])
+        self.project.setCurrentIndex(max(0, self.project.findData(wanted)))
+        self.project.blockSignals(False)
+        self.project.setToolTip('Afficher les photos de ce bucket')
+        self.project.show()
+        self.portfolio.hide()
+
     def active_labels(self):
         labels = [button.text() for button in (self.portfolio, self.publish) if button.isChecked()]
         if self.project.currentIndex() > 0:
-            labels.append(self.project.currentData())
+            labels.append(self.project.currentText().replace('&&', '&'))
         return labels
 
 
@@ -2282,13 +2318,16 @@ class ReviewPage(QWidget):
 
     def place_overlays(self):
         options = getattr(self, 'options', {})
+        # In a selection, a photo dragged out of the grid goes to a bucket: no action to choose.
+        no_exit = options['wall'][1] if self.window.selection and 'wall' in options else None
         for mode, group in options.items():
             for pill in group:
                 if pill is not None:
-                    pill.setVisible(mode == self.mode and self.bottom_visible)
+                    pill.setVisible(mode == self.mode and self.bottom_visible and pill is not no_exit)
         show_bar = self.bottom_visible and bool(self.targets())
         self.bar.setVisible(show_bar)
         left, right = options.get(self.mode, (None, None))
+        right = None if right is no_exit else right
         for pill in (left, right):
             if pill is not None:
                 pill.adjustSize()

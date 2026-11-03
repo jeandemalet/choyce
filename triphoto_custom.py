@@ -19,23 +19,17 @@ from PySide6.QtCore import QEasingCurve, QObject, QPointF, QRectF, QRunnable, QS
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea,
     QSizePolicy, QStackedWidget, QVBoxLayout, QWidget)
-from triphoto import PhotoSession, export_folder_name, write_json_atomic
+from triphoto import Photo, PhotoSession, export_folder_name, write_json_atomic
 from triphoto_portfolio import PortfolioSession, move_to_trash, source_key
 from triphoto_prefs import ask, inform
 from triphoto_review import BackgroundPicker
-from triphoto_theme import CONTROL, FAINT, MUTED, RAISED, TEXT, contrast_on
+from triphoto_theme import CONTROL, FAINT, INK, MUTED, RAISED, TEXT, contrast_on, pastel
 
 PREVIEW_SIDE = 2000
 DETAIL_SIDE = 6000
 PREVIEWS_KEPT = 12
 ALL, UNSORTED = 'all', 'none'
 BUCKET_COLORS = ['#ff3b30', '#0a84ff', '#ffd60a', '#30d158', '#ff2d92', '#ff9500', '#00d4d8', '#bf5af2', '#a4e000', '#5e5ce6']
-
-
-def pastel(color):
-    """A light tone of a bucket color, which stays discreet beside the photos."""
-    tone = QColor(color)
-    return QColor((tone.red()+2*255)//3, (tone.green()+2*255)//3, (tone.blue()+2*255)//3)
 
 
 class Sorting:
@@ -129,6 +123,17 @@ class Sorting:
         if self.buckets_of(path):
             self._set(path, [])
 
+    def move(self, path, key, source=None, duplicate=False):
+        """To another bucket, out of the one it is seen in or out of all of them. Key None only takes it out."""
+        if duplicate:
+            self.add(path, key)
+            return
+        keys = self.buckets_of(path)
+        kept = [other for other in keys if source and other != source]
+        wanted = kept+([key] if key and key not in kept else [])
+        if wanted != keys:
+            self._set(path, wanted)
+
     def undo(self):
         """The photo it concerned, or None with nothing to take back."""
         if not self.undo_stack:
@@ -167,6 +172,129 @@ class Sorting:
                     used.add(name.lower())
                     plan.append((export_folder_name(bucket['title']), name, path))
         return plan
+
+
+class SelectionSession(PhotoSession):
+    """A selection opened like a project, so that every view works on it. Its own folder only holds what the views keep."""
+
+    def __init__(self, sorting):
+        self.sorting = sorting
+        self.absent = set()
+        root = sorting.path.with_suffix('')
+        root.mkdir(parents=True, exist_ok=True)
+        # Shared between selections: the same photo is often in several.
+        self.preview_dir = sorting.path.parent/'Previews'
+        super().__init__(root)
+
+    def discover(self):
+        found, self.absent = [], set()
+        for photo in self.sorting.photos:
+            path = Path(photo['path'])
+            if path.is_file():
+                found.append(Photo(path=path, relative_path=photo['path']))
+            else:
+                self.absent.add(photo['path'])
+        return found
+
+    def out_of_reach(self, relative_path):
+        return relative_path in self.absent
+
+
+class BucketStrip(QWidget):
+    """Under the views of a selection: a click filters on a bucket, a photo dragged here moves it or adds it to another one."""
+    SPLIT = .62
+
+    def __init__(self, window):
+        super().__init__()
+        self.window = window
+        self.dragging = False
+        self.hovered = None
+        self.setFixedHeight(66)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.hide()
+
+    def keys(self):
+        return [None]+[bucket['id'] for bucket in self.window.selection.buckets] if self.window.selection else []
+
+    def rects(self):
+        keys = self.keys()
+        width = (self.width()-24-8*(len(keys)-1))/max(1, len(keys))
+        return [(key, QRectF(12+index*(width+8), 8, width, self.height()-16)) for index, key in enumerate(keys)]
+
+    def hit(self, point):
+        """(bucket, whether this keeps the photo where it is as well), or None."""
+        for key, rect in self.rects():
+            if rect.contains(point):
+                return key, bool(key and self.dragging and point.x() > rect.left()+rect.width()*self.SPLIT)
+        return None
+
+    def drag_to(self, point):
+        self.dragging = True
+        self.hovered = self.hit(QPointF(self.mapFromGlobal(point)))
+        self.update()
+
+    def finish_drag(self, point):
+        hit = self.hit(QPointF(self.mapFromGlobal(point)))
+        self.dragging, self.hovered = False, None
+        self.update()
+        return hit
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), QColor(INK))
+        selection = self.window.selection
+        if not selection:
+            return
+        active = self.window.bucket_filter()
+        font = painter.font()
+        font.setPixelSize(13)
+        painter.setFont(font)
+        for key, rect in self.rects():
+            bucket = selection.bucket(key) if key else None
+            tone = pastel(bucket['color']) if bucket else QColor(MUTED)
+            shown = (key or 'all') == active
+            fill = QColor(tone)
+            fill.setAlpha(36 if shown else 0)
+            outline = QColor(tone)
+            outline.setAlpha(255 if shown or (self.hovered and self.hovered[0] == key) else 110)
+            painter.setBrush(QColor(RAISED))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(rect, 9, 9)
+            painter.setBrush(fill)
+            painter.setPen(QPen(outline, 1.4))
+            painter.drawRoundedRect(rect, 9, 9)
+            inner = rect.adjusted(12, 0, -12, 0)
+            count = selection.count(key) if key else len(selection.photos)
+            title = bucket['title'] if bucket else 'Toutes'
+            if self.dragging:
+                self.paint_drop(painter, key, rect, tone, title)
+            else:
+                painter.setPen(QColor(TEXT))
+                painter.drawText(inner.adjusted(0, 0, -40, 0), Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(title, Qt.TextElideMode.ElideRight, int(inner.width()-40)))
+                painter.setPen(QColor(MUTED))
+                painter.drawText(inner, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, str(count))
+
+    def paint_drop(self, painter, key, rect, tone, title):
+        """Moving is the wide part, as it is what one mostly wants; keeping it here too is the narrow one."""
+        parts = [(rect, 'Retirer du bucket', False)] if not key else [
+            (QRectF(rect.left(), rect.top(), rect.width()*self.SPLIT, rect.height()), title, False),
+            (QRectF(rect.left()+rect.width()*self.SPLIT, rect.top(), rect.width()*(1-self.SPLIT), rect.height()), '+ Aussi', True)]
+        for part, text, duplicate in parts:
+            lit = self.hovered == (key, duplicate)
+            if lit:
+                veil = QColor(tone)
+                veil.setAlpha(120)
+                painter.setBrush(veil)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawRoundedRect(part, 9, 9)
+            painter.setPen(QColor(TEXT if lit or not duplicate else MUTED))
+            painter.drawText(part.adjusted(8, 0, -8, 0), Qt.AlignmentFlag.AlignCenter, painter.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, int(part.width()-16)))
+
+    def mouseReleaseEvent(self, event):
+        hit = self.hit(event.position())
+        if event.button() == Qt.MouseButton.LeftButton and hit:
+            self.window.set_bucket_filter(hit[0] or 'all')
 
 
 class Store:
@@ -1041,7 +1169,6 @@ class CustomPage(QStackedWidget):
         bar = QHBoxLayout()
         bar.setContentsMargins(12, 8, 12, 8)
         bar.setSpacing(8)
-        self.plain_button(bar, '‹ Retour', self.back)
         self.work_title = QLabel(objectName='section')
         bar.addWidget(self.work_title)
         bar.addSpacing(12)
@@ -1086,8 +1213,12 @@ class CustomPage(QStackedWidget):
         self.setCurrentWidget(self.setup)
 
     def show_after_setup(self, session):
-        if session is not None:
-            self.open_session(session)
+        if session is not None and session is self.session:
+            self.window.selection_changed()
+            self.setCurrentWidget(self.work)
+            self.show_photo()
+        elif session is not None:
+            self.window.open_custom(session)
         elif self.session is not None:
             self.setCurrentWidget(self.work)
         else:
@@ -1106,6 +1237,8 @@ class CustomPage(QStackedWidget):
         if ask(self.window, 'Supprimer la sélection', f'« {session.name} » ira à la corbeille, avec ses buckets. Les photos ne bougent pas.',
                [('cancel', 'Annuler', False), ('delete', 'Supprimer', True)]) == 'delete':
             move_to_trash(session.path)
+            if session.path.with_suffix('').exists():
+                move_to_trash(session.path.with_suffix(''))
             self.window.home.refresh()
 
     def open_session(self, session):
@@ -1122,11 +1255,11 @@ class CustomPage(QStackedWidget):
         self.show_photo()
 
     def back(self):
-        """Up one level: from the choice of galleries to the sorting, from the sorting out of Custom."""
+        """Up one level: from the choice of galleries to the sorting, from the sorting to the welcome screen."""
         if self.currentWidget() is self.setup:
             self.show_after_setup(None)
         else:
-            self.window.leave_custom()
+            self.window.go_home()
 
     def edit_selection(self):
         self.save()
@@ -1146,6 +1279,7 @@ class CustomPage(QStackedWidget):
     def changed(self):
         self.save_timer.start()
         self.update_counter()
+        self.window.bucket_strip.update()
         for card in self.cards.values():
             card.update()
 
@@ -1381,6 +1515,12 @@ class CustomPage(QStackedWidget):
         self.rebuild_cards()
         self.sync_views()
         self.changed()
+        self.show_photo()
+        self.window.selection_changed()
+
+    def show_path(self, path):
+        """Back from another view, on the photo left there."""
+        self.index = next((i for i, photo in enumerate(self.order()) if photo['path'] == path), self.index)
         self.show_photo()
 
     def add_bucket(self):
