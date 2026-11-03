@@ -2195,6 +2195,9 @@ def test_custom_view(base):
     out = base/'custom export'
     out.mkdir()
     custom.ask_export_folder = lambda: str(out)
+    # The message at the end of an export waits for an answer.
+    real_window_ask = triphoto_qt.ask
+    triphoto_qt.ask = lambda *args: 'close'
     custom.export()
     settle(window, lambda: window.export_job is None, 15000)
     finished = out/'Concours 2027'
@@ -2206,6 +2209,7 @@ def test_custom_view(base):
     custom.export()
     settle(window, lambda: window.export_job is None, 15000)
     assert len(list(out.iterdir())) == 2 and not [p for p in out.iterdir() if p.name.endswith('.en_cours')]
+    triphoto_qt.ask = real_window_ask
     # Cancelled, it leaves nothing.
     job = triphoto_custom.ExportJob(custom.session.export_plan(), out/'annule')
     job.cancelled.set()
