@@ -15,7 +15,7 @@ from io import BytesIO
 from pathlib import Path
 from collections import OrderedDict
 
-from PySide6.QtCore import Qt, QPoint, QSize, QRectF, QPointF, Signal, Slot, QObject, QRunnable, QThreadPool, QTimer, QItemSelection, QItemSelectionModel, QMimeData, QSettings, QStandardPaths, QUrl
+from PySide6.QtCore import Qt, QPoint, QSize, QRectF, QPointF, Signal, Slot, QObject, QRunnable, QThreadPool, QTimer, QItemSelection, QItemSelectionModel, QSettings, QStandardPaths, QUrl
 from PySide6.QtGui import QPixmap, QCursor, QDesktopServices, QIcon, QImage, QPainter, QPainterPath, QColor, QFont, QShortcut, QKeySequence, QColorSpace, QPen
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QComboBox, QSplitter, QListWidget, QListWidgetItem, QFrame, QScrollArea, QButtonGroup,
@@ -388,7 +388,7 @@ class PhotoDelegate(QStyledItemDelegate):
         self.window = window
 
     def sizeHint(self, option, index):
-        return QSize(250, ROW_HEIGHT)
+        return QSize(250, self.window.list.row_height())
 
     def card(self, option):
         return QRectF(option.rect.adjusted(7, 3, -7, -3))
@@ -486,6 +486,21 @@ class PhotoList(QListWidget):
     owner = None
     pressed = None
     bucket_dragging = False
+    known_height = ROW_HEIGHT
+
+    def row_height(self):
+        """The thumbnails follow the width of the ribbon; the line of the note under them stays the same."""
+        return max(ROW_HEIGHT, (self.viewport().width()-14)//2+34)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        height = self.row_height()
+        if height != self.known_height:
+            # The photo at the top stays at the top.
+            position = self.verticalScrollBar().value()/self.known_height
+            self.known_height = height
+            self.doItemsLayout()
+            self.verticalScrollBar().setValue(round(position*height))
 
     def selectionCommand(self, index, event=None):
         if self.on_control:
@@ -1057,7 +1072,7 @@ class Window(QMainWindow):
         self.prepared = set()
         self.failed = set()
         self.undo_stack = []
-        self.copied = []
+        self.redo_stack = []
         self.shortcuts = []
         self.scans = []
         self.display_profile = None
@@ -1099,6 +1114,8 @@ class Window(QMainWindow):
         left.addWidget(self.project_button)
         self.undo_button = self.button(left, '↶ Annuler', self.undo, 'ghost')
         self.undo_button.hide()
+        self.redo_button = self.button(left, '↷ Rétablir', self.redo, 'ghost')
+        self.redo_button.hide()
         left.addSpacing(6)
         self.folder_label = QLabel('', objectName='muted')
         self.folder_label.hide()
@@ -1154,6 +1171,8 @@ class Window(QMainWindow):
         self.list = PhotoList()
         self.list.owner = self
         self.list.setMinimumWidth(250)
+        # Beyond this, the thumbnails of 400 pixels would turn blurry.
+        self.list.setMaximumWidth(600)
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.list.setItemDelegate(PhotoDelegate(self))
@@ -1161,7 +1180,10 @@ class Window(QMainWindow):
         self.list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         splitter.addWidget(self.list)
-        splitter.setSizes([1180, 260])
+        splitter.setSizes([1180, int(self.settings.value('ribbon_width', 260))])
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        splitter.splitterMoved.connect(lambda *_: self.settings.setValue('ribbon_width', self.list.width()))
         self.viewer_bar = RatingBar(self, self.viewer, show_name=False)
         self.viewer_bar.rated.connect(self.rate)
         self.viewer_bar.marked.connect(self.set_pick)
@@ -1314,7 +1336,7 @@ class Window(QMainWindow):
             'prev': lambda: self.navigate(-1), 'next': lambda: self.navigate(1),
             'flag': self.toggle_flag, 'like': self.toggle_like, 'portfolio': self.toggle_portfolio, 'publish': self.toggle_publish, 'select': lambda: self.set_pick(PICK_SELECT),
             'reject': lambda: self.set_pick(PICK_REJECT), 'neutral': lambda: self.set_pick(PICK_NEUTRAL),
-            'select_all': self.select_all, 'deselect': self.deselect, 'undo': self.undo, 'copy': self.copy_photos, 'paste': self.paste_photos, 'fit': self.fit,
+            'select_all': self.select_all, 'deselect': self.deselect, 'undo': self.undo, 'redo': self.redo, 'fit': self.fit,
             'zoom_in': lambda: self.zoom_by(1.15), 'zoom_out': lambda: self.zoom_by(1/1.15),
             'background': self.cycle_background, 'review': lambda: self.set_review(not self.review_active),
             'shuffle': lambda: self.review.shuffle() if self.review_active else None,
@@ -1336,6 +1358,7 @@ class Window(QMainWindow):
             if QKeySequence(key).toString() not in taken:
                 self.shortcuts.append(QShortcut(QKeySequence(key), self, activated=lambda value=delta: self.browse(value)))
         self.undo_button.setToolTip(f"Annuler la dernière action ({' / '.join(mapping['undo'])})")
+        self.redo_button.setToolTip(f"Rétablir ce qui vient d’être annulé ({' / '.join(mapping['redo'])})")
         lines = [f"{' / '.join(mapping[key])} : {label}" for key, label in [('prev', 'précédente'), ('next', 'suivante')]]
         self.viewer.setToolTip('\n'.join(lines)+'\nClic droit : couleur du fond\nPréférences : tous les raccourcis')
 
@@ -1937,7 +1960,8 @@ class Window(QMainWindow):
         self.counter.setVisible(in_project)
         self.segments.setVisible(has_photos)
         self.undo_button.setVisible(has_photos)
-        self.sync_undo_button()
+        self.redo_button.setVisible(has_photos)
+        self.sync_undo_buttons()
         name = self.selection.name if self.selection else project_label(self.project_path) if self.project_path else ''
         self.setWindowTitle(f'{APP_NAME} · {name}' if self.session else APP_NAME)
 
@@ -1966,7 +1990,7 @@ class Window(QMainWindow):
         self.review.reset()
         self.review_active = False
         self.undo_stack.clear()
-        self.copied = []
+        self.redo_stack.clear()
         self.failed.clear()
         self.color_generation += 1
         self.pool.clear()
@@ -2137,7 +2161,7 @@ class Window(QMainWindow):
             self.list.setCurrentRow(row, QItemSelectionModel.SelectionFlag.NoUpdate if surviving else QItemSelectionModel.SelectionFlag.ClearAndSelect)
         self.list.doItemsLayout()
         anchor_row = next((i for i, photo in enumerate(self.photos) if photo.relative_path == anchor), None)
-        self.list.verticalScrollBar().setValue(anchor_row*ROW_HEIGHT-offset if anchor_row is not None else scroll)
+        self.list.verticalScrollBar().setValue(anchor_row*self.list.row_height()-offset if anchor_row is not None else scroll)
         self.list.blockSignals(False)
         self.save_timer.start(500)
         self.show_current()
@@ -2380,7 +2404,7 @@ class Window(QMainWindow):
             return
         first = self.list.indexAt(self.list.viewport().rect().topLeft()).row()
         first = max(0, first)
-        count = self.list.viewport().height()//ROW_HEIGHT+3
+        count = self.list.viewport().height()//self.list.row_height()+3
         for photo in self.photos[first:first+count]:
             self.request(photo, 400)
 
@@ -2429,7 +2453,7 @@ class Window(QMainWindow):
             self.ask_for_photo()
         if not self.session or not photos:
             return
-        self.remember([(photo, photo.stars, photo.pick, photo.liked, photo.publish) for photo in photos])
+        self.remember(self.notes_step(photos, set()))
         for photo in photos:
             if stars is not None:
                 photo.stars = stars
@@ -2446,54 +2470,79 @@ class Window(QMainWindow):
         if self.session and self.photos and not self.custom_active:
             self.toast('Cliquez d’abord sur une photo.', 1600)
 
+    def notes_step(self, photos, aside):
+        return ('notes', [(photo, photo.stars, photo.pick, photo.liked, photo.publish) for photo in photos], aside)
+
     def remember(self, entry):
-        """A step that Ctrl+Z and the Annuler button can take back: notes as a list; ('buckets', how many),
-        ('portfolio', photos, added) or ('view', message, how to restore) otherwise."""
+        """A step that Ctrl+Z and Annuler can take back: ('notes', states, photos set aside), ('buckets', how many),
+        ('portfolio', photos, added) or ('view', name, how to restore). A new step ends what could be redone."""
         self.undo_stack.append(entry)
         del self.undo_stack[:-300]
-        self.sync_undo_button()
+        self.redo_stack.clear()
+        if self.selection:
+            self.selection.redo_stack.clear()
+        self.sync_undo_buttons()
 
     def can_undo(self):
         return bool(self.undo_stack or (self.selection and self.selection.undo_stack))
 
-    def sync_undo_button(self):
+    def can_redo(self):
+        return bool(self.redo_stack or (self.selection and self.selection.redo_stack))
+
+    def sync_undo_buttons(self):
         self.undo_button.setEnabled(self.can_undo())
+        self.redo_button.setEnabled(self.can_redo())
 
     def undo(self):
-        self.take_back()
-        self.sync_undo_button()
-
-    def take_back(self):
         if self.custom_active:
             self.custom.undo()
-            return
-        if not self.can_undo():
+        elif self.can_undo():
+            # A step made on the Buckets page is taken back from any view of the selection.
+            self.redo_stack.append(self.apply_step(self.undo_stack.pop() if self.undo_stack else ('buckets', 1), True))
+        else:
             self.toast('Rien à annuler')
-            return
-        # A step made on the Buckets page is taken back from any view of the selection.
-        states = self.undo_stack.pop() if self.undo_stack else ('buckets', 1)
-        if states[0] == 'view':
-            states[2]()
-            self.toast(states[1], 1200)
-            return
-        if states[0] == 'buckets':
-            paths = [self.selection.undo() for _ in range(states[1])]
+        self.sync_undo_buttons()
+
+    def redo(self):
+        if self.custom_active:
+            self.custom.redo()
+        elif self.can_redo():
+            self.undo_stack.append(self.apply_step(self.redo_stack.pop() if self.redo_stack else ('buckets', 1), False))
+        else:
+            self.toast('Rien à rétablir')
+        self.sync_undo_buttons()
+
+    def apply_step(self, step, undoing):
+        """Undo or redo one step; what comes back is the step that reverses it."""
+        word = 'annulé' if undoing else 'rétabli'
+        kind = step[0]
+        if kind == 'view':
+            opposite = ('view', step[1], step[2]())
+            self.toast(f'{step[1]} {word}', 1200)
+        elif kind == 'buckets':
+            paths = [(self.selection.undo if undoing else self.selection.redo)() for _ in range(step[1])]
+            opposite = step
             self.custom.changed()
             if self.review_active:
                 self.review.after_undo([photo for photo in self.session.photos if photo.relative_path in paths])
-            self.toast('Rangement annulé', 1200)
-            return
-        if states[0] == 'portfolio':
-            _, photos, added = states
+            self.toast(f'Rangement {word}', 1200)
+        elif kind == 'portfolio':
+            _, photos, added = step
             self.send_to_portfolio(photos, not added)
-            self.toast('Portfolio : retour en arrière', 1200)
-            return
-        for photo, stars, pick, liked, publish in states:
-            photo.stars, photo.pick, photo.liked, photo.publish = stars, pick, liked, publish
-        self.apply_filters()
-        if self.review_active:
-            self.review.after_undo([state[0] for state in states])
-        self.toast('Note annulée', 1200)
+            opposite = ('portfolio', photos, not added)
+            self.toast(f'Portfolio : {word}', 1200)
+        else:
+            _, states, aside = step
+            photos = [state[0] for state in states]
+            opposite = self.notes_step(photos, set())
+            for photo, stars, pick, liked, publish in states:
+                photo.stars, photo.pick, photo.liked, photo.publish = stars, pick, liked, publish
+            opposite = (*opposite[:2], self.review.set_aside_again(photos, aside))
+            self.apply_filters()
+            if self.review_active:
+                self.review.after_undo(photos)
+            self.toast(f'Note {word}e', 1200)
+        return opposite
 
     def rate(self, stars):
         if self.custom_active:
@@ -2514,53 +2563,6 @@ class Window(QMainWindow):
             self.change(photos, publish=not photos[0].publish)
         else:
             self.ask_for_photo()
-
-    def clipboard_photos(self):
-        if self.custom_active:
-            current = self.custom.current()
-            return [photo for photo in self.session.photos if current and photo.relative_path == current['path']] if self.session else []
-        return self.target_photos()
-
-    def copy_photos(self):
-        """The files for other programs, and the image itself when there is one. Here, what Ctrl+V takes up."""
-        photos = self.clipboard_photos()
-        if not photos:
-            self.ask_for_photo()
-            return
-        data = QMimeData()
-        data.setUrls([QUrl.fromLocalFile(str(photo.path)) for photo in photos])
-        image = self.best_image(photos[0]) if len(photos) == 1 else None
-        if image is not None:
-            data.setImageData(image)
-        QApplication.clipboard().setMimeData(data)
-        self.copied = list(photos)
-        self.toast('Photo copiée' if len(photos) == 1 else f'{len(photos)} photos copiées', 1200)
-
-    def paste_photos(self):
-        """Into the bucket under review; otherwise the note of the photo copied goes to the photos selected."""
-        if not self.copied:
-            self.toast('Rien à coller : copiez d’abord une photo avec Ctrl+C.', 2200)
-            return
-        rule = self.selection.rule() if self.selection else None
-        if rule and len(rule['include']) == 1:
-            key = rule['include'][0]
-            before = len(self.selection.undo_stack)
-            for photo in self.copied:
-                self.selection.add(photo.relative_path, key)
-            added = len(self.selection.undo_stack)-before
-            self.toast(f"{added} photo{'s' if added > 1 else ''} ajoutée{'s' if added > 1 else ''} à {self.selection.bucket(key)['title']}" if added else 'Déjà dans ce bucket', 1400)
-            self.buckets_done(before)
-            return
-        if self.custom_active:
-            self.toast('Choisissez un bucket dans Revoir pour y coller ces photos.', 2200)
-            return
-        source = self.copied[0]
-        photos = [photo for photo in self.target_photos() if all(photo is not other for other in self.copied)]
-        if not photos:
-            self.toast('Sélectionnez les photos qui recevront cette note.', 2200)
-            return
-        self.change(photos, stars=source.stars, pick=source.pick, liked=source.liked, publish=source.publish)
-        self.toast(f"Note collée sur {len(photos)} photo{'s' if len(photos) > 1 else ''}", 1400)
 
     # Portfolio. Inside it, every photo belongs to it and taking one out sends the file to the bin.
     def is_portfolio_path(self, path):

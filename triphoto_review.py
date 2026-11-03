@@ -30,6 +30,8 @@ ACTIONS = [('none', 'Ne rien changer'), ('select', 'Retenir'), ('reject', 'Rejet
 STAGGERED_MODULES = json.loads((ASSETS/'staggered_modules.json').read_text(encoding='utf-8'))
 TOP_CLEARANCE, BOTTOM_CLEARANCE = 16, 76
 ANALYSIS_FILE = 'colors.json'
+# Raised when a measure changes: what was analysed before is read once more.
+ANALYSIS_VERSION = 2
 STATE_FILE = 'review_state.json'
 # Name and upper hue of each block of the Couleur mode, in rainbow order from the reds.
 COLOR_FAMILIES = [('Rouges', 15), ('Oranges', 45), ('Jaunes', 70), ('Verts', 165), ('Turquoises', 200), ('Bleus', 255),
@@ -62,6 +64,16 @@ def read_aspect(path):
         return source_aspect(source)
 
 
+def tone_contrast(image):
+    """Spread of the tones against the widest one this lightness allows: 0 for a flat image.
+
+    The spread alone follows the lightness: night photos would always sort as the flattest.
+    """
+    stat = ImageStat.Stat(image)
+    mean = stat.mean[0]/255
+    return min(1., stat.stddev[0]/255/max(math.sqrt(mean*(1-mean)), .05))
+
+
 def analyse_photo(path):
     """Aspect ratio and dominant color, from a heavily reduced decode."""
     with Image.open(path) as source:
@@ -74,8 +86,7 @@ def analyse_photo(path):
     small.thumbnail((48, 48))
     bins = [[0., 0., 0., 0., 0.] for _ in range(24)]
     chroma = lightness = vividness = 0.
-    # Spread of the tones, 0 for a flat image; around .5 is already a hard contrast.
-    contrast = min(1., ImageStat.Stat(small.convert('L')).stddev[0]/128)
+    contrast = tone_contrast(small.convert('L'))
     pixels = list(zip(small.convert('HSV').getdata(), small.getdata()))
     for (hue, saturation, value), (red, green, blue) in pixels:
         lightness += value
@@ -212,9 +223,9 @@ class AnalysisJob(QRunnable):
             if self.cancelled.is_set():
                 return
             try:
-                batch[key] = {**analyse_photo(path), 'signature': signature}
+                batch[key] = {**analyse_photo(path), 'signature': signature, 'version': ANALYSIS_VERSION}
             except Exception:
-                batch[key] = {'aspect': 1.5, 'neutral': True, 'hue': 0, 'light': 0, 'contrast': 0, 'vivid': 0, 'rgb': [40, 40, 40], 'signature': signature}
+                batch[key] = {'aspect': 1.5, 'neutral': True, 'hue': 0, 'light': 0, 'contrast': 0, 'vivid': 0, 'rgb': [40, 40, 40], 'signature': signature, 'version': ANALYSIS_VERSION}
             if len(batch) >= 16 or done == total:
                 self.signals.batch.emit(batch, done, total, self.token)
                 batch = {}
@@ -738,17 +749,20 @@ class WallView(Surface):
 
     def shuffle(self):
         if not self.by_color:
-            seed, position = self.order_seed, self.bar.value()
-
-            def restore():
-                self.order_seed = seed
-                self.rebuild()
-                self.bar.setValue(position)
-                self.review.sync_color_order()
+            def back_to(seed, position):
+                def restore():
+                    opposite = back_to(self.order_seed, self.bar.value())
+                    self.order_seed = seed
+                    self.rebuild()
+                    self.bar.setValue(position)
+                    self.review.sync_color_order()
+                    return opposite
+                return restore
+            step = back_to(self.order_seed, self.bar.value())
             self.order_seed = random.randrange(1 << 30)
             self.bar.setValue(0)
             self.rebuild()
-            self.window_.remember(('view', 'Mélange annulé', restore))
+            self.window_.remember(('view', 'Mélange', step))
 
     def content_box(self):
         available = max(200, self.width()-2*18-10)
@@ -1071,8 +1085,9 @@ class WallView(Surface):
 class ToileView(Surface):
     """The filtered photos laid out as prints on a table, so many across its width.
 
-    Mélanger lays them out again. Better-rated photos are larger. Each row takes the room
-    of its own photos, so the table stays tight whatever their format or their note.
+    Mélanger lays them out again. Better-rated photos are larger. They lie on an invisible
+    grid: cells as wide as the widest photo, rows as high as their tallest one. The table
+    keeps its width whatever the formats, and a smaller photo has more room around it.
     """
     GAP = 22
 
@@ -1125,17 +1140,20 @@ class ToileView(Surface):
         """Same order and same slight disorder, so changing the width does not deal again."""
         self.positions = {}
         self.moved_by_hand = False
+        if not self.dealt:
+            return
+        columns = min(self.columns, len(self.dealt))
+        cell = max(self.tile_size(photo)[0] for photo in self.dealt)+self.GAP
         y = 0.
-        for start in range(0, len(self.dealt), self.columns):
-            row = self.dealt[start:start+self.columns]
-            sizes = [self.tile_size(photo) for photo in row]
-            height = max(size[1] for size in sizes)
-            x = -(sum(size[0] for size in sizes)+self.GAP*(len(row)-1))/2
-            for photo, (width, tile_height) in zip(row, sizes):
+        for start in range(0, len(self.dealt), columns):
+            row = self.dealt[start:start+columns]
+            height = max(self.tile_size(photo)[1] for photo in row)
+            for column, photo in enumerate(row):
+                width, tile_height = self.tile_size(photo)
                 dx, dy, angle = self.loose[photo.relative_path]
-                # The disorder stays within the gap and the height of the row: nothing overlaps.
-                self.positions[photo.relative_path] = [x+width/2+dx*self.GAP*.3, y+height/2+dy*(height-tile_height)/2, angle]
-                x += width+self.GAP
+                # The disorder stays within the room left in the cell: nothing overlaps.
+                self.positions[photo.relative_path] = [(column-(columns-1)/2)*cell+dx*(cell-self.GAP-width)*.4,
+                                                       y+height/2+dy*(height-tile_height)*.4, angle]
             y += height+self.GAP
 
     def formats_known(self):
@@ -1167,24 +1185,27 @@ class ToileView(Surface):
         self.review.sync_zoom()
 
     def shuffle(self):
-        state = self.dealt, self.loose
-
-        def restore():
-            self.dealt, self.loose = state
-            if {p.relative_path for p in self.window_.photos}-{p.relative_path for p in self.dealt}:
-                self.deal()
-            else:
-                self.stack = list(self.dealt)
-                self.arrange()
-                self.photos_changed()
-                self.fresh = True
-                self.fit()
-            self.update()
-            self.schedule_requests()
+        def back_to(dealt, loose):
+            def restore():
+                opposite = back_to(self.dealt, self.loose)
+                self.dealt, self.loose = dealt, loose
+                if {p.relative_path for p in self.window_.photos}-{p.relative_path for p in self.dealt}:
+                    self.deal()
+                else:
+                    self.stack = list(self.dealt)
+                    self.arrange()
+                    self.photos_changed()
+                    self.fresh = True
+                    self.fit()
+                self.update()
+                self.schedule_requests()
+                return opposite
+            return restore
+        step = back_to(self.dealt, self.loose)
         self.deal()
         self.update()
         self.schedule_requests()
-        self.window_.remember(('view', 'Mélange annulé', restore))
+        self.window_.remember(('view', 'Mélange', step))
 
     def set_straight(self, value):
         self.straight = value
@@ -1329,11 +1350,15 @@ class ToileView(Surface):
     def remember_move(self, key, start):
         self.moved_by_hand = True
 
-        def restore():
-            if key in self.positions:
-                self.positions[key] = start
-                self.update()
-        self.window_.remember(('view', 'Déplacement annulé', restore))
+        def back_to(position):
+            def restore():
+                opposite = back_to(self.positions.get(key, position))
+                if key in self.positions:
+                    self.positions[key] = position
+                    self.update()
+                return opposite
+            return restore
+        self.window_.remember(('view', 'Déplacement', back_to(start)))
 
     def mouseDoubleClickEvent(self, event):
         if self.badge_click(event.position()) or self.just_cleared():
@@ -1443,17 +1468,20 @@ class SwipeView(Surface):
 
     def shuffle(self):
         self.finish_animation()
-        state = list(self.deck), self.index, self.shuffled
-
-        def restore():
-            self.finish_animation()
-            self.deck, self.index, self.shuffled = state
-            self.settle()
-        random.shuffle(self.deck)
+        def back_to(deck, index, shuffled):
+            def restore():
+                self.finish_animation()
+                opposite = back_to(self.deck, self.index, self.shuffled)
+                self.deck, self.index, self.shuffled = deck, index, shuffled
+                self.settle()
+                return opposite
+            return restore
+        step = back_to(list(self.deck), self.index, self.shuffled)
+        self.deck = random.sample(self.deck, len(self.deck))
         self.index = 0
         self.shuffled = True
         self.settle()
-        self.window_.remember(('view', 'Mélange annulé', restore))
+        self.window_.remember(('view', 'Mélange', step))
 
     def current(self):
         return self.deck[self.index] if 0 <= self.index < len(self.deck) else None
@@ -1779,9 +1807,11 @@ class ChoiceFilter(QFrame):
         lines = QVBoxLayout(self)
         lines.setContentsMargins(0, 0, 0, 0)
         lines.setSpacing(6)
-        row = QHBoxLayout()
-        row.setSpacing(1)
-        lines.addLayout(row)
+        toggles = QFrame(objectName='segments')
+        row = QHBoxLayout(toggles)
+        row.setContentsMargins(3, 3, 3, 3)
+        row.setSpacing(2)
+        lines.addWidget(toggles)
         self.portfolio = self.toggle(row, 'Portfolio', 'Seulement les photos du portfolio')
         self.publish = self.toggle(row, 'À publier', 'Seulement les photos à publier')
         self.liked = self.toggle(row, "J'aime", "Seulement les photos avec un j'aime")
@@ -1789,7 +1819,6 @@ class ChoiceFilter(QFrame):
         self.project.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.project.setToolTip('Afficher les photos de ce projet')
         self.project.currentIndexChanged.connect(lambda *_: self.window.filters_changed())
-        row.addStretch(1)
         lines.addWidget(self.project)
         self.project.hide()
 
@@ -1798,7 +1827,7 @@ class ChoiceFilter(QFrame):
         button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         button.setToolTip(tip)
         button.clicked.connect(lambda *_: self.window.filters_changed())
-        row.addWidget(button)
+        row.addWidget(button, 1)
         return button
 
     def set_projects(self, names):
@@ -2258,11 +2287,15 @@ class ReviewPage(QWidget):
         row = QHBoxLayout()
         row.setSpacing(4)
         lines.addLayout(row)
+        mono_frame = QFrame(objectName='segments')
+        mono_row = QHBoxLayout(mono_frame)
+        mono_row.setContentsMargins(3, 3, 3, 3)
         self.mono_button = QPushButton('N&&B', objectName='seg', checkable=True)
         self.mono_button.setToolTip('Noir et blanc, pour juger les contrastes')
         self.mono_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.mono_button.clicked.connect(self.toggle_mono)
-        row.addWidget(self.mono_button)
+        mono_row.addWidget(self.mono_button)
+        row.addWidget(mono_frame)
         row.addStretch(1)
         self.option_button(row, '−', lambda *_: self.zoom(1/1.15)).setToolTip('Dézoomer')
         self.zoom_label = self.option_button(row, '100 %', self.zoom_reset)
@@ -2272,19 +2305,21 @@ class ReviewPage(QWidget):
         self.picker = BackgroundPicker(self.window)
         lines.addWidget(self.picker)
         # Instagram has its own screen and post: there the background has no say.
-        self.theme_row = QWidget()
+        self.theme_row = QFrame(objectName='segments')
         row = QHBoxLayout(self.theme_row)
-        row.setContentsMargins(0, 0, 0, 0)
+        row.setContentsMargins(3, 3, 3, 3)
         row.setSpacing(2)
-        row.addWidget(QLabel('Mode', objectName='muted'))
-        row.addSpacing(8)
         group = QButtonGroup(self)
-        self.light_button = self.option_button(row, 'Clair', lambda *_: self.views['instagram'].set_light(True), True)
-        self.dark_button = self.option_button(row, 'Sombre', lambda *_: self.views['instagram'].set_light(False), True)
-        group.addButton(self.light_button)
-        group.addButton(self.dark_button)
-        row.addStretch(1)
+        self.light_button, self.dark_button = (self.theme_choice(row, group, text, value) for text, value in (('Mode clair', True), ('Mode sombre', False)))
         lines.addWidget(self.theme_row)
+
+    def theme_choice(self, row, group, text, light):
+        button = QPushButton(text, objectName='mainseg', checkable=True)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        button.clicked.connect(lambda *_: self.views['instagram'].set_light(light))
+        group.addButton(button)
+        row.addWidget(button, 1)
+        return button
 
     def option_pill(self):
         pill = QFrame(self, objectName='pill')
@@ -2773,15 +2808,21 @@ class ReviewPage(QWidget):
         if self.mode == 'swipe' and pick in (PICK_SELECT, PICK_REJECT):
             self.views['swipe'].fly(1 if pick == PICK_SELECT else -1)
 
-    def after_undo(self, photos):
+    def set_aside_again(self, photos, aside):
+        """Out of the grid again or back in it, when a note that took a photo out is redone or undone."""
         wall = self.views['wall']
-        if wall.set_aside & {photo.relative_path for photo in photos}:
-            wall.set_aside -= {photo.relative_path for photo in photos}
+        keys = {photo.relative_path for photo in photos}
+        current = wall.set_aside & keys
+        if current != aside:
+            wall.set_aside = (wall.set_aside-keys)|aside
             wall.photos_changed()
             self.update_restore()
+        return current
+
+    def after_undo(self, photos):
         if self.mode == 'swipe' and photos:
             self.view().show_photo(photos[0])
-        elif self.mode in ('toile', 'wall', 'color') and len(photos) == 1:
+        elif self.mode in ('toile', 'wall', 'color') and len(photos) == 1 and any(photo is photos[0] for photo in self.window.photos):
             # Back under the eye, and picked again, so that the next key is for it.
             self.view().pick(photos[0])
             if self.mode == 'toile':
@@ -2859,8 +2900,7 @@ class ReviewPage(QWidget):
                     continue
                 signature = f'{stat.st_size}|{stat.st_mtime_ns}'
                 known = self.info.get(photo.relative_path, {})
-                # Those analysed before contrast and saturation existed are read once more.
-                if known.get('signature') != signature or 'contrast' not in known:
+                if known.get('signature') != signature or known.get('version') != ANALYSIS_VERSION:
                     todo.append((photo.relative_path, photo.path, signature))
             if not todo:
                 return

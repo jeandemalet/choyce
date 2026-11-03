@@ -264,10 +264,13 @@ def test_review_modes(base):
     toile.set_columns(4)
     assert len(toile.stack) == 24 and len(toile.positions) == 24
     # All the photos, so many across: the width fits, the rest continues below.
-    first = sorted((toile.tile_rect(p) for p in toile.dealt[:4]), key=lambda r: r.left())
-    # Tight: the neighbours of a row are separated by the gap, give or take its disorder.
-    assert all(0 < b.left()-a.right() < toile.GAP*1.7 for a, b in zip(first, first[1:]))
-    assert toile.tile_rect(toile.dealt[4]).top() > min(r.top() for r in first), 'four across, then the next row'
+    # An invisible grid: each photo in its cell, however narrow it is, and nothing overlaps.
+    cell = max(toile.tile_size(p)[0] for p in toile.dealt)+toile.GAP
+    for index, photo in enumerate(toile.dealt):
+        center = (index % 4-1.5)*cell
+        assert center-cell/2 < toile.tile_rect(photo).left() and toile.tile_rect(photo).right() < center+cell/2
+    assert toile.bounds().width() >= cell*4-toile.GAP-cell, 'the table keeps its width'
+    assert toile.tile_rect(toile.dealt[4]).top() > toile.tile_rect(toile.dealt[0]).top(), 'four across, then the next row'
     assert not review.bar.isVisible() and window.rate(5) is None and not toile.targets()
     key = toile.stack[0].relative_path
     position = list(toile.positions[key])
@@ -989,7 +992,7 @@ def test_update(base):
     clear_settings()
 
 
-def test_keys_undo_and_clipboard(base):
+def test_keys_undo_and_ribbon(base):
     clear_settings()
     root = make_project(base/'keys', 8)
     window = open_window(root)
@@ -1005,9 +1008,30 @@ def test_keys_undo_and_clipboard(base):
     assert window.viewer.zoom == 1
     # The Annuler button does what Ctrl+Z does, and says when there is nothing left.
     assert window.undo_button.isVisible() and window.undo_button.isEnabled()
+    assert not window.redo_button.isEnabled()
     while window.can_undo():
         window.undo_button.click()
-    assert window.current_photo().stars == 0 and not window.undo_button.isEnabled()
+    assert window.current_photo().stars == 0 and not window.undo_button.isEnabled() and window.redo_button.isEnabled()
+    # Ctrl+Y takes them up again, and a new action ends what could be redone.
+    QTest.keyClick(window, Qt.Key.Key_Y, Qt.KeyboardModifier.ControlModifier)
+    assert window.current_photo().stars != 0 and window.undo_button.isEnabled()
+    stars = window.current_photo().stars
+    window.undo()
+    assert window.current_photo().stars == 0
+    window.rate(1)
+    assert not window.redo_button.isEnabled()
+    window.undo()
+    assert stars != 1 and window.current_photo().stars == 0
+    # The thumbnails follow the width of the ribbon, the first one stays where it was.
+    ribbon = window.list
+    row = ribbon.visualItemRect(ribbon.item(0)).height()
+    wide = ribbon.findChild(type(ribbon.verticalScrollBar())) and ribbon.width()
+    ribbon.setFixedWidth(wide+200)
+    wait(30)
+    assert ribbon.visualItemRect(ribbon.item(0)).height() >= row+90
+    assert ribbon.visualItemRect(ribbon.item(1)).top() == ribbon.visualItemRect(ribbon.item(0)).bottom()+1
+    ribbon.setMinimumWidth(250)
+    ribbon.setMaximumWidth(600)
     for photo in window.session.photos:
         photo.stars = 5
     window.note_filter.buttons[5].click()
@@ -1033,10 +1057,18 @@ def test_keys_undo_and_clipboard(base):
     toile.mouseReleaseEvent(type('E', (), {'globalPosition': lambda self: QPointF()})())
     QTest.keyClick(window, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
     assert toile.positions[key] == start
+    moved = start[0]+300
+    QTest.keyClick(window, Qt.Key.Key_Y, Qt.KeyboardModifier.ControlModifier)
+    assert toile.positions[key][0] == moved
+    window.undo()
     dealt = list(toile.dealt)
     review.shuffle()
+    shuffled = list(toile.dealt)
     QTest.keyClick(window, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
     assert toile.dealt == dealt and toile.positions[key][:2] == start[:2] and len(toile.stack) == 8
+    window.redo()
+    assert toile.dealt == shuffled and 'rétabli' in window.toast_label.text()
+    window.undo()
     # In the grid, Mélanger is a state of the sort, and the names come back.
     window.set_view('wall')
     wall = review.view()
@@ -1051,21 +1083,18 @@ def test_keys_undo_and_clipboard(base):
     window.sort.setCurrentIndex(window.sort.findData('name_desc'))
     assert swipe.deck[0].relative_path == max(names)
     window.sort.setCurrentIndex(window.sort.findData('name_asc'))
-    # Ctrl+C gives the files to other programs; Ctrl+V gives the note of the photo copied to those selected.
+    # A photo sent out of the grid leaves again when the step is redone.
+    window.set_view('wall')
+    wall = review.view()
+    out = wall.ordered[0]
+    review.drop_out(out)
+    assert out.relative_path in wall.set_aside
+    window.undo()
+    assert out.relative_path not in wall.set_aside
+    window.redo()
+    assert out.relative_path in wall.set_aside
+    window.undo()
     window.set_view('classic')
-    QTest.keyClick(window, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
-    assert 'Rien à coller' in window.toast_label.text()
-    source, other = window.photos[0], window.photos[1]
-    source.stars, source.liked, other.stars = 3, True, 1
-    window.select_photo(source)
-    QTest.keyClick(window, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
-    urls = QApplication.clipboard().mimeData().urls()
-    assert [url.toLocalFile() for url in urls] == [source.path.as_posix()] and window.toast_label.text() == 'Photo copiée'
-    window.select_photo(other)
-    QTest.keyClick(window, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
-    assert other.stars == 3 and other.liked and 'Note collée' in window.toast_label.text()
-    window.undo_button.click()
-    assert other.stars == 1 and not other.liked
     # "et +" only where it means something.
     window.note_filter.buttons['all'].click()
     assert not window.note_filter.and_more.isEnabled()
@@ -1075,8 +1104,6 @@ def test_keys_undo_and_clipboard(base):
     assert window.stars.currentData() == 'ge3'
     window.note_filter.buttons[5].click()
     assert window.stars.currentData() == 5 and not window.note_filter.and_more.isChecked()
-    # The offscreen platform of the tests crashes on exit if its clipboard still holds something; Windows keeps it.
-    QApplication.clipboard().clear()
     window.close()
     clear_settings()
 
@@ -1639,15 +1666,15 @@ def test_color_orders(base):
     a = triphoto_review.order_tint({'hue': 20, 'light': .1, 'vivid': .1}, 'hue')
     b = triphoto_review.order_tint({'hue': 200, 'light': .9, 'vivid': .9}, 'hue')
     assert a.hslSaturation() == b.hslSaturation() and a.lightness() == b.lightness() and a.hslHue() != b.hslHue()
-    # An older analysis, without these values, is done again.
+    # An older analysis, made with another measure, is done again.
     review.set_color_order('hue')
     data = json.loads(review.analysis_path().read_text(encoding='utf-8')) if review.analysis_path().exists() else dict(review.info)
     for entry in data.values():
-        entry.pop('contrast', None)
+        entry.pop('version', None)
     window.close_project()
     (project/'TriPhoto_Session'/'colors.json').write_text(json.dumps(data), encoding='utf-8')
     window.set_folder(project)
-    settle(window, lambda: all('contrast' in review.info.get(p.relative_path, {}) for p in window.session.photos))
+    settle(window, lambda: all(review.info.get(p.relative_path, {}).get('version') == triphoto_review.ANALYSIS_VERSION for p in window.session.photos))
     window.close()
 
 
@@ -2525,6 +2552,20 @@ def test_selection_views(base):
     assert 'b' not in sorting.buckets_of(card.relative_path)
     window.undo()
     assert sorting.buckets_of(card.relative_path) == keys
+    # Ctrl+Y puts it back in the bucket, here as on the Buckets page.
+    review.apply_swipe(card, 1)
+    window.undo()
+    assert 'b' not in sorting.buckets_of(card.relative_path) and window.redo_button.isEnabled()
+    window.redo()
+    assert 'b' in sorting.buckets_of(card.relative_path) and not window.redo_button.isEnabled()
+    window.show_buckets()
+    window.undo()
+    assert 'b' not in sorting.buckets_of(card.relative_path) and window.redo_button.isEnabled()
+    window.redo()
+    assert 'b' in sorting.buckets_of(card.relative_path)
+    window.set_view('swipe')
+    window.undo()
+    assert sorting.buckets_of(card.relative_path) == keys
     # Instagram has its own light and dark, apart from the background of the other views.
     window.set_view('instagram')
     insta = review.view()
@@ -2787,7 +2828,7 @@ def main():
     app.setStyleSheet(triphoto_qt.STYLE)
     base = Path(tempfile.mkdtemp(prefix='triphoto-tests-'))
     tests = [test_legacy_session, test_nested_session_ignored, test_dominant_color, test_recents, test_shortcuts,
-             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_export_by_its_button, test_themed_dialog, test_update, test_keys_undo_and_clipboard, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_repair_links, test_selection_review_and_health, test_defaults_and_viewer_room]
+             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_export_by_its_button, test_themed_dialog, test_update, test_keys_undo_and_ribbon, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_repair_links, test_selection_review_and_health, test_defaults_and_viewer_room]
     failures = 0
     try:
         for test in tests:

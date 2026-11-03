@@ -39,6 +39,7 @@ class Sorting:
     def __init__(self, path, data):
         self.path, self.data = Path(path), data
         self.undo_stack = []
+        self.redo_stack = []
 
     @classmethod
     def create(cls, folder, name):
@@ -88,6 +89,7 @@ class Sorting:
         self.data['assigned'] = {path: keys for path, keys in self.data['assigned'].items() if path not in paths}
         self.data['removed'] = sorted(set(self.data.get('removed', []))|paths)
         self.undo_stack.clear()
+        self.redo_stack.clear()
 
     def free_color(self, ignored=None):
         """The first color no other bucket has; with more buckets than colors, the least used."""
@@ -166,6 +168,7 @@ class Sorting:
         self.data['assigned'] = {changed.get(path, path): keys for path, keys in self.data['assigned'].items()}
         self.data['position'] = changed.get(self.data.get('position'), self.data.get('position'))
         self.undo_stack.clear()
+        self.redo_stack.clear()
         # The notes of its views follow the same keys.
         notes = self.path.with_suffix('')/SESSION_DIR_NAME/SESSION_FILE_NAME
         try:
@@ -181,6 +184,10 @@ class Sorting:
     def _set(self, path, keys):
         self.undo_stack.append((path, list(self.buckets_of(path))))
         del self.undo_stack[:-300]
+        self.redo_stack.clear()
+        self._assign(path, keys)
+
+    def _assign(self, path, keys):
         if keys:
             self.data['assigned'][path] = keys
         else:
@@ -214,10 +221,17 @@ class Sorting:
         if not self.undo_stack:
             return None
         path, keys = self.undo_stack.pop()
-        if keys:
-            self.data['assigned'][path] = keys
-        else:
-            self.data['assigned'].pop(path, None)
+        self.redo_stack.append((path, list(self.buckets_of(path))))
+        self._assign(path, keys)
+        return path
+
+    def redo(self):
+        """The photo it concerned, or None with nothing to take up again."""
+        if not self.redo_stack:
+            return None
+        path, keys = self.redo_stack.pop()
+        self.undo_stack.append((path, list(self.buckets_of(path))))
+        self._assign(path, keys)
         return path
 
     def remove_bucket(self, key):
@@ -229,6 +243,7 @@ class Sorting:
             else:
                 del self.data['assigned'][path]
         self.undo_stack.clear()
+        self.redo_stack.clear()
         rule = self.rule()
         self.set_rule(include=[other for other in rule['include'] if other != key], exclude=[other for other in rule['exclude'] if other != key])
 
@@ -1641,6 +1656,7 @@ class CustomPage(QStackedWidget):
                 self.window.toast(f'Session non enregistrée : {error}', 6000)
 
     def changed(self):
+        self.window.sync_undo_buttons()
         self.save_timer.start()
         self.window.bucket_strip.update()
         self.window.review_tabs.sync()
@@ -1819,15 +1835,20 @@ class CustomPage(QStackedWidget):
             self.assign(self.session.buckets[value-1]['id'])
 
     def undo(self):
-        path = self.session.undo() if self.session else None
+        self.show_step(self.session.undo() if self.session else None, 'Rien à annuler', 'Rangement annulé')
+
+    def redo(self):
+        self.show_step(self.session.redo() if self.session else None, 'Rien à rétablir', 'Rangement rétabli')
+
+    def show_step(self, path, nothing, done):
         if path is None:
-            self.window.toast('Rien à annuler')
+            self.window.toast(nothing)
             return
         order = self.order()
         self.index = next((i for i, photo in enumerate(order) if photo['path'] == path), self.index)
         self.changed()
         self.show_photo()
-        self.window.toast('Rangement annulé', 1200)
+        self.window.toast(done, 1200)
 
     # The drag from the ribbon to the buckets.
     def start_drag(self):

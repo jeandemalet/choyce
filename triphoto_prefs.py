@@ -36,8 +36,7 @@ ACTIONS = [
     ('select_all', 'Sélectionner toutes les photos du filtre', ['Ctrl+A']),
     ('deselect', 'Désélectionner', ['Ctrl+D']),
     ('undo', 'Annuler la dernière action', ['Ctrl+Z']),
-    ('copy', 'Copier les photos', ['Ctrl+C']),
-    ('paste', 'Coller la note ou ranger dans le bucket', ['Ctrl+V']),
+    ('redo', 'Rétablir ce qui vient d’être annulé', ['Ctrl+Y']),
     ('fit', 'Ajuster la photo', ['0']),
     ('zoom_in', 'Zoom avant', ['+']),
     ('zoom_out', 'Zoom arrière', ['-']),
@@ -58,7 +57,7 @@ ACTIONS = [
     ('preferences', 'Préférences', ['Ctrl+,']),
 ]
 # Not listed in the dialog: Shift held after rating must still navigate.
-ALIASES = {'prev': ['Shift+Left'], 'next': ['Shift+Right']}
+ALIASES = {'prev': ['Shift+Left'], 'next': ['Shift+Right'], 'redo': ['Ctrl+Shift+Z']}
 
 
 class ThemedDialog(QDialog):
