@@ -15,24 +15,28 @@ from io import BytesIO
 from pathlib import Path
 from collections import OrderedDict
 
-from PySide6.QtCore import Qt, QSize, QRectF, QPointF, Signal, Slot, QObject, QRunnable, QThreadPool, QTimer, QItemSelectionModel, QSettings, QUrl
+from PySide6.QtCore import Qt, QSize, QRectF, QPointF, Signal, Slot, QObject, QRunnable, QThreadPool, QTimer, QItemSelectionModel, QSettings, QStandardPaths, QUrl
 from PySide6.QtGui import QCursor, QDesktopServices, QIcon, QImage, QPainter, QPainterPath, QColor, QFont, QShortcut, QKeySequence, QColorSpace, QPen
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QComboBox, QSplitter, QListWidget, QListWidgetItem, QFrame, QScrollArea, QButtonGroup,
-    QStackedWidget, QAbstractItemView, QFileDialog, QProgressBar, QStyledItemDelegate, QStyle, QMenu, QColorDialog)
+    QStackedWidget, QAbstractItemView, QDialog, QFileDialog, QLineEdit, QProgressBar, QStyledItemDelegate, QStyle, QMenu, QColorDialog)
 from PIL import Image, ImageCms, ImageWin
 from triphoto import (APP_NAME, APP_VERSION, PhotoSession, sort_photos, SORT_OPTIONS, load_screen_preview, original_inventory,
-    export_original_copy, EXPORT_DIR_NAME, PICK_NEUTRAL, PICK_REJECT, PICK_SELECT)
+    export_original_copy, EXPORT_DIR_NAME, PICK_NEUTRAL, PICK_REJECT, PICK_SELECT, SESSION_DIR_NAME)
+from triphoto_portfolio import MANIFEST_FILE, Portfolio, RelocateJob, UNSORTED
 from triphoto_prefs import (ALIASES, PreferencesDialog, Recents, ScanJob, age_label, ask, inform, path_key, shortcut_map)
-from triphoto_review import MODES, BackgroundPicker, MarkerFilter, NoteFilter, RatingBar, ReviewPage
+from triphoto_review import MODES, BackgroundPicker, ChoiceFilter, MarkerFilter, NoteFilter, RatingBar, ReviewPage
 from triphoto_update import UpdateCheck, UpdateDownload, can_install, launch_installer, write_installer
 from triphoto_theme import (ACCENT, ASSETS, BACKGROUNDS, FAINT, INK, RAISED, REJECT, SELECT, STYLE, TEXT,
-    contrast_on, draw_check, draw_clear_star, draw_cross, draw_flag, draw_heart, draw_stars)
+    contrast_on, draw_bookmark, draw_check, draw_clear_star, draw_cross, draw_flag, draw_heart, draw_send, draw_stars)
 
 # Tests point this to a separate store, so that they never touch the user's settings.
 SETTINGS_SCOPE = os.environ.get('TRIPHOTO_SETTINGS', 'TriPhoto')
 ROW_HEIGHT = 152
-EXPORT_PICKS_DIR_NAME = 'Export_Retenues'
+# One subfolder per export, named after what it holds. Earlier galleries keep their
+# Export_5_Etoiles and Export_Retenues where they are: nothing moves them.
+EXPORT_ROOT_NAME = 'Exportation'
+OLD_EXPORT_DIRS = (EXPORT_DIR_NAME, 'Export_Retenues')
 # Decoded previews held in memory, most of it for the sharp photos prepared ahead.
 MEMORY_LIMIT = 1200*1024*1024
 AHEAD_MAX, BEHIND = 10, 2
@@ -90,7 +94,8 @@ class ExportJob(QRunnable):
         return self.base
 
     def run(self):
-        work = self.base.parent/EXPORT_WORK_DIR_NAME
+        # Beside the exports rather than among them: no export name can land on it.
+        work = self.base.parent.parent/EXPORT_WORK_DIR_NAME
         try:
             shutil.rmtree(work, ignore_errors=True)
             self.signals.checking.emit()
@@ -225,6 +230,15 @@ class HoverButton(QPushButton):
         super().enterEvent(event)
 
 
+# Fitted, a photo stops above the floating bar instead of lying under it.
+BAR_ROOM = 66
+
+
+def export_folder_name(text):
+    """What Windows accepts as the name of a folder."""
+    return re.sub(r'[<>:"/\\|?*]', '-', text).strip(' .')
+
+
 class Viewer(QWidget):
     zoomChanged = Signal(float)
     resized = Signal()
@@ -259,9 +273,13 @@ class Viewer(QWidget):
             draw_heart(painter, self.heart_rect(), liked)
 
     def image_rect(self):
-        fit = min(max(1, self.width()-24)/self.image.width(), max(1, self.height()-24)/self.image.height())
+        fit = min(max(1, self.width()-24)/self.image.width(), max(1, self.height()-12-BAR_ROOM)/self.image.height())
         width, height = self.image.width()*fit*self.zoom, self.image.height()*fit*self.zoom
-        return QRectF((self.width()-width)/2+self.pan.x(), (self.height()-height)/2+self.pan.y(), width, height)
+        center = self.fit_center()
+        return QRectF(center.x()-width/2+self.pan.x(), center.y()-height/2+self.pan.y(), width, height)
+
+    def fit_center(self):
+        return QPointF(self.width()/2, (self.height()+12-BAR_ROOM)/2)
 
     def heart_rect(self):
         # Zoomed in, the corner of the photo may be out of sight: stay in the corner of what is seen.
@@ -281,7 +299,7 @@ class Viewer(QWidget):
         if anchor is not None and not self.image.isNull():
             # Preserve the image coordinate beneath the cursor, including
             # when zooming out through the fit-to-window scale.
-            center = QPointF(self.width()/2, self.height()/2)
+            center = self.fit_center()
             ratio = self.zoom / previous_zoom
             self.pan = (anchor-center)*(1-ratio) + self.pan*ratio
         elif self.zoom <= 1:
@@ -404,6 +422,12 @@ class PhotoDelegate(QStyledItemDelegate):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(thumb.adjusted(.8, .8, -.8, -.8), 5, 5)
         draw_heart(painter, self.heart(thumb), photo.liked)
+        x = thumb.left()+7
+        if self.window.portfolio.contains(photo.path):
+            draw_bookmark(painter, QRectF(x, thumb.top()+6, 11, 13), '#ffffff', True)
+            x += 16
+        if photo.publish:
+            draw_send(painter, QRectF(x, thumb.top()+6, 13, 13), '#ffffff', True)
         middle = rect.bottom()-13
         draw_clear_star(painter, rect.x()+8, middle, 5.5, TEXT if photo.stars else '#4a4a4c')
         draw_stars(painter, rect.x()+24, middle, photo.stars, 5.5, 14.0)
@@ -524,6 +548,79 @@ class RecentCard(QFrame):
         menu.exec(event.globalPos())
 
 
+class PortfolioCard(QFrame):
+    """The portfolio, ahead of the projects and wider than they are."""
+    HEIGHT = 176
+
+    def __init__(self, home):
+        super().__init__(objectName='featured')
+        self.home = home
+        self.covers = {}
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(self.HEIGHT)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(4)
+        layout.addStretch(1)
+        self.title = QLabel('Portfolio', objectName='title')
+        layout.addWidget(self.title)
+        self.meta = QLabel(objectName='muted')
+        layout.addWidget(self.meta)
+        self.place = QLabel(objectName='faint')
+        layout.addWidget(self.place)
+        self.text_width = 300
+
+    def refresh(self):
+        portfolio = self.home.window.portfolio
+        self.covers = {}
+        folder = portfolio.folder
+        if folder is None:
+            self.meta.setText('Vos meilleures photos, tous projets confondus')
+            self.place.setText('Cliquez pour choisir son dossier')
+        elif not portfolio.available():
+            self.meta.setText('Dossier ou disque introuvable')
+            self.place.setText(str(folder))
+        else:
+            photos, projects = portfolio.summary()
+            self.meta.setText(f"{photos} photo{'s' if photos > 1 else ''} · {projects} projet{'s' if projects > 1 else ''}" if photos
+                              else 'Vide pour le moment : touche K, ou le signet sous une photo')
+            self.place.setText(self.place.fontMetrics().elidedText(str(folder), Qt.TextElideMode.ElideMiddle, self.text_width))
+            for index, relative in enumerate(portfolio.covers()):
+                self.home.window.pool.start(CoverJob(f'portfolio:{index}', folder, folder/relative, self.home.window.display_profile, self.home.cover_signals), 2)
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self.covers:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        clip = QPainterPath()
+        clip.addRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 11, 11)
+        painter.setClipPath(clip)
+        # From the right edge, as many of the latest photos as the width allows.
+        x, height = float(self.width()), float(self.height()-2)
+        for index in sorted(self.covers):
+            cover = self.covers[index]
+            width = height*cover.width()/cover.height()
+            x -= width+2
+            if x < self.text_width+60:
+                break
+            painter.drawImage(QRectF(x, 1, width, height), cover)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.home.window.open_portfolio()
+
+    def contextMenuEvent(self, event):
+        window = self.home.window
+        menu = QMenu(self)
+        menu.addAction("Choisir l'emplacement…", window.choose_portfolio_folder)
+        menu.addAction('Ouvrir le dossier', window.reveal_portfolio).setEnabled(window.portfolio.available())
+        menu.exec(event.globalPos())
+
+
 class HomePage(QWidget):
     """Welcome screen: the recent projects, or a single centered call to action."""
 
@@ -544,6 +641,9 @@ class HomePage(QWidget):
         self.column.setContentsMargins(56, 44, 56, 44)
         self.column.setSpacing(0)
         self.column.addStretch(0)
+        self.portfolio_card = PortfolioCard(self)
+        self.column.addWidget(self.portfolio_card)
+        self.column.addSpacing(30)
         self.title = QLabel('Ajoutez des photos pour commencer', objectName='title')
         self.column.addWidget(self.title)
         self.column.addSpacing(16)
@@ -574,7 +674,9 @@ class HomePage(QWidget):
         self.cover_signals.ready.connect(self.cover_ready, Qt.ConnectionType.QueuedConnection)
 
     def refresh(self):
-        entries = self.window.recents.entries()
+        # The portfolio has its own place: never a second time among the projects.
+        entries = [entry for entry in self.window.recents.entries() if not self.window.is_portfolio_path(entry['path'])]
+        self.portfolio_card.refresh()
         for card in self.cards.values():
             self.grid.removeWidget(card)
             card.deleteLater()
@@ -610,6 +712,11 @@ class HomePage(QWidget):
         self.arrange()
 
     def cover_ready(self, key, image, error):
+        if key.startswith('portfolio:'):
+            if not image.isNull():
+                self.portfolio_card.covers[int(key[10:])] = image
+                self.portfolio_card.update()
+            return
         card = self.cards.get(key)
         if card is None:
             return
@@ -620,12 +727,145 @@ class HomePage(QWidget):
             card.update()
 
 
+class ExportDialog(QDialog):
+    """Which photos of the gallery to export, and the folder they go to. Starts from the filters in use."""
+
+    def __init__(self, window):
+        super().__init__(window)
+        self.owner = window
+        self.named_by_hand = False
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        frame = QFrame(objectName='dialog')
+        outer.addWidget(frame)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(24, 22, 24, 18)
+        layout.setSpacing(10)
+        layout.addWidget(QLabel('Exporter des photos', objectName='dialogTitle'))
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(8)
+        self.stars = self.copy_combo(window.stars)
+        self.marker = self.copy_combo(window.flags)
+        grid.addWidget(QLabel('Notes', objectName='muted'), 0, 0)
+        grid.addWidget(self.stars, 0, 1)
+        grid.addWidget(QLabel('Marqueur', objectName='muted'), 1, 0)
+        grid.addWidget(self.marker, 1, 1)
+        choices = window.choices
+        toggles = QHBoxLayout()
+        toggles.setSpacing(2)
+        self.portfolio = self.toggle(toggles, 'Portfolio', choices.portfolio.isChecked())
+        self.portfolio.setVisible(not window.viewing_portfolio())
+        self.publish = self.toggle(toggles, 'À publier', choices.publish.isChecked())
+        toggles.addStretch(1)
+        grid.addWidget(QLabel('Seulement', objectName='muted'), 2, 0)
+        grid.addLayout(toggles, 2, 1)
+        self.project = None
+        row = 3
+        if window.viewing_portfolio():
+            self.project = self.copy_combo(choices.project)
+            grid.addWidget(QLabel('Projet', objectName='muted'), row, 0)
+            grid.addWidget(self.project, row, 1)
+            row += 1
+        self.name = QLineEdit()
+        self.name.setMaxLength(80)
+        self.name.textEdited.connect(self.renamed)
+        grid.addWidget(QLabel('Dossier', objectName='muted'), row, 0)
+        grid.addWidget(self.name, row, 1)
+        grid.setColumnStretch(1, 1)
+        layout.addLayout(grid)
+        self.count = QLabel()
+        layout.addWidget(self.count)
+        self.place = QLabel(objectName='faint')
+        self.place.setWordWrap(True)
+        self.place.setFixedWidth(440)
+        layout.addWidget(self.place)
+        old = [name for name in OLD_EXPORT_DIRS if (window.session.session_dir/name).is_dir()]
+        if old:
+            note = QLabel(f"Les exports déjà faits restent à leur place, dans {' et '.join(old)}.", objectName='faint')
+            note.setWordWrap(True)
+            layout.addWidget(note)
+        layout.addSpacing(6)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton('Annuler', objectName='ghost')
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        self.go = QPushButton('Exporter', objectName='primary')
+        self.go.clicked.connect(self.accept)
+        buttons.addWidget(self.go)
+        layout.addLayout(buttons)
+        if not (window.stars.currentIndex() > 0 or window.flags.currentIndex() > 0 or choices.active_labels()):
+            # No filter in use: the usual export, which one click leaves as it is.
+            self.stars.setCurrentIndex(self.stars.findData(5))
+        for combo in (self.stars, self.marker, self.project):
+            if combo is not None:
+                combo.currentIndexChanged.connect(self.refresh)
+        self.refresh()
+
+    def copy_combo(self, source):
+        combo = QComboBox()
+        combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        for index in range(source.count()):
+            combo.addItem(source.itemText(index), source.itemData(index))
+        combo.setCurrentIndex(source.currentIndex())
+        return combo
+
+    def toggle(self, row, text, checked):
+        button = QPushButton(text, objectName='seg', checkable=True)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        button.setChecked(checked)
+        button.clicked.connect(self.refresh)
+        row.addWidget(button)
+        return button
+
+    def renamed(self, *args):
+        self.named_by_hand = True
+        self.refresh()
+
+    def photos(self):
+        return self.owner.export_selection(self.stars.currentData(), self.marker.currentData(), self.portfolio.isChecked(),
+                                           self.publish.isChecked(), self.project.currentData() if self.project else 'all')
+
+    def suggested_name(self):
+        """Named after its settings: "5 étoiles", "4 étoiles et plus, À publier"."""
+        if self.owner.review_active and self.owner.review.mode == 'instagram':
+            return 'Instagram'
+        parts = []
+        if self.stars.currentIndex() > 0:
+            parts.append(self.stars.currentText())
+        if self.marker.currentIndex() > 0:
+            parts.append(self.marker.currentText().replace(' uniquement', ''))
+        parts += [button.text() for button in (self.portfolio, self.publish) if button.isChecked()]
+        if self.project and self.project.currentIndex() > 0:
+            parts.append(self.project.currentData())
+        return ', '.join(parts) or 'Toutes les photos'
+
+    def folder_name(self):
+        return export_folder_name(self.name.text())
+
+    def refresh(self, *args):
+        if not self.named_by_hand:
+            self.name.setText(self.suggested_name())
+        count = len(self.photos())
+        self.count.setText(f"{count} photo{'s' if count > 1 else ''} à copier" if count else 'Aucune photo pour ces réglages')
+        name = self.folder_name()
+        self.place.setText(str(self.owner.session.session_dir/EXPORT_ROOT_NAME/name).replace('\\', '\\\u200b'))
+        self.go.setEnabled(bool(count and name))
+
+
 class Window(QMainWindow):
     def __init__(self, folder=None):
         super().__init__()
         self.settings = app_settings()
         self.marker = self.settings.value('marker', 'flag')
         self.recents = Recents(self.settings)
+        self.portfolio = Portfolio(self.settings)
+        self.portfolio.failed.connect(self.portfolio_failed)
+        self.portfolio.changed.connect(self.portfolio_changed)
+        self.relocating = None
         self.session = None
         self.project_path = None
         self.closing = False
@@ -710,7 +950,7 @@ class Window(QMainWindow):
         self.filter_chip.entered.connect(self.show_filter_panel)
         self.filter_chip.clicked.connect(self.show_filter_panel)
         right.addSpacing(6)
-        self.export_button = self.button(right, 'Exporter les 5 étoiles', self.export, 'primary')
+        self.export_button = self.button(right, 'Exporter…', self.export, 'primary')
         self.prefs_button = self.button(right, 'Préférences', self.open_preferences, 'ghost')
         top.addLayout(left, 1)
         top.addWidget(segments)
@@ -736,11 +976,14 @@ class Window(QMainWindow):
         self.viewer_bar = RatingBar(self, self.viewer, show_name=False)
         self.viewer_bar.rated.connect(self.rate)
         self.viewer_bar.marked.connect(self.set_pick)
+        self.viewer_bar.portfolio.connect(self.toggle_portfolio)
+        self.viewer_bar.publish.connect(self.toggle_publish)
         self.viewer_bar.hide()
         self.viewer_picker = BackgroundPicker(self, self.viewer, floating=True)
         self.viewer_picker.hide()
         self.note_filter = NoteFilter(self)
         self.marker_filter = MarkerFilter(self)
+        self.choices = ChoiceFilter(self)
         self.viewer_bar_timer = QTimer(self)
         self.viewer_bar_timer.setSingleShot(True)
         self.viewer_bar_timer.timeout.connect(self.hide_viewer_bar)
@@ -759,6 +1002,8 @@ class Window(QMainWindow):
         filter_row.addWidget(self.note_filter)
         filter_row.addSpacing(6)
         filter_row.addWidget(self.marker_filter)
+        filter_row.addSpacing(6)
+        filter_row.addWidget(self.choices)
         filter_row.addWidget(self.review.tools)
         self.filter_panel.hide()
         # Where the mouse is, asked regularly: the enter and leave events of a panel full
@@ -834,7 +1079,7 @@ class Window(QMainWindow):
         self.shortcuts = []
         commands = {
             'prev': lambda: self.navigate(-1), 'next': lambda: self.navigate(1),
-            'flag': self.toggle_flag, 'like': self.toggle_like, 'select': lambda: self.set_pick(PICK_SELECT),
+            'flag': self.toggle_flag, 'like': self.toggle_like, 'portfolio': self.toggle_portfolio, 'publish': self.toggle_publish, 'select': lambda: self.set_pick(PICK_SELECT),
             'reject': lambda: self.set_pick(PICK_REJECT), 'neutral': lambda: self.set_pick(PICK_NEUTRAL),
             'undo': self.undo, 'fit': lambda: self.review.zoom_reset() if self.review_active else self.viewer.set_zoom(1),
             'zoom_in': lambda: self.zoom_by(1.15), 'zoom_out': lambda: self.zoom_by(1/1.15),
@@ -843,7 +1088,7 @@ class Window(QMainWindow):
             'mono': lambda: self.review.toggle_mono() if self.review_active else None,
             'refresh': self.refresh, 'open': self.open_folder, 'close': self.close_project, 'preferences': self.open_preferences,
             **{f'rate{value}': (lambda stars=value: self.rate(stars)) for value in range(6)},
-            **{f'mode_{mode}': (lambda value=mode: self.set_view(value)) for mode in ('classic', 'toile', 'swipe', 'color', 'wall')}}
+            **{f'mode_{mode}': (lambda value=mode: self.set_view(value)) for mode in ('classic', 'toile', 'swipe', 'color', 'wall', 'instagram')}}
         mapping = shortcut_map(self.settings)
         taken = {QKeySequence(key).toString() for keys in mapping.values() for key in keys}
         for name, keys in mapping.items():
@@ -870,7 +1115,7 @@ class Window(QMainWindow):
                 self.list.viewport().update()
 
     def apply_marker(self):
-        """Adapt the filter, the bars and the export to the chosen marking system."""
+        """Adapt the filter and the bars to the chosen marking system."""
         values = PICK_FILTERS if self.marker == 'pick' else FLAG_FILTERS
         self.flags.blockSignals(True)
         self.flags.clear()
@@ -881,13 +1126,6 @@ class Window(QMainWindow):
         self.viewer_bar.relayout()
         self.review.bar.relayout()
         self.review.place_overlays()
-        menu = None
-        if self.marker == 'pick':
-            menu = QMenu(self)
-            menu.addAction('Les 5 étoiles', lambda: self.export('stars'))
-            menu.addAction('Les retenues', lambda: self.export('picks'))
-        self.export_button.setMenu(menu)
-        self.export_button.setText('Exporter' if menu else 'Exporter les 5 étoiles')
         self.review.refresh_marker_options()
 
     def toast(self, text, duration=2600):
@@ -919,7 +1157,7 @@ class Window(QMainWindow):
 
     def check_filter_panel(self):
         # A list or a color dialog opened from the panel still belongs to it.
-        if self.over_filter() or self.marker_filter.view().isVisible() or QApplication.activeModalWidget() is not None:
+        if self.over_filter() or self.marker_filter.view().isVisible() or self.choices.project.view().isVisible() or QApplication.activeModalWidget() is not None:
             self.filter_outside = 0
         else:
             self.filter_outside += 1
@@ -928,7 +1166,7 @@ class Window(QMainWindow):
                 self.filter_panel.hide()
 
     def update_filter_chip(self):
-        parts = [combo.currentText() for combo in (self.stars, self.flags) if combo.currentIndex() > 0]
+        parts = [combo.currentText() for combo in (self.stars, self.flags) if combo.currentIndex() > 0]+self.choices.active_labels()
         self.filter_chip.setText(f"Filtre : {' · '.join(parts)}  ▾" if parts else 'Filtre  ▾')
 
     def set_view(self, key):
@@ -1087,6 +1325,10 @@ class Window(QMainWindow):
         recent_menu.setEnabled(bool(entries))
         menu.addAction("Retrouver d'anciens projets…", self.find_projects)
         menu.addSeparator()
+        menu.addAction('Portfolio', self.open_portfolio)
+        menu.addAction('Ouvrir le dossier du portfolio', self.reveal_portfolio).setEnabled(self.portfolio.available())
+        menu.addAction("Emplacement du portfolio…", self.choose_portfolio_folder)
+        menu.addSeparator()
         menu.addAction('Fermer le projet', self.close_project).setEnabled(self.session is not None)
 
     def open_recent(self, path):
@@ -1111,6 +1353,7 @@ class Window(QMainWindow):
 
     def projects_found(self, found):
         self.scans.clear()
+        found = [entry for entry in found if not self.is_portfolio_path(entry['path'])]
         added = self.recents.merge(found)
         self.toast(f'{len(found)} projets trouvés, {added} ajoutés aux récents.' if found else 'Aucun ancien projet dans ce dossier.')
         if self.pages.currentIndex() == 0:
@@ -1158,7 +1401,7 @@ class Window(QMainWindow):
         self.stop_export()
         if self.session:
             self.save_session()
-            self.recents.add(self.project_path, self.session.photos)
+            self.remember_project()
         self.review.reset()
         self.review_active = False
         self.undo_stack.clear()
@@ -1184,6 +1427,7 @@ class Window(QMainWindow):
         self.viewer.zoom = 1
         self.viewer.update()
         self.counter.setToolTip('')
+        self.choices.reset()
         self.note_filter.sync()
         self.marker_filter.sync()
         self.update_counter()
@@ -1227,8 +1471,12 @@ class Window(QMainWindow):
         self.session = session
         self.project_path = Path(path)
         self.baseline = original_inventory(path)
+        self.portfolio.reconcile()
+        if self.viewing_portfolio():
+            self.portfolio.apply_seeds(session.photos)
+        self.choices.set_projects(sorted({self.portfolio.project_of(p.relative_path) for p in session.photos}) if self.viewing_portfolio() else [])
         if session.photos:
-            self.recents.add(path, session.photos, time.time())
+            self.remember_project(time.time())
         self.review.start_analysis()
         self.cache_dir = session.session_dir / 'Previews'
         self.cache_dir.mkdir(exist_ok=True)
@@ -1247,6 +1495,7 @@ class Window(QMainWindow):
                 combo.blockSignals(True)
                 combo.setCurrentIndex(0)
                 combo.blockSignals(False)
+            self.choices.reset()
             self.apply_filters()
         self.update_project_state()
 
@@ -1258,7 +1507,7 @@ class Window(QMainWindow):
         flag = self.flags.currentData()
         counts = {note: 0 for note in range(6)}
         for photo in session.photos:
-            if marker_matches(photo, flag):
+            if marker_matches(photo, flag) and self.choices_match(photo):
                 counts[photo.stars] += 1
         return counts
 
@@ -1273,7 +1522,7 @@ class Window(QMainWindow):
         self.session.sort_mode = self.sort.currentData()
         self.session.photos = sort_photos(self.session.photos, self.session.sort_mode)
         stars, flag = self.stars.currentData(), self.flags.currentData()
-        filtered = [p for p in self.session.photos if stars_match(p, stars) and marker_matches(p, flag)]
+        filtered = [p for p in self.session.photos if stars_match(p, stars) and marker_matches(p, flag) and self.choices_match(p)]
         if len(filtered) == len(self.photos) and all(a is b for a, b in zip(filtered, self.photos)):
             # Ratings and flags usually change only the decoration. Rebuilding
             # the list makes Qt scroll the current item back into view.
@@ -1586,11 +1835,11 @@ class Window(QMainWindow):
             self.counter.setText('Aucune photo')
             self.name_label.clear()
 
-    def change(self, photos, stars=None, pick=None, liked=None):
+    def change(self, photos, stars=None, pick=None, liked=None, publish=None):
         """Single entry point for notes and markers: it is what makes them undoable."""
         if not self.session or not photos:
             return
-        self.undo_stack.append([(photo, photo.stars, photo.pick, photo.liked) for photo in photos])
+        self.undo_stack.append([(photo, photo.stars, photo.pick, photo.liked, photo.publish) for photo in photos])
         del self.undo_stack[:-300]
         for photo in photos:
             if stars is not None:
@@ -1599,6 +1848,8 @@ class Window(QMainWindow):
                 photo.pick = pick
             if liked is not None:
                 photo.liked = liked
+            if publish is not None:
+                photo.publish = publish
         self.apply_filters()
 
     def undo(self):
@@ -1606,8 +1857,13 @@ class Window(QMainWindow):
             self.toast('Rien à annuler')
             return
         states = self.undo_stack.pop()
-        for photo, stars, pick, liked in states:
-            photo.stars, photo.pick, photo.liked = stars, pick, liked
+        if states[0] == 'portfolio':
+            _, photos, added = states
+            self.send_to_portfolio(photos, not added)
+            self.toast('Portfolio : retour en arrière', 1200)
+            return
+        for photo, stars, pick, liked, publish in states:
+            photo.stars, photo.pick, photo.liked, photo.publish = stars, pick, liked, publish
         self.apply_filters()
         if self.review_active:
             self.review.after_undo([state[0] for state in states])
@@ -1620,6 +1876,183 @@ class Window(QMainWindow):
         photos = self.target_photos()
         if photos:
             self.change(photos, liked=not photos[0].liked)
+
+    def toggle_publish(self):
+        photos = self.target_photos()
+        if photos:
+            self.change(photos, publish=not photos[0].publish)
+
+    # Portfolio. Inside it, every photo belongs to it and taking one out sends the file to the bin.
+    def is_portfolio_path(self, path):
+        return self.portfolio.folder is not None and path_key(path) == path_key(self.portfolio.folder)
+
+    def viewing_portfolio(self):
+        return self.project_path is not None and self.is_portfolio_path(self.project_path)
+
+    def in_portfolio(self, photo):
+        return self.viewing_portfolio() or self.portfolio.contains(photo.path)
+
+    def photo_project(self, photo):
+        """The project a photo of the portfolio comes from; nothing to say elsewhere."""
+        if not self.viewing_portfolio():
+            return ''
+        project = self.portfolio.project_of(photo.relative_path)
+        return '' if project == UNSORTED else project
+
+    def photo_label(self, photo):
+        project = self.photo_project(photo)
+        return f'{project} · {photo.path.name}' if project else photo.path.name
+
+    def choices_match(self, photo):
+        choices = self.choices
+        if choices.portfolio.isChecked() and not self.in_portfolio(photo):
+            return False
+        if choices.publish.isChecked() and not photo.publish:
+            return False
+        return choices.project.currentIndex() <= 0 or self.portfolio.project_of(photo.relative_path) == choices.project.currentData()
+
+    def remember_project(self, opened=None):
+        if not self.viewing_portfolio():
+            self.recents.add(self.project_path, self.session.photos, opened)
+
+    def toggle_portfolio(self):
+        photos = self.target_photos()
+        if not photos:
+            return
+        if self.viewing_portfolio():
+            self.take_out_of_portfolio(photos)
+            return
+        adding = not self.portfolio.contains(photos[0].path)
+        if adding and not self.ready_for_portfolio():
+            return
+        self.send_to_portfolio(photos, adding)
+        self.undo_stack.append(('portfolio', photos, adding))
+        del self.undo_stack[:-300]
+        count = len(photos)
+        self.toast(f"{count} photo{'s' if count > 1 else ''} {'ajoutée' if adding else 'retirée'}{'s' if count > 1 else ''} {'au' if adding else 'du'} portfolio", 1400)
+
+    def send_to_portfolio(self, photos, adding):
+        for photo in photos:
+            if adding:
+                self.portfolio.add(photo, self.project_path)
+            else:
+                self.portfolio.remove_source(photo.path)
+        self.apply_filters()
+
+    def take_out_of_portfolio(self, photos):
+        leaving = {id(photo) for photo in photos}
+        for photo in photos:
+            self.portfolio.remove_relative(photo.relative_path)
+        self.session.photos = [photo for photo in self.session.photos if id(photo) not in leaving]
+        self.toast('Copie envoyée à la corbeille. Le fichier d\'origine n\'a pas bougé.', 2600)
+        if self.session.photos:
+            self.choices.set_projects(sorted({self.portfolio.project_of(p.relative_path) for p in self.session.photos}))
+            self.apply_filters()
+        else:
+            self.close_project()
+
+    def ready_for_portfolio(self):
+        if self.relocating:
+            self.toast('Le portfolio est en cours de copie vers son nouvel emplacement.')
+            return False
+        if self.portfolio.folder is None and not self.choose_portfolio_folder():
+            return False
+        if not self.portfolio.available():
+            inform(self, 'Portfolio introuvable', f'Ce dossier est introuvable pour le moment :\n{self.portfolio.folder}\n\nRebranchez le disque ou choisissez un autre emplacement.')
+            return False
+        return True
+
+    def choose_portfolio_folder(self):
+        """Pick where the portfolio lives. Copies follow to an empty place; the former folder stays as it is."""
+        if self.relocating:
+            return False
+        start = str(self.portfolio.folder or QStandardPaths.writableLocation(QStandardPaths.StandardLocation.PicturesLocation))
+        chosen = QFileDialog.getExistingDirectory(self, 'Choisir le dossier du portfolio', start)
+        if not chosen:
+            return False
+        new = Path(chosen)
+        old = self.portfolio.folder
+        if old is not None and path_key(old) == path_key(new):
+            return True
+        if self.session and not self.viewing_portfolio() and path_key(new).startswith(path_key(self.session.root)+os.sep):
+            inform(self, 'Autre dossier nécessaire', 'Le portfolio ne peut pas se trouver dans le dossier du projet ouvert : ses copies y seraient comptées comme des photos du projet.')
+            return False
+        if path_key(new) == path_key(self.session.root if self.session else ''):
+            inform(self, 'Autre dossier nécessaire', "Ce dossier est celui du projet ouvert.")
+            return False
+        if self.viewing_portfolio():
+            self.close_project()
+        self.portfolio.wait()
+        adopted = (new/SESSION_DIR_NAME/MANIFEST_FILE).exists()
+        if old is not None and self.portfolio.items and old.is_dir() and not adopted:
+            choice = ask(self, 'Déplacer le portfolio', f'Copier ses {len(self.portfolio.items)} photos vers ce nouveau dossier ?\n{new}\n\nL\'ancien dossier reste tel quel, à vous de le supprimer si vous le souhaitez.',
+                         [('cancel', 'Annuler', False), ('empty', 'Repartir de zéro', False), ('copy', 'Copier', True)])
+            if choice not in ('copy', 'empty'):
+                return False
+            if choice == 'copy':
+                self.relocate_portfolio(old, new)
+                return False
+        self.portfolio.set_folder(new)
+        return True
+
+    def relocate_portfolio(self, old, new):
+        job = RelocateJob(old, new)
+        job.signals.progress.connect(self.relocate_progress, Qt.ConnectionType.QueuedConnection)
+        job.signals.finished.connect(self.relocate_done, Qt.ConnectionType.QueuedConnection)
+        self.relocating = job
+        self.export_cancel.hide()
+        self.export_checking()
+        self.export_label.setText('Copie du portfolio…')
+        self.export_pool.start(job)
+
+    def relocate_progress(self, done, total):
+        self.export_label.setText(f'Portfolio : {done} sur {total} fichiers')
+        self.export_bar.setRange(0, total)
+        self.export_bar.setValue(done)
+
+    def relocate_done(self, folder, error):
+        self.relocating = None
+        self.export_panel.hide()
+        self.export_cancel.show()
+        if error:
+            inform(self, 'Copie du portfolio incomplète', f'{error}\n\nLe portfolio reste à son ancien emplacement.')
+        else:
+            self.portfolio.set_folder(Path(folder))
+            self.toast('Portfolio copié vers son nouvel emplacement.')
+
+    def open_portfolio(self):
+        if self.relocating:
+            return
+        if self.portfolio.folder is None and not self.choose_portfolio_folder():
+            return
+        if not self.portfolio.available():
+            inform(self, 'Portfolio introuvable', f'Ce dossier est introuvable pour le moment :\n{self.portfolio.folder}\n\nRebranchez le disque ou choisissez un autre emplacement.')
+            return
+        self.portfolio.wait()
+        self.portfolio.reconcile()
+        self.set_folder(self.portfolio.folder)
+        if not self.session.photos:
+            self.close_project()
+            self.toast('Le portfolio est vide : ajoutez-y des photos avec la touche K ou le signet.', 3500)
+
+    def reveal_portfolio(self):
+        if self.portfolio.available():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.portfolio.folder)))
+
+    def portfolio_failed(self, text):
+        self.toast(text, 6000)
+        # A photo the bin refused is still in the folder: it comes back on the page.
+        if self.viewing_portfolio():
+            self.refresh()
+
+    def portfolio_changed(self):
+        if self.pages.currentIndex() == 0:
+            self.home.refresh()
+        self.list.viewport().update()
+        if self.review_active:
+            self.review.update_view()
+            self.review.bar.update()
+        self.viewer_bar.update()
 
     def set_pick(self, pick):
         if self.marker != 'pick' and pick == PICK_REJECT:
@@ -1655,19 +2088,24 @@ class Window(QMainWindow):
             if self.review_active:
                 self.review.rebuild()
 
-    def export(self, kind='stars'):
-        if not self.session or self.export_job:
+    def export(self):
+        if not self.session or self.export_job or self.relocating:
             return
-        if kind == 'picks':
-            photos = [p for p in self.photos if p.pick == PICK_SELECT]
-            destination, empty = self.session.session_dir / EXPORT_PICKS_DIR_NAME, 'Aucune photo retenue dans la sélection filtrée.'
-        else:
-            # A rejected photo stays out of the export, whatever its stars.
-            photos = [p for p in self.photos if p.stars == 5 and p.pick != PICK_REJECT]
-            destination, empty = self.session.session_dir / EXPORT_DIR_NAME, 'Aucune photo à cinq étoiles dans la sélection filtrée.'
-        if not photos:
-            inform(self, 'Export', empty)
-            return
+        dialog = ExportDialog(self)
+        if dialog.exec():
+            self.run_export(dialog.photos(), dialog.folder_name())
+
+    def export_selection(self, stars, marker, portfolio, publish, project):
+        """Among the whole gallery, whatever is on screen. A rejected photo only leaves when asked for."""
+        return [p for p in self.session.photos if stars_match(p, stars) and marker_matches(p, marker)
+                and (p.pick != PICK_REJECT or marker == 'reject') and (not portfolio or self.in_portfolio(p))
+                and (not publish or p.publish) and (project == 'all' or self.portfolio.project_of(p.relative_path) == project)]
+
+    def run_export(self, photos, name):
+        if self.viewing_portfolio():
+            # This folder changes as photos come and go: only a change during the export matters.
+            self.baseline = original_inventory(self.session.root)
+        destination = self.session.session_dir/EXPORT_ROOT_NAME/name
         previous = previous_export_count(destination)
         replace = True
         if previous:
@@ -1795,10 +2233,13 @@ class Window(QMainWindow):
         self.review.stop_analysis()
         if self.session:
             self.save_session()
-            self.recents.add(self.project_path, self.session.photos)
+            self.remember_project()
             self.review.save_analysis()
         self.pool.clear()
         self.pool.waitForDone()
+        # Copies under way finish: they were asked for, and a partial file is never visible.
+        self.portfolio.wait()
+        self.export_pool.waitForDone()
         self.review.analysis_pool.waitForDone()
         event.accept()
 

@@ -91,6 +91,8 @@ QSplitter::handle {{ background: {INK}; width: 2px; }}
 QToolTip {{ background: {RAISED}; color: {TEXT}; border: 1px solid {LINE}; padding: 6px; }}
 QFrame#card {{ background: {BASE}; border-radius: 10px; }}
 QFrame#card:hover {{ background: {RAISED}; }}
+QFrame#featured {{ background: {BASE}; border: 1px solid {LINE}; border-radius: 12px; }}
+QFrame#featured:hover {{ background: {RAISED}; border-color: #57575a; }}
 QTableWidget {{ background: {BASE}; border: none; gridline-color: transparent; outline: none; }}
 QHeaderView::section {{ background: {BASE}; color: {MUTED}; border: none; padding: 6px; }}
 QKeySequenceEdit, QLineEdit {{ background: {CONTROL}; border: none; border-radius: 5px; padding: 3px; }}
@@ -176,6 +178,53 @@ def draw_check(painter, rect, color):
     painter.setBrush(Qt.BrushStyle.NoBrush)
     painter.setPen(QPen(QColor(color), 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
     painter.drawPath(path)
+    painter.restore()
+
+
+def draw_bookmark(painter, rect, color, filled=False):
+    """The portfolio: the same mark as the "save" of Instagram."""
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    r = QRectF(rect)
+    inset = r.width()*.12
+    points = QPolygonF([QPointF(r.left()+inset, r.top()), QPointF(r.right()-inset, r.top()), QPointF(r.right()-inset, r.bottom()),
+                        QPointF(r.center().x(), r.bottom()-r.height()*.28), QPointF(r.left()+inset, r.bottom())])
+    painter.setBrush(QColor(color) if filled else Qt.BrushStyle.NoBrush)
+    painter.setPen(QPen(QColor(color), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    painter.drawPolygon(points)
+    painter.restore()
+
+
+def draw_send(painter, rect, color, filled=False):
+    """À publier: the paper plane of Instagram."""
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    r = QRectF(rect)
+    tip = QPointF(r.right(), r.top())
+    points = QPolygonF([QPointF(r.left(), r.top()+r.height()*.08), tip, QPointF(r.left()+r.width()*.6, r.bottom()),
+                        QPointF(r.left()+r.width()*.42, r.top()+r.height()*.46)])
+    painter.setBrush(QColor(color) if filled else Qt.BrushStyle.NoBrush)
+    painter.setPen(QPen(QColor(color), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    painter.drawPolygon(points)
+    painter.drawLine(QPointF(r.left()+r.width()*.42, r.top()+r.height()*.46), tip)
+    painter.restore()
+
+
+def draw_comment(painter, rect, color):
+    """A speech bubble, for the likeness of an Instagram post."""
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    r = QRectF(rect)
+    path = QPainterPath()
+    path.addEllipse(r)
+    tail = QPolygonF([QPointF(r.left()+r.width()*.1, r.top()+r.height()*.68), QPointF(r.left(), r.bottom()),
+                      QPointF(r.left()+r.width()*.32, r.top()+r.height()*.9)])
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.setPen(QPen(QColor(color), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    tailed = QPainterPath()
+    tailed.addPolygon(tail)
+    tailed.closeSubpath()
+    painter.drawPath(path.united(tailed))
     painter.restore()
 
 

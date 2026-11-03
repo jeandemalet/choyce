@@ -28,6 +28,8 @@ ACTIONS = [
     ('rate5', '5 étoiles', ['5', 'Shift+V']),
     ('flag', 'Drapeau', ['F']),
     ('like', "J'aime", ['L']),
+    ('portfolio', 'Ajouter au portfolio ou retirer', ['K']),
+    ('publish', 'À publier', ['I']),
     ('select', 'Retenir', ['P']),
     ('reject', 'Rejeter', ['X']),
     ('neutral', 'Neutre', ['U']),
@@ -41,9 +43,10 @@ ACTIONS = [
     ('mono', 'Vues : noir et blanc', ['N']),
     ('mode_classic', 'Vue Classique', ['Ctrl+0']),
     ('mode_wall', 'Vue Grille', ['Ctrl+1']),
-    ('mode_toile', 'Vue Toile', ['Ctrl+2']),
+    ('mode_toile', 'Vue Pêle-mêle', ['Ctrl+2']),
     ('mode_color', 'Vue Couleur', ['Ctrl+3']),
-    ('mode_swipe', 'Vue Swipe', ['Ctrl+4']),
+    ('mode_swipe', 'Vue Tindr', ['Ctrl+4']),
+    ('mode_instagram', 'Vue Instagram', ['Ctrl+5']),
     ('refresh', 'Actualiser le dossier', ['F5']),
     ('open', 'Ouvrir un projet', ['Ctrl+O']),
     ('close', 'Fermer le projet', ['Ctrl+W']),
@@ -247,6 +250,17 @@ class PreferencesDialog(QDialog):
         note.setWordWrap(True)
         layout.addWidget(note)
         layout.addSpacing(8)
+        layout.addWidget(QLabel('PORTFOLIO', objectName='section'))
+        place = QHBoxLayout()
+        self.portfolio_label = QLabel()
+        self.portfolio_label.setWordWrap(True)
+        place.addWidget(self.portfolio_label, 1)
+        choose = QPushButton("Choisir l'emplacement…", objectName='ghost')
+        choose.clicked.connect(self.choose_portfolio)
+        place.addWidget(choose)
+        layout.addLayout(place)
+        self.show_portfolio_place()
+        layout.addSpacing(8)
         layout.addWidget(QLabel('RACCOURCIS', objectName='section'))
         mapping = shortcut_map(settings)
         self.table = QTableWidget(len(ACTIONS), 3)
@@ -283,6 +297,14 @@ class PreferencesDialog(QDialog):
         box.button(QDialogButtonBox.StandardButton.Cancel).setText('Annuler')
         buttons.addWidget(box)
         layout.addLayout(buttons)
+
+    def show_portfolio_place(self):
+        folder = self.parent().portfolio.folder
+        self.portfolio_label.setText(str(folder).replace('\\', '\\\u200b') if folder else 'Aucun dossier choisi pour le moment.')
+
+    def choose_portfolio(self, *args):
+        self.parent().choose_portfolio_folder()
+        self.show_portfolio_place()
 
     def _label(self, text):
         holder = QWidget()
