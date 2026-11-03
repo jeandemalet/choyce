@@ -15,6 +15,7 @@ import uuid
 from collections import OrderedDict
 from pathlib import Path
 
+from PIL import Image
 from PySide6.QtCore import QEasingCurve, QObject, QPointF, QRectF, QRunnable, QSize, QStandardPaths, QThreadPool, QTimer, QVariantAnimation, Qt, Signal, Slot
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea,
@@ -47,12 +48,46 @@ class Sorting:
 
     @classmethod
     def load(cls, path):
-        session = cls(path, json.loads(Path(path).read_text(encoding='utf-8')))
-        # Buckets made before they had colors.
-        for bucket in session.buckets:
-            if not bucket.get('color'):
-                bucket['color'] = session.free_color()
+        """From its file or, if that one cannot be read, from the copy of its previous state."""
+        try:
+            session = cls(path, cls.read(path))
+        except (OSError, ValueError, KeyError, TypeError):
+            session = cls(path, cls.read(Path(str(path)+'.bak')))
+        session.tidy()
         return session
+
+    @staticmethod
+    def read(path):
+        data = json.loads(Path(path).read_text(encoding='utf-8'))
+        for key, kind in (('name', str), ('photos', list), ('buckets', list), ('assigned', dict)):
+            if not isinstance(data[key], kind):
+                raise ValueError(key)
+        return data
+
+    def tidy(self):
+        """What an older version or a damaged file may have left: entries that lead nowhere go, the rest stays."""
+        self.data['photos'] = [photo for photo in self.photos if isinstance(photo, dict) and photo.get('path')]
+        self.data['buckets'] = [bucket for bucket in self.buckets if isinstance(bucket, dict) and bucket.get('id') and bucket.get('title')]
+        known = {bucket['id'] for bucket in self.buckets}
+        paths = {photo['path'] for photo in self.photos}
+        assigned = {}
+        for path, keys in self.data['assigned'].items():
+            kept = [key for key in keys if key in known] if isinstance(keys, list) else []
+            if kept and path in paths:
+                assigned[path] = kept
+        self.data['assigned'] = assigned
+        # Buckets made before they had colors.
+        for bucket in self.buckets:
+            if not bucket.get('color'):
+                bucket['color'] = self.free_color()
+
+    def remove_photos(self, paths):
+        """Out of the selection for good, buckets included, even if a gallery still holds them. The files are not touched."""
+        paths = set(paths)
+        self.data['photos'] = [photo for photo in self.photos if photo['path'] not in paths]
+        self.data['assigned'] = {path: keys for path, keys in self.data['assigned'].items() if path not in paths}
+        self.data['removed'] = sorted(set(self.data.get('removed', []))|paths)
+        self.undo_stack.clear()
 
     def free_color(self, ignored=None):
         """The first color no other bucket has; with more buckets than colors, the least used."""
@@ -62,6 +97,8 @@ class Sorting:
     def save(self):
         self.data['updated'] = time.time()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.path.exists():
+            shutil.copy2(self.path, str(self.path)+'.bak')
         write_json_atomic(self.path, self.data)
 
     @property
@@ -354,6 +391,64 @@ class BucketStrip(QWidget):
             self.window.toggle_bucket(hit[0])
 
 
+class ReviewTabs(QFrame):
+    """Which bucket is being reviewed, in one click, in every view of a selection."""
+
+    def __init__(self, window):
+        super().__init__(objectName='home')
+        self.window = window
+        self.row = QHBoxLayout(self)
+        self.row.setContentsMargins(12, 6, 12, 0)
+        self.row.setSpacing(2)
+        self.tabs = {}
+        self.hide()
+
+    def rebuild(self):
+        while self.row.count():
+            widget = self.row.takeAt(0).widget()
+            if widget:
+                widget.setParent(None)
+                widget.deleteLater()
+        self.tabs = {}
+        selection = self.window.selection
+        if not selection:
+            return
+        self.row.addWidget(QLabel('Revoir', objectName='muted'))
+        self.row.addSpacing(6)
+        for key in [ALL]+[bucket['id'] for bucket in selection.buckets]+[UNSORTED]:
+            button = QPushButton(objectName='seg', checkable=True)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.clicked.connect(lambda checked=False, value=key: self.show_only(value))
+            self.row.addWidget(button)
+            self.tabs[key] = button
+        self.row.addStretch(1)
+        self.sync()
+
+    def sync(self):
+        selection = self.window.selection
+        if not selection:
+            return
+        # A bucket just added or removed.
+        if set(self.tabs) != {ALL, UNSORTED}|{bucket['id'] for bucket in selection.buckets}:
+            self.rebuild()
+            return
+        rule = selection.rule()
+        simple = not rule['exclude'] and len(rule['include']) <= 1
+        current = UNSORTED if rule['none'] else (rule['include'][0] if rule['include'] else ALL) if simple else None
+        counts = {ALL: len(selection.photos), UNSORTED: sum(not selection.buckets_of(photo['path']) for photo in selection.photos)}
+        for key, button in self.tabs.items():
+            title = {ALL: 'Toutes', UNSORTED: 'Sans bucket'}.get(key) or selection.bucket(key)['title']
+            count = counts[key] if key in counts else selection.count(key)
+            button.setText(f"{title.replace('&', '&&')}  {count}")
+            button.setChecked(key == current)
+
+    def show_only(self, key):
+        self.window.selection.set_rule(include=[] if key in (ALL, UNSORTED) else [key], exclude=[], none=key == UNSORTED, all=False)
+        self.window.custom.save_timer.start()
+        self.window.bucket_rule.rebuild()
+        self.window.filters_changed()
+
+
 class BucketFilter(QFrame):
     """The buckets in the Filtre panel: for each one, plainly, whether it is ignored, required or refused."""
     STATES = (('', 'Indifférent', 'state'), ('include', 'Seulement', 'stateOn'), ('exclude', 'Exclure', 'stateOff'))
@@ -477,7 +572,7 @@ class Store:
         for path in self.folder.glob('*.json'):
             try:
                 found.append(Sorting.load(path))
-            except (OSError, ValueError, KeyError):
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 pass
         return sorted(found, key=lambda session: session.data.get('updated', 0), reverse=True)
 
@@ -499,6 +594,8 @@ class ExportJob(QRunnable):
         self.plan, self.destination = plan, destination
         self.signals = ExportSignals()
         self.cancelled = threading.Event()
+        # What could not be copied: one bad file must not cost all the others.
+        self.skipped = []
 
     def run(self):
         work = self.destination.with_name(self.destination.name+'.en_cours')
@@ -511,14 +608,65 @@ class ExportJob(QRunnable):
                     self.signals.finished.emit('', '')
                     return
                 self.signals.progress.emit(done, total)
-                (work/folder).mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, work/folder/name)
+                try:
+                    if not os.path.getsize(source):
+                        raise OSError('fichier vide')
+                    (work/folder).mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, work/folder/name)
+                except OSError:
+                    self.skipped.append(source)
             self.signals.progress.emit(total, total)
+            if not work.exists():
+                raise RuntimeError('Aucune photo n’a pu être copiée.')
             os.replace(work, self.destination)
             self.signals.finished.emit(str(self.destination), '')
         except Exception as error:
             shutil.rmtree(work, ignore_errors=True)
             self.signals.finished.emit('', str(error))
+
+
+def photo_problem(path):
+    """Why a photo cannot be used, in a few words, or None. Decodes it small, which also finds a truncated file."""
+    try:
+        if not os.path.getsize(path):
+            return 'fichier vide'
+        with Image.open(path) as image:
+            image.draft('RGB', (64, 64))
+            image.load()
+    except FileNotFoundError:
+        return 'introuvable'
+    except OSError as error:
+        return 'introuvable' if not os.path.exists(path) else 'illisible'
+    except Exception:
+        return 'illisible'
+    return None
+
+
+class CheckSignals(QObject):
+    progress = Signal(int)
+    finished = Signal(dict)
+
+
+class CheckJob(QRunnable):
+    """Goes through the photos of a selection, off the interface."""
+
+    def __init__(self, paths):
+        super().__init__()
+        self.paths = paths
+        self.signals = CheckSignals()
+        self.cancelled = threading.Event()
+
+    def run(self):
+        problems = {}
+        for index, path in enumerate(self.paths):
+            if self.cancelled.is_set():
+                return
+            problem = photo_problem(path)
+            if problem:
+                problems[path] = problem
+            if index % 8 == 0:
+                self.signals.progress.emit(len(self.paths)-index)
+        self.signals.finished.emit(problems)
 
 
 class SourceSignals(QObject):
@@ -742,13 +890,14 @@ class SetupPage(QWidget):
         """The photos of the checked galleries through their filters, each one once even when two galleries hold it."""
         seen, photos = set(), []
         items = self.window.portfolio.items
+        removed = set(self.session.data.get('removed', [])) if self.session else set()
         for row in self.rows.values():
             if row.check.isChecked():
                 for photo in row.matching():
                     # A copy of the portfolio is the same photo as its original.
                     origin = items.get(photo.relative_path, {}).get('source') if row.portfolio else None
                     key = source_key(origin or photo.path)
-                    if key not in seen:
+                    if key not in seen and str(photo.path) not in removed:
                         seen.add(key)
                         photos.append({'path': str(photo.path), 'gallery': row.title, 'relative': photo.relative_path})
         return photos
@@ -1157,6 +1306,9 @@ class Tile(QWidget):
         clip.addRoundedRect(area, 7, 7)
         painter.fillPath(clip, QColor(RAISED))
         image = self.sheet.image(self.photo['path'])
+        if self.photo['path'] in self.sheet.broken:
+            painter.setPen(QColor(MUTED))
+            painter.drawText(area, Qt.AlignmentFlag.AlignCenter, 'Fichier introuvable\nou illisible')
         if image is not None:
             painter.setClipPath(clip)
             painter.drawImage(self.photo_area(), image)
@@ -1189,6 +1341,7 @@ class BucketSheet(QDialog):
         self.session = page.session
         self.images = {}
         self.asked = set()
+        self.broken = set()
         self.removed = []
         self.tiles = []
         self.columns = 0
@@ -1275,11 +1428,13 @@ class BucketSheet(QDialog):
 
     @Slot(str, int, QImage, str, int)
     def loaded(self, path, side, image, error, generation):
-        if not image.isNull():
+        if image.isNull():
+            self.broken.add(path)
+        else:
             self.images[path] = image
-            for tile in self.tiles:
-                if tile.photo['path'] == path:
-                    tile.update()
+        for tile in self.tiles:
+            if tile.photo['path'] == path:
+                tile.update()
 
     def remove(self, path):
         self.session.toggle(path, self.key)
@@ -1314,6 +1469,8 @@ class CustomPage(QStackedWidget):
         self.pending = {}
         self.failed = {}
         self.cards = {}
+        self.checking = None
+        self.check_left = 0
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(2)
         self.save_timer = QTimer(self)
@@ -1403,6 +1560,10 @@ class CustomPage(QStackedWidget):
 
     def close_session(self):
         self.save()
+        if self.checking:
+            self.checking.cancelled.set()
+            self.checking = None
+            self.check_left = 0
         self.session = None
         self.cached_order = None
         self.images.clear()
@@ -1457,6 +1618,7 @@ class CustomPage(QStackedWidget):
     def changed(self):
         self.save_timer.start()
         self.window.bucket_strip.update()
+        self.window.review_tabs.sync()
         # A photo may now pass the filter, or no longer.
         if self.window.selection is self.session:
             self.window.apply_filters()
@@ -1741,13 +1903,22 @@ class CustomPage(QStackedWidget):
             inform(window, 'Rien à exporter', "Aucune photo n'est encore rangée dans un bucket.")
             return
         present = [step for step in plan if Path(step[2]).is_file()]
-        absent = len(plan)-len(present)
-        if not present:
-            inform(window, 'Originaux introuvables', 'Les photos de ces buckets sont introuvables pour le moment. Rebranchez leur disque.')
-            return
-        if absent and ask(window, 'Originaux introuvables', f"{absent} copie{'s' if absent > 1 else ''} sur {len(plan)} ne {'peuvent' if absent > 1 else 'peut'} pas être faite{'s' if absent > 1 else ''} : disque débranché ou fichier déplacé. Exporter le reste ?",
-                          [('cancel', 'Annuler', False), ('go', 'Exporter le reste', True)]) != 'go':
-            return
+        absent = sorted({step[2] for step in plan if not Path(step[2]).is_file()})
+        if absent:
+            choice = ask(window, 'Originaux introuvables', f"{len(absent)} photo{'s' if len(absent) > 1 else ''} de ces buckets {'sont introuvables' if len(absent) > 1 else 'est introuvable'} : disque débranché ou fichier déplacé.\n\n"
+                         'Vous pouvez les chercher dans un dossier, les retirer de la sélection pour ne plus les voir, ou exporter le reste.',
+                         [('cancel', 'Annuler', False), ('find', 'Retrouver…', False), ('remove', 'Retirer', False), ('go', 'Exporter le reste', True)])
+            if choice == 'find':
+                window.repair_photos()
+                return
+            if choice == 'remove':
+                self.remove_photos(absent)
+                plan = self.session.export_plan()
+                present = plan
+            elif choice != 'go':
+                return
+            if not present:
+                return
         chosen = self.ask_export_folder()
         if not chosen:
             return
@@ -1761,6 +1932,54 @@ class CustomPage(QStackedWidget):
             while destination.exists():
                 destination, suffix = Path(chosen)/f'{name} {stamp}-{suffix}', suffix+1
         window.start_custom_export(ExportJob(present, destination), len(present))
+
+    def remove_photos(self, paths):
+        self.session.remove_photos(paths)
+        self.save()
+        self.window.selection_changed()
+        self.window.toast(f"{len(paths)} photo{'s' if len(paths) > 1 else ''} retirée{'s' if len(paths) > 1 else ''} de la sélection. Les fichiers n'ont pas bougé.", 3000)
+
+    def after_export(self, job):
+        """The files that could not be copied are named, with the way to stop meeting them."""
+        if job.skipped and self.session and ask(self.window, 'Photos non copiées', f"{len(job.skipped)} photo{'s' if len(job.skipped) > 1 else ''} n'{'ont' if len(job.skipped) > 1 else 'a'} pas pu être copiée{'s' if len(job.skipped) > 1 else ''} :\n"
+                                                +self.name_list(job.skipped), [('keep', 'Garder', False), ('remove', 'Retirer de la sélection', True)]) == 'remove':
+            self.remove_photos(sorted(set(job.skipped)))
+
+    def name_list(self, paths, problems=None):
+        names = [Path(path).name+(f' ({problems[path]})' if problems else '') for path in paths[:8]]
+        return '\n'.join(names)+(f'\net {len(paths)-8} autres' if len(paths) > 8 else '')
+
+    # The health of the photos.
+    def check_photos(self):
+        if self.session is None or self.checking:
+            return
+        paths = [photo['path'] for photo in self.session.photos]
+        self.checking = CheckJob(paths)
+        self.check_left = len(paths)
+        self.checking.signals.progress.connect(self.check_progress, Qt.ConnectionType.QueuedConnection)
+        self.checking.signals.finished.connect(self.check_done, Qt.ConnectionType.QueuedConnection)
+        self.pool.start(self.checking)
+        self.window.toast('Vérification des photos en cours…', 1800)
+
+    def check_progress(self, left):
+        self.check_left = left
+
+    def check_done(self, problems):
+        self.checking = None
+        self.check_left = 0
+        if self.session is None:
+            return
+        if not problems:
+            self.window.toast('Toutes les photos de la sélection sont saines.', 3000)
+            return
+        paths = sorted(problems)
+        missing = [path for path in paths if problems[path] == 'introuvable']
+        buttons = [('close', 'Fermer', False)]+([('find', 'Retrouver…', False)] if missing else [])+[('remove', 'Retirer de la sélection', True)]
+        choice = ask(self.window, 'Photos à problème', f"{len(paths)} photo{'s' if len(paths) > 1 else ''} sur {len(self.session.photos)} :\n{self.name_list(paths, problems)}\n\nLes retirer les enlève de la sélection et de ses buckets, sans toucher aux fichiers.", buttons)
+        if choice == 'remove':
+            self.remove_photos(paths)
+        elif choice == 'find':
+            self.window.repair_photos()
 
     def shutdown(self):
         self.save()

@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
 from PIL import Image, ImageCms, ImageWin
 from triphoto import (export_folder_name, APP_NAME, APP_VERSION, PhotoSession, sort_photos, SORT_OPTIONS, load_screen_preview, original_inventory,
     export_original_copy, EXPORT_DIR_NAME, PICK_NEUTRAL, PICK_REJECT, PICK_SELECT, SESSION_DIR_NAME)
-from triphoto_custom import BucketFilter, BucketStrip, CustomPage, PopupMenu, SelectionSession
+from triphoto_custom import BucketFilter, BucketStrip, CustomPage, PopupMenu, ReviewTabs, SelectionSession
 from triphoto_portfolio import MANIFEST_FILE, Portfolio, PortfolioSession, RelocateJob, UNSORTED
 from triphoto_prefs import (ALIASES, PreferencesDialog, Recents, ScanJob, age_label, ask, inform, locate_photos, locate_project, moved_path, path_key, shortcut_map)
 from triphoto_review import MODES, BackgroundPicker, ChoiceFilter, MarkerFilter, NoteFilter, RatingBar, ReviewPage
@@ -479,15 +479,37 @@ class PhotoDelegate(QStyledItemDelegate):
 class PhotoList(QListWidget):
     """The ribbon. A click on the note of a thumbnail leaves the selection as it is."""
     on_control = False
+    owner = None
+    pressed = None
+    bucket_dragging = False
 
     def selectionCommand(self, index, event=None):
         if self.on_control:
             return QItemSelectionModel.SelectionFlag.NoUpdate
         return super().selectionCommand(index, event)
 
+    def mousePressEvent(self, event):
+        item = self.itemAt(event.position().toPoint())
+        self.pressed = (item.data(Qt.ItemDataRole.UserRole), event.position()) if item and event.button() == Qt.MouseButton.LeftButton else None
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        # In a selection, a thumbnail goes to the buckets under the view.
+        if self.pressed and self.owner.selection and (self.bucket_dragging or (event.position()-self.pressed[1]).manhattanLength() > 14):
+            self.bucket_dragging = True
+            self.owner.bucket_drag(event.globalPosition().toPoint(), self.pressed[0])
+            return
+        super().mouseMoveEvent(event)
+
     def mouseReleaseEvent(self, event):
+        dragged = self.pressed[0] if self.pressed and self.bucket_dragging else None
+        self.pressed, self.bucket_dragging = None, False
+        if dragged:
+            self.on_control = True
         super().mouseReleaseEvent(event)
         self.on_control = False
+        if dragged:
+            self.owner.bucket_drop(event.globalPosition().toPoint(), dragged)
 
 
 class CoverSignals(QObject):
@@ -977,7 +999,7 @@ class ActivityBar(QFrame):
     def place(self):
         self.adjustSize()
         # In the other views, above the settings along the bottom.
-        strip = self.window_.bucket_strip.height() if self.window_.bucket_strip.isVisible() else 0
+        strip = self.window_.bucket_strip.height()+36 if self.window_.bucket_strip.isVisible() else 0
         self.move(12, self.window_.height()-self.height()-strip-(168 if self.window_.custom_active else 68 if self.window_.review_active else 12))
         self.raise_()
         self.show()
@@ -1124,6 +1146,7 @@ class Window(QMainWindow):
         self.viewer.heartClicked.connect(self.toggle_like)
         splitter.addWidget(self.viewer)
         self.list = PhotoList()
+        self.list.owner = self
         self.list.setMinimumWidth(250)
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
@@ -1158,6 +1181,7 @@ class Window(QMainWindow):
         self.custom_active = False
         self.pages.addWidget(self.custom)
         self.bucket_strip = BucketStrip(self)
+        self.review_tabs = ReviewTabs(self)
         self.bucket_ghost = QLabel(self)
         self.bucket_ghost.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.bucket_ghost.hide()
@@ -1206,6 +1230,7 @@ class Window(QMainWindow):
         self.filter_panel.setMinimumWidth(620)
         self.filter_panel.hide()
         layout.addWidget(self.pages, 1)
+        layout.addWidget(self.review_tabs)
         layout.addWidget(self.bucket_strip)
         # How many large previews stay in memory: more when a page shows more of them at once.
         self.large_keep = 6
@@ -1381,6 +1406,7 @@ class Window(QMainWindow):
         text = self.filter_chip.fontMetrics().elidedText(' · '.join(parts), Qt.TextElideMode.ElideRight, 100)
         self.filter_chip.setText(f'Filtre : {text}  ▾' if parts else 'Filtre  ▾')
         self.filter_chip.setToolTip(' · '.join(parts) or 'Notes, marqueurs et réglages de la vue')
+        self.review_tabs.sync()
         count = len(self.photos)
         self.filter_count.setText(f"{count} photo{'s' if count > 1 else ''} affichée{'s' if count > 1 else ''}")
 
@@ -1486,7 +1512,9 @@ class Window(QMainWindow):
         """Other photos or other buckets: what shows them follows."""
         self.session.refresh()
         self.choices.set_buckets()
+        self.review_tabs.rebuild()
         self.bucket_strip.update()
+        self.update_project_state()
         self.filters_changed()
 
     def photo_buckets(self, photo):
@@ -1578,8 +1606,11 @@ class Window(QMainWindow):
                 and (not publish or photo.publish))
 
     def start_custom_export(self, job, count):
+        def finished(folder, error):
+            self.export_done(job, folder, error, count-len(job.skipped))
+            self.custom.after_export(job)
         job.signals.progress.connect(self.export_progress, Qt.ConnectionType.QueuedConnection)
-        job.signals.finished.connect(lambda folder, error, total=count: self.export_done(job, folder, error, total), Qt.ConnectionType.QueuedConnection)
+        job.signals.finished.connect(finished, Qt.ConnectionType.QueuedConnection)
         self.export_job = job
         self.export_checking()
         self.export_label.setText('Préparation de l’export…')
@@ -1749,6 +1780,8 @@ class Window(QMainWindow):
         menu.addAction("Retrouver d'anciens projets…", self.find_projects)
         absent = len(getattr(self.session, 'absent', ()))
         menu.addAction(f'Retrouver les photos manquantes ({absent})…' if absent else 'Retrouver les photos manquantes…', self.repair_photos).setEnabled(bool(absent))
+        if self.selection:
+            menu.addAction('Vérifier les photos de la sélection…', self.custom.check_photos)
         menu.addSeparator()
         menu.addAction('Sélections custom', self.show_custom_home)
         menu.addAction('Portfolio', self.open_portfolio)
@@ -1863,6 +1896,7 @@ class Window(QMainWindow):
         self.home_button.setVisible(bool(self.session) or self.custom_active)
         self.view_buttons['buckets'].setVisible(bool(self.selection))
         self.bucket_strip.setVisible(bool(self.selection and self.selection.buckets) and has_photos and not self.custom_active)
+        self.review_tabs.setVisible(bool(self.selection and self.selection.buckets) and bool(self.session))
         if page == 0:
             self.home.refresh()
         self.pages.setCurrentIndex(page)
@@ -1969,7 +2003,7 @@ class Window(QMainWindow):
 
     def background_tasks(self):
         """Long work under way, as (label, how many left)."""
-        tasks = [('Lecture des galeries', self.custom.setup.scanning()), ('Corbeille du portfolio', len(self.portfolio.removed)),
+        tasks = [('Vérification des photos', self.custom.check_left), ('Lecture des galeries', self.custom.setup.scanning()), ('Corbeille du portfolio', len(self.portfolio.removed)),
                  ('Chargement des aperçus', len(self.pending)+len(self.custom.pending)),
                  ('Analyse des couleurs', self.review.analysis_left)]
         return [task for task in tasks if task[1]]
@@ -1991,6 +2025,7 @@ class Window(QMainWindow):
             self.portfolio.apply_seeds(session.photos)
         if self.selection:
             self.choices.set_buckets()
+            self.review_tabs.rebuild()
         else:
             self.choices.set_projects(sorted({self.portfolio.project_of(p.relative_path) for p in session.photos}) if self.viewing_portfolio() else [])
         if session.photos:

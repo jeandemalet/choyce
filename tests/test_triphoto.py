@@ -2496,6 +2496,140 @@ def test_repair_links(base):
     clear_settings()
 
 
+def test_selection_review_and_health(base):
+    clear_settings()
+    root = make_project(base/'sante', 6)
+    answers = []
+    real_ask, real_custom_ask = triphoto_qt.ask, triphoto_custom.ask
+    def fake_ask(parent, title, text, buttons):
+        answers.append(title)
+        return reply.pop(0) if reply else buttons[0][0]
+    reply = []
+    triphoto_qt.ask = triphoto_custom.ask = fake_ask
+    try:
+        window = open_window(root)
+        window.resize(1400, 900)
+        window.show()
+        paths = [str(p.path) for p in window.session.photos]
+        window.close_project()
+        custom = window.custom
+        sorting = custom.store.create('Sante')
+        sorting.set_photos([{'path': path, 'gallery': 'sante', 'relative': Path(path).name} for path in paths])
+        sorting.buckets.extend([{'id': 'a', 'title': 'AG', 'subtitle': '', 'color': '#ff3b30'}, {'id': 'b', 'title': 'WPJA', 'subtitle': '', 'color': '#0a84ff'}])
+        for path in paths[:3]:
+            sorting.add(path, 'a')
+        sorting.add(paths[3], 'b')
+        sorting.save()
+        window.open_custom(sorting)
+        # One click reviews a bucket, from every view, and says which one is shown.
+        tabs = window.review_tabs
+        assert tabs.isVisible() and set(tabs.tabs) == {'all', 'a', 'b', 'none'} and tabs.tabs['all'].isChecked()
+        assert '3' in tabs.tabs['a'].text()
+        tabs.tabs['a'].click()
+        assert custom.position()[1] == 3 and tabs.tabs['a'].isChecked() and not tabs.tabs['all'].isChecked()
+        window.set_view('classic')
+        assert len(window.photos) == 3 and tabs.isVisible() and window.bucket_strip.isVisible()
+        # In Classique too, a thumbnail goes to another bucket, and is seen no more in this one.
+        window.show()
+        window.list.doItemsLayout()
+        wait(50)
+        viewport = window.list.viewport()
+        start = window.list.visualItemRect(window.list.item(0)).center()
+        moved = window.photos[0]
+        strip = window.bucket_strip
+        QTest.mousePress(viewport, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+        target = dict(strip.rects())['b']
+        class Drag:
+            def __init__(self, point):
+                self.point = point
+            def position(self):
+                return QPointF(viewport.mapFromGlobal(self.point))
+            def globalPosition(self):
+                return QPointF(self.point)
+            def button(self):
+                return Qt.MouseButton.LeftButton
+            def buttons(self):
+                return Qt.MouseButton.LeftButton
+        first = viewport.mapToGlobal(start+QPoint(30, 30))
+        window.list.mouseMoveEvent(Drag(first))
+        assert strip.dragging and window.bucket_ghost.isVisible()
+        over = strip.mapToGlobal(QPointF(target.left()+10, target.center().y()).toPoint())
+        window.list.mouseMoveEvent(Drag(over))
+        assert strip.hovered == ('b', False)
+        QTest.mouseRelease(viewport, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, viewport.mapFromGlobal(over))
+        assert sorting.buckets_of(moved.relative_path) == ['b'] and len(window.photos) == 2 and not strip.dragging
+        window.undo()
+        assert sorting.buckets_of(moved.relative_path) == ['a'] and len(window.photos) == 3
+        tabs.tabs['none'].click()
+        assert {p.relative_path for p in window.photos} == set(paths[4:])
+        tabs.tabs['all'].click()
+        assert len(window.photos) == 6
+        # The check finds what is empty, cut short or gone.
+        window.close_project()
+        window.pool.waitForDone()
+        window.review.analysis_pool.waitForDone()
+        Path(paths[1]).write_bytes(b'')
+        data = Path(paths[2]).read_bytes()
+        Path(paths[2]).write_bytes(data[:len(data)//4])
+        Path(paths[3]).unlink()
+        assert triphoto_custom.photo_problem(paths[0]) is None
+        assert triphoto_custom.photo_problem(paths[1]) == 'fichier vide'
+        assert triphoto_custom.photo_problem(paths[2]) == 'illisible'
+        assert triphoto_custom.photo_problem(paths[3]) == 'introuvable'
+        window.open_custom(custom.store.sessions()[0])
+        sorting = window.selection
+        assert paths[3] in window.session.absent
+        # An export goes on past a file it cannot copy, and leaves nothing half done.
+        out = base/'sante export'
+        out.mkdir()
+        custom.ask_export_folder = lambda: str(out)
+        reply[:] = ['go', 'close', 'keep']
+        custom.export()
+        settle(window, lambda: window.export_job is None, 15000)
+        wait(50)
+        assert answers[-3:] == ['Originaux introuvables', 'Export terminé', 'Photos non copiées'], answers
+        assert {p.name for p in (out/'Sante'/'AG').iterdir()} >= {Path(paths[0]).name} and not (out/'Sante'/'AG'/Path(paths[1]).name).exists()
+        # From the check, the bad ones leave the selection and its buckets for good; the files stay.
+        reply[:] = ['remove']
+        custom.check_photos()
+        settle(window, lambda: custom.checking is None, 15000)
+        wait(50)
+        assert answers[-1] == 'Photos à problème'
+        assert {photo['path'] for photo in sorting.photos} == {paths[0], paths[4], paths[5]}
+        assert sorting.count('b') == 0 and sorting.count('a') == 1
+        assert Path(paths[1]).exists() and Path(paths[2]).exists()
+        # They do not come back with a new choice of galleries.
+        window.custom.edit_selection()
+        setup = custom.setup
+        settle(window, lambda: not setup.scanning(), 10000)
+        for row in setup.rows.values():
+            row.check.setChecked(row.title == 'sante')
+        assert paths[1] not in {photo['path'] for photo in setup.chosen()}
+        setup.go.click()
+        # All sound: no more error at export.
+        count = len(answers)
+        reply[:] = []
+        custom.check_photos()
+        settle(window, lambda: custom.checking is None, 15000)
+        assert len(answers) == count
+        # A damaged file falls back on its previous state; what leads nowhere is tidied away.
+        custom.save()
+        custom.save()
+        path = sorting.path
+        window.close_project()
+        path.write_text('{"name": "Sante", "photos"', encoding='utf-8')
+        again = triphoto_custom.Sorting.load(path)
+        assert again.name == 'Sante' and len(again.photos) == 3
+        again.data['assigned'] = {paths[0]: ['a', 'disparu'], 'ailleurs.jpg': ['a'], paths[4]: 'x'}
+        again.save()
+        tidied = triphoto_custom.Sorting.load(path)
+        assert tidied.data['assigned'] == {paths[0]: ['a']}
+        window.close()
+    finally:
+        triphoto_qt.ask, triphoto_custom.ask = real_ask, real_custom_ask
+    clear_settings()
+
+
 def test_defaults_and_viewer_room(base):
     clear_settings()
     project = make_project(base/'defaults', 4)
@@ -2516,7 +2650,7 @@ def main():
     app.setStyleSheet(triphoto_qt.STYLE)
     base = Path(tempfile.mkdtemp(prefix='triphoto-tests-'))
     tests = [test_legacy_session, test_nested_session_ignored, test_dominant_color, test_recents, test_shortcuts,
-             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_export_by_its_button, test_themed_dialog, test_update, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_repair_links, test_defaults_and_viewer_room]
+             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_export_by_its_button, test_themed_dialog, test_update, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_repair_links, test_selection_review_and_health, test_defaults_and_viewer_room]
     failures = 0
     try:
         for test in tests:
