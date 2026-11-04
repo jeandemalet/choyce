@@ -1599,9 +1599,6 @@ class SwipeView(Surface):
         painter.restore()
         if self.offset.isNull():
             draw_heart(painter, self.swipe_heart(), photo.liked)
-        painter.setPen(self.hint_color())
-        painter.setFont(QFont(self.font().family(), 9))
-        painter.drawText(QRectF(18, self.height()-44, 120, 24), Qt.AlignmentFlag.AlignVCenter, f'{self.index+1} / {len(self.deck)}')
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.current():
@@ -2444,6 +2441,7 @@ class ReviewPage(QWidget):
         combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         combo.setFixedWidth(116)
         combo.addItem('Nom', 'name')
+        combo.addItem('Date', 'date')
         for label, one_way, *_ in COLOR_ORDERS:
             combo.addItem(label, one_way)
         if shuffled:
@@ -2457,9 +2455,12 @@ class ReviewPage(QWidget):
     def set_sort(self, value):
         if value == 'shuffled':
             self.shuffle()
-        elif value == 'name':
-            # Back to the order of the names, after Mélanger too.
+        elif value in ('name', 'date'):
+            # Back to the plain order, after Mélanger too.
             self.views['wall'].order_seed = None
+            sort = self.window.sort
+            way = sort.currentData().split('_')[1]
+            sort.setCurrentIndex(max(0, sort.findData(f'{value}_{way}')))
             self.set_mode('wall')
         else:
             self.set_color_order(value)
@@ -2473,7 +2474,8 @@ class ReviewPage(QWidget):
         else:
             self.views['wall'].order_seed = None
             sort = self.window.sort
-            sort.setCurrentIndex(max(0, sort.findData('name_desc' if sort.currentData() != 'name_desc' else 'name_asc')))
+            kind, way = sort.currentData().split('_')
+            sort.setCurrentIndex(max(0, sort.findData(f"{kind}_{'asc' if way == 'desc' else 'desc'}")))
         self.sync_color_order()
 
     def sync_swipe_bucket(self):
@@ -2704,13 +2706,15 @@ class ReviewPage(QWidget):
         index = next((i for i, entry in enumerate(COLOR_ORDERS) if order in entry[1:3]), 0)
         entry = COLOR_ORDERS[index]
         other = order == entry[2]
-        descending = self.window.sort.currentData() == 'name_desc'
+        kind, way = self.window.sort.currentData().split('_')
+        descending = way == 'desc'
         for combo, button, by_name in ((self.order_combo, self.order_button, False), (self.wall_sort, self.wall_sort_button, True)):
             combo.blockSignals(True)
-            combo.setCurrentIndex((combo.findData('shuffled') if self.views['wall'].order_seed is not None else 0) if by_name else index+1)
+            combo.setCurrentIndex((combo.findData('shuffled') if self.views['wall'].order_seed is not None else combo.findData(kind)) if by_name else combo.findData(entry[1]))
             combo.blockSignals(False)
             button.setText(('Décroissant' if descending else 'Croissant') if by_name else entry[4 if other else 3])
-            button.setToolTip(('De Z à A' if descending else 'De A à Z') if by_name else entry[6 if other else 5])
+            plain = ('Du plus récent au plus ancien' if descending else 'Du plus ancien au plus récent') if kind == 'date' else 'De Z à A' if descending else 'De A à Z'
+            button.setToolTip(plain if by_name else entry[6 if other else 5])
         # The blocks name colors: they mean nothing along another scale.
         self.groups_button.setVisible(index == 0)
 
@@ -2841,14 +2845,15 @@ class ReviewPage(QWidget):
         choices = self.window.choices
         state = {'stars': self.window.stars.currentData(), 'flags': self.window.flags.currentData(),
                  'portfolio': choices.portfolio.isChecked(), 'publish': choices.publish.isChecked(), 'liked': choices.liked.isChecked(), 'project': choices.project.currentData(),
-                 'set_aside': sorted(self.views['wall'].set_aside)}
+                 'set_aside': sorted(self.views['wall'].set_aside), 'view': self.mode if self.window.review_active else 'classic',
+                 'photo': self.window.current_photo().relative_path if self.window.current_photo() else None}
         self.state_path().write_text(json.dumps(state, ensure_ascii=False), encoding='utf-8')
 
     def restore_state(self):
         try:
             state = json.loads(self.state_path().read_text(encoding='utf-8'))
         except (OSError, ValueError):
-            return
+            return {}
         for combo, key in ((self.window.stars, 'stars'), (self.window.flags, 'flags')):
             index = combo.findData(state.get(key)) if state.get(key) is not None else -1
             if index >= 0:
@@ -2867,6 +2872,7 @@ class ReviewPage(QWidget):
         known = {photo.relative_path for photo in self.window.session.photos}
         self.views['wall'].set_aside = known & set(state.get('set_aside', []))
         self.update_restore()
+        return state
 
     # Analysis cache, kept next to the session so that it travels with the project.
     def analysis_path(self):

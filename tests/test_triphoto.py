@@ -3,6 +3,7 @@
 They work on synthetic images in a temporary folder, with separate settings, and
 never touch real galleries or the user's preferences.
 """
+import time
 import hashlib
 import json
 import math
@@ -428,7 +429,7 @@ def test_grid(base):
     # The order is a criterion and a direction.
     review.flip_color_order()
     assert color.order == 'hue' and review.order_button.text() == 'Croissant' and review.order_button.toolTip() == 'Du rouge au violet'
-    review.order_combo.setCurrentIndex(2)
+    review.order_combo.setCurrentIndex(review.order_combo.findData('light'))
     assert color.order == 'light' and review.order_button.text() == 'Décroissant'
     lights = [review.info[p.relative_path]['light'] for p in color.ordered]
     assert lights == sorted(lights, reverse=True)
@@ -2335,7 +2336,7 @@ def test_custom_view(base):
     assert len(window.home.custom_cards) == 2
     reopened = next(found for found in custom.store.sessions() if found.name == 'Concours 2027')
     window.open_custom(reopened)
-    assert reopened.count(first) == 3 and custom.work_title.text() == 'CONCOURS 2027'
+    assert reopened.count(first) == 3 and window.project_button.text() == 'Concours 2027'
     # Modifying the selection brings back the former choice, and keeps the sorted photos.
     custom.edit_selection()
     settle(window, lambda: not setup.scanning(), 10000)
@@ -2822,13 +2823,104 @@ def test_defaults_and_viewer_room(base):
     window.close()
 
 
+def test_user_journey(base):
+    """From a folder of photos to the sorted buckets, and back: each step leads to the next without a detour."""
+    clear_settings()
+    project = make_project(base/'journey'/'Mariage', 12)
+    place = base/'journey'/'Portfolio'
+    place.mkdir()
+    window = triphoto_qt.Window(project)
+    window.resize(1400, 900)
+    window.show()
+    settle(window, lambda: window.current_photo() is not None)
+    window.portfolio.set_folder(place)
+    assert window.project_button.text() == 'Mariage'
+    # First sort, then what the filter keeps goes further in one click.
+    for photo in window.session.photos[:6]:
+        photo.stars = 5
+    window.set_view('wall')
+    window.note_filter.buttons[5].click()
+    assert len(window.photos) == 6 and window.kept_section.isVisible()
+    window.kept_portfolio.click()
+    assert sum(window.portfolio.contains(photo.path) for photo in window.session.photos) == 6
+    window.undo()
+    assert not any(window.portfolio.contains(photo.path) for photo in window.session.photos)
+    window.redo()
+    assert sum(window.portfolio.contains(photo.path) for photo in window.session.photos) == 6
+    # Never two sorts on screen, and the grid has the date too.
+    assert not window.sort.isVisible()
+    window.review.wall_sort.setCurrentIndex(window.review.wall_sort.findData('date'))
+    assert window.sort.currentData() == 'date_asc'
+    window.review.wall_sort_button.click()
+    assert window.sort.currentData() == 'date_desc' and window.review.wall_sort.currentData() == 'date'
+    window.review.wall_sort.setCurrentIndex(0)
+    assert window.sort.currentData() == 'name_desc'
+    window.sort.setCurrentIndex(window.sort.findData('name_asc'))
+    window.set_view('classic')
+    assert window.sort.isVisible()
+    window.set_view('wall')
+    # A selection from these photos: the project is checked with its filters, and cancelling comes back here.
+    window.kept_selection.click()
+    setup = window.custom.setup
+    assert window.choosing_photos() and not window.segments.isVisible() and not window.export_button.isVisible()
+    settle(window, lambda: not setup.scanning(), 10000)
+    row = next(row for row in setup.rows.values() if row.title == 'Mariage')
+    assert row.check.isChecked() and row.stars.currentData() == 5 and len(setup.chosen()) == 6
+    assert not setup.go.isEnabled()
+    window.custom.show_after_setup(None)
+    assert window.review_active and window.pages.currentIndex() == 2 and window.review.mode == 'wall' and len(window.photos) == 6
+    # Back on the project: same view, same photo, same filter.
+    window.review.view().pick(window.photos[2])
+    wanted = window.current_photo().relative_path
+    window.go_home()
+    assert window.pages.currentIndex() == 0 and window.project_button.text() == 'Projets'
+    home = window.home
+    wait()
+    assert home.grid_holder.y() < home.portfolio_card.y() < home.custom_button.y()
+    window.set_folder(project)
+    assert window.review_active and window.review.mode == 'wall' and window.current_photo().relative_path == wanted and len(window.photos) == 6
+    window.kept_selection.click()
+    settle(window, lambda: not setup.scanning(), 10000)
+    setup.name.setText('Concours')
+    setup.go.click()
+    selection = window.selection
+    assert selection and len(selection.photos) == 6 and window.project_button.text() == 'Concours'
+    # The export and the counter stay in their usual place, and the menu leads anywhere.
+    assert window.export_button.isVisible() and window.counter.text() == '1 / 6' and not window.kept_section.isVisible()
+    window.custom.session.data['buckets'].append({'id': 'a', 'title': 'Sony', 'subtitle': '', 'color': triphoto_custom.BUCKET_COLORS[0]})
+    window.custom.buckets_changed()
+    wait()
+    assert window.review_tabs.y() < window.pages.y() < window.bucket_strip.y() or window.review_tabs.y() < window.pages.y()
+    window.set_view('wall')
+    assert window.review_tabs.y() < window.pages.y() < window.bucket_strip.y()
+    window.fill_project_menu()
+    labels = [action.text() for action in window.project_menu.actions()]
+    assert 'Modifier la sélection…' in labels and 'Sélections' in labels and 'Portfolio' in labels
+    window.edit_selection()
+    assert window.choosing_photos() and window.pages.currentIndex() == 3
+    window.custom.show_after_setup(None)
+    window.go_home()
+    # Many projects leave the portfolio and the selections in sight.
+    for index in range(14):
+        make_project(base/'journey'/f'Projet {index}', 1)
+        window.recents.add(base/'journey'/f'Projet {index}', [], time.time())
+    window.home.refresh()
+    window.home.resize(1400, 800)
+    window.home.columns = 0
+    window.home.arrange()
+    assert not window.home.more_button.isHidden() and sum(not card.isHidden() for card in window.home.cards.values()) < 15
+    window.home.more_button.click()
+    assert all(not card.isHidden() for card in window.home.cards.values())
+    window.close()
+
+
 def main():
     app = QApplication([])
     app.setStyle('Fusion')
     app.setStyleSheet(triphoto_qt.STYLE)
     base = Path(tempfile.mkdtemp(prefix='triphoto-tests-'))
     tests = [test_legacy_session, test_nested_session_ignored, test_dominant_color, test_recents, test_shortcuts,
-             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_export_by_its_button, test_themed_dialog, test_update, test_keys_undo_and_ribbon, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_repair_links, test_selection_review_and_health, test_defaults_and_viewer_room]
+             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_export_by_its_button, test_themed_dialog, test_update, test_keys_undo_and_ribbon, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_repair_links, test_selection_review_and_health, test_defaults_and_viewer_room, test_user_journey]
     failures = 0
     try:
         for test in tests:

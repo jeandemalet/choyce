@@ -441,7 +441,7 @@ class ReviewTabs(QFrame):
         selection = self.window.selection
         if not selection:
             return
-        self.row.addWidget(QLabel('Revoir', objectName='muted'))
+        self.row.addWidget(QLabel('Afficher', objectName='muted'))
         self.row.addSpacing(6)
         for key in [ALL]+[bucket['id'] for bucket in selection.buckets]+[UNSORTED]:
             button = QPushButton(objectName='seg', checkable=True)
@@ -763,6 +763,10 @@ class SourceRow(QFrame):
         self.publish.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.publish.clicked.connect(lambda *_: self.changed.emit())
         row.addWidget(self.publish)
+        self.liked = QPushButton("J'aime", objectName='seg', checkable=True)
+        self.liked.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.liked.clicked.connect(lambda *_: self.changed.emit())
+        row.addWidget(self.liked)
         self.count = QLabel('Lecture…', objectName='muted')
         self.count.setFixedWidth(116)
         self.count.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -783,12 +787,14 @@ class SourceRow(QFrame):
         self.stars.setCurrentIndex(max(0, self.stars.findData(source.get('stars', 'all'))))
         self.marker.setCurrentIndex(max(0, self.marker.findData(source.get('marker', 'all'))))
         self.publish.setChecked(bool(source.get('publish')))
+        self.liked.setChecked(bool(source.get('liked')))
 
     def source(self):
-        return {'key': self.key, 'stars': self.stars.currentData(), 'marker': self.marker.currentData(), 'publish': self.publish.isChecked()}
+        return {'key': self.key, 'stars': self.stars.currentData(), 'marker': self.marker.currentData(), 'publish': self.publish.isChecked(), 'liked': self.liked.isChecked()}
 
     def matching(self):
-        return [photo for photo in self.photos or [] if self.page.window.matches_filters(photo, self.stars.currentData(), self.marker.currentData(), self.publish.isChecked())]
+        return [photo for photo in self.photos or [] if self.page.window.matches_filters(photo, self.stars.currentData(), self.marker.currentData(), self.publish.isChecked())
+                and (photo.liked or not self.liked.isChecked())]
 
     def loaded(self, photos):
         self.photos = photos
@@ -834,9 +840,9 @@ class SetupPage(QWidget):
         layout.addWidget(self.name)
         quick = QHBoxLayout()
         quick.setSpacing(4)
-        quick.addWidget(QLabel('Galeries', objectName='section'))
+        quick.addWidget(QLabel('Projets', objectName='section'))
         quick.addSpacing(8)
-        for text, action in (('Toutes les galeries', self.select_all), ('Seulement le portfolio', self.select_portfolio), ('Aucune', self.select_none)):
+        for text, action in (('Tous les projets', self.select_all), ('Seulement le portfolio', self.select_portfolio), ('Aucun', self.select_none)):
             button = QPushButton(text, objectName='ghost')
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             button.clicked.connect(lambda checked=False, run=action: run())
@@ -886,7 +892,7 @@ class SetupPage(QWidget):
             self.list.removeWidget(row)
             row.deleteLater()
         self.rows = {}
-        self.title.setText('Nouvelle sélection custom' if session is None else 'Modifier la sélection')
+        self.title.setText('Nouvelle sélection' if session is None else 'Modifier la sélection')
         self.go.setText('Créer la sélection' if session is None else 'Enregistrer')
         self.name.setText('' if session is None else session.name)
         portfolio = self.window.portfolio
@@ -899,6 +905,15 @@ class SetupPage(QWidget):
             for source in session.data['sources']:
                 row = self.rows.get(source['key']) or self.add_row(source['key'], self.page.project_label(source['key']), source['key'])
                 row.apply(source)
+        self.refresh()
+
+    def start_from(self, source):
+        """Coming from a project: it is already checked, with its filters. Only the name is left to give."""
+        row = next((row for row in self.rows.values() if Path(row.key) == Path(source['key'])), None)
+        if row is None:
+            row = self.add_row(source['key'], self.page.project_label(source['key']), source['key'])
+        row.apply(source)
+        self.name.setFocus()
         self.refresh()
 
     def source_read(self, key, photos):
@@ -945,7 +960,7 @@ class SetupPage(QWidget):
     def refresh(self):
         reading = any(row.check.isChecked() and row.photos is None and not row.missing for row in self.rows.values())
         count = len(self.chosen())
-        self.total.setText('Lecture des galeries…' if reading else f"{count} photo{'s' if count > 1 else ''} sélectionnée{'s' if count > 1 else ''}")
+        self.total.setText('Lecture des projets…' if reading else f"{count} photo{'s' if count > 1 else ''} sélectionnée{'s' if count > 1 else ''}")
         self.go.setEnabled(not reading and bool(count or self.session) and bool(self.name.text().strip()))
 
     def confirm(self):
@@ -1548,12 +1563,6 @@ class CustomPage(QStackedWidget):
         bar = QHBoxLayout()
         bar.setContentsMargins(12, 8, 12, 8)
         bar.setSpacing(8)
-        self.work_title = QLabel(objectName='section')
-        bar.addWidget(self.work_title)
-        bar.addSpacing(12)
-        self.counter = QLabel(objectName='muted')
-        bar.addWidget(self.counter)
-        bar.addSpacing(8)
         self.photo_name = QLabel(objectName='muted')
         bar.addWidget(self.photo_name, 1)
         self.zoom_button = self.plain_button(bar, '100 %', lambda: self.stage.zoom_reset())
@@ -1563,7 +1572,6 @@ class CustomPage(QStackedWidget):
         bar.addSpacing(8)
         self.plain_button(bar, 'Modifier la sélection', self.edit_selection)
         self.plain_button(bar, 'Ajouter un bucket', self.add_bucket)
-        self.export_button = self.plain_button(bar, 'Exporter la sélection…', self.export, 'primary')
         layout.addLayout(bar)
         self.stage = Stage(self)
         layout.addWidget(self.stage, 1)
@@ -1624,7 +1632,6 @@ class CustomPage(QStackedWidget):
         self.session = session
         self.images.clear()
         self.failed.clear()
-        self.work_title.setText(session.name.upper())
         self.cached_order = None
         self.rebuild_cards()
         position = session.data.get('position')
@@ -1706,7 +1713,7 @@ class CustomPage(QStackedWidget):
 
     def empty_text(self):
         if not self.session.photos:
-            return 'Aucune photo : « Modifier la sélection » choisit les galeries et les filtres.'
+            return 'Aucune photo : « Modifier la sélection » choisit les projets et les filtres.'
         return 'Aucune photo pour ces filtres.'
 
     def bucket_number(self, key):
@@ -1714,8 +1721,10 @@ class CustomPage(QStackedWidget):
         return index+1 if index < 5 else None
 
     def update_counter(self):
+        if self.session is None:
+            return
         index, total = self.position()
-        self.counter.setText(f'{min(index+1, total)} / {total}' if total else '0 photo')
+        self.window.counter.setText(f'{min(index+1, total)} / {total}' if total else '0 photo')
         photo = self.current()
         text = f"{photo['gallery']} · {Path(photo['path']).name}" if photo else ''
         self.photo_name.setText(self.photo_name.fontMetrics().elidedText(text, Qt.TextElideMode.ElideMiddle, max(120, self.photo_name.width())))

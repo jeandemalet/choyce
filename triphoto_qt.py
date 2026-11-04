@@ -739,14 +739,16 @@ class HomePage(QWidget):
         self.column.setContentsMargins(56, 44, 56, 44)
         self.column.setSpacing(0)
         self.column.addStretch(0)
-        self.portfolio_card = PortfolioCard(self)
-        self.column.addWidget(self.portfolio_card)
-        self.column.addSpacing(30)
+        self.expanded = False
         self.title = QLabel('Ajoutez des photos pour commencer', objectName='title')
         self.column.addWidget(self.title)
-        self.column.addSpacing(16)
+        self.title_gap = QWidget()
+        self.title_gap.setFixedHeight(16)
+        self.column.addWidget(self.title_gap)
         self.actions = QHBoxLayout()
         self.actions.setSpacing(8)
+        self.section = QLabel('PROJETS', objectName='section')
+        self.actions.addWidget(self.section)
         self.add_button = QPushButton('Ajouter des photos', objectName='primary')
         self.add_button.clicked.connect(lambda checked=False: window.open_folder())
         self.find_button = QPushButton("Retrouver d'anciens projets", objectName='ghost')
@@ -754,28 +756,34 @@ class HomePage(QWidget):
         self.lead = QWidget()
         self.trail = QWidget()
         self.actions.addWidget(self.lead, 1)
-        self.actions.addWidget(self.add_button)
         self.actions.addWidget(self.find_button)
+        self.actions.addWidget(self.add_button)
         self.actions.addWidget(self.trail, 1)
         self.column.addLayout(self.actions)
-        self.column.addSpacing(34)
-        self.section = QLabel('RÉCENTS', objectName='section')
-        self.column.addWidget(self.section)
-        self.column.addSpacing(10)
+        self.project_hint = QLabel('Un dossier de photos forme un projet : le premier tri s’y fait, avec les notes et les filtres.', objectName='muted')
+        self.column.addWidget(self.project_hint)
+        self.column.addSpacing(12)
         self.grid_holder = QWidget(objectName='home')
         self.grid = QGridLayout(self.grid_holder)
         self.grid.setContentsMargins(0, 0, 0, 0)
         self.grid.setSpacing(14)
         self.column.addWidget(self.grid_holder)
-        self.column.addSpacing(34)
+        self.more_button = QPushButton(objectName='ghost')
+        self.more_button.clicked.connect(lambda checked=False: self.show_all_projects())
+        self.column.addWidget(self.more_button, 0, Qt.AlignmentFlag.AlignLeft)
+        self.column.addSpacing(30)
+        self.portfolio_card = PortfolioCard(self)
+        self.column.addWidget(self.portfolio_card)
+        self.column.addSpacing(30)
         custom_top = QHBoxLayout()
-        custom_top.addWidget(QLabel('SÉLECTION CUSTOM', objectName='section'))
+        custom_top.addWidget(QLabel('SÉLECTIONS', objectName='section'))
         custom_top.addStretch(1)
         self.custom_button = QPushButton('Nouvelle sélection', objectName='ghost')
         self.custom_button.clicked.connect(lambda checked=False: window.open_custom())
         custom_top.addWidget(self.custom_button)
         self.column.addLayout(custom_top)
-        self.column.addSpacing(10)
+        self.column.addWidget(QLabel('Des photos de plusieurs projets, rangées dans des buckets : un concours, les réseaux sociaux, une commande.', objectName='muted'))
+        self.column.addSpacing(12)
         self.custom_holder = QWidget(objectName='home')
         self.custom_grid = QGridLayout(self.custom_holder)
         self.custom_grid.setContentsMargins(0, 0, 0, 0)
@@ -796,13 +804,14 @@ class HomePage(QWidget):
         self.cards = {}
         has_recents = bool(entries)
         self.section.setVisible(has_recents)
+        self.project_hint.setVisible(has_recents)
         self.grid_holder.setVisible(has_recents)
         # Centered when there is nothing else to show, left-aligned above the cards.
         self.column.setStretch(0, 0 if has_recents else 1)
-        self.lead.setVisible(not has_recents)
-        self.title.setText('Reprendre un projet' if has_recents else 'Ajoutez des photos pour commencer')
-        self.title.setAlignment(Qt.AlignmentFlag.AlignLeft if has_recents else Qt.AlignmentFlag.AlignHCenter)
-        self.add_button.setText('Ouvrir un dossier' if has_recents else 'Ajouter des photos')
+        self.title.setVisible(not has_recents)
+        self.title_gap.setVisible(not has_recents)
+        self.title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.trail.setVisible(not has_recents)
         for entry in entries:
             self.cards[path_key(entry['path'])] = RecentCard(entry, self)
             root = Path(entry['path'])
@@ -827,13 +836,23 @@ class HomePage(QWidget):
         if columns == self.columns:
             return
         self.columns = columns
+        # Two rows are enough to pick up where one was: the portfolio and the selections stay in sight.
+        shown = len(self.cards) if self.expanded else columns*2
         for index, card in enumerate(self.cards.values()):
             self.grid.addWidget(card, index//columns, index % columns)
+            card.setVisible(index < shown)
+        self.more_button.setText(f'Voir les {len(self.cards)} projets')
+        self.more_button.setVisible(len(self.cards) > shown)
         for index, card in enumerate(self.custom_cards.values()):
             self.custom_grid.addWidget(card, index//columns, index % columns)
         for column in range(10):
             self.grid.setColumnStretch(column, 1 if column < columns else 0)
             self.custom_grid.setColumnStretch(column, 1 if column < columns else 0)
+
+    def show_all_projects(self):
+        self.expanded = True
+        self.columns = 0
+        self.arrange()
 
     def resizeEvent(self, event):
         self.arrange()
@@ -1099,14 +1118,14 @@ class Window(QMainWindow):
         left, right = QHBoxLayout(), QHBoxLayout()
         left.setSpacing(8)
         right.setSpacing(8)
-        brand = QLabel(APP_NAME, objectName='brand')
-        brand.setToolTip(f'Version {APP_VERSION}')
-        left.addWidget(brand)
+        self.brand = QLabel(APP_NAME, objectName='brand')
+        self.brand.setToolTip(f'Version {APP_VERSION}')
+        left.addWidget(self.brand)
         left.addSpacing(6)
         self.home_button = self.button(left, '‹ Accueil', self.go_home, 'ghost')
         self.home_button.setToolTip('Revenir à l’accueil. Vos notes et vos rangements sont enregistrés.')
         self.home_button.hide()
-        self.project_button = QPushButton('Projet', objectName='menu')
+        self.project_button = QPushButton('Projets', objectName='menu')
         self.project_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.project_menu = QMenu(self)
         self.project_menu.aboutToShow.connect(self.fill_project_menu)
@@ -1244,15 +1263,24 @@ class Window(QMainWindow):
             lines = QVBoxLayout(box)
             lines.setContentsMargins(0, 0, 0, 10)
             lines.setSpacing(5)
-            lines.addWidget(QLabel(title, objectName='muted'))
+            box.title = QLabel(title, objectName='muted')
+            lines.addWidget(box.title)
             lines.addWidget(widget)
             filter_lines.addWidget(box)
             return box
         self.bucket_rule = BucketFilter(self)
-        self.bucket_section = section('Buckets', self.bucket_rule)
         section('Note', self.note_filter)
-        section('Marqueur', self.marker_filter)
-        section('Avec', self.choices)
+        self.marker_section = section('Marqueur', self.marker_filter)
+        section('Seulement', self.choices)
+        self.bucket_section = section('Buckets', self.bucket_rule)
+        # The next step of the journey, from what the filters have kept.
+        kept = QWidget()
+        kept_lines = QVBoxLayout(kept)
+        kept_lines.setContentsMargins(0, 0, 0, 0)
+        kept_lines.setSpacing(4)
+        self.kept_portfolio = self.button(kept_lines, 'Ajouter au portfolio', self.add_filtered_to_portfolio, 'seg')
+        self.kept_selection = self.button(kept_lines, 'Créer une sélection…', self.select_filtered, 'seg')
+        self.kept_section = section('Avec ces photos', kept)
         # What is displayed apart from what is filtered: black and white, background and zoom of the views.
         self.display_section = section('Affichage', self.review.tools)
         filter_lines.addStretch(1)
@@ -1261,8 +1289,9 @@ class Window(QMainWindow):
         content.setSpacing(0)
         column = QVBoxLayout()
         column.setSpacing(0)
-        column.addWidget(self.pages, 1)
+        # In every view: above, which photos are shown; below, where they are sent.
         column.addWidget(self.review_tabs)
+        column.addWidget(self.pages, 1)
         column.addWidget(self.bucket_strip)
         content.addLayout(column, 1)
         content.addWidget(self.filter_panel)
@@ -1380,6 +1409,7 @@ class Window(QMainWindow):
         for key, text in values.items():
             self.flags.addItem(text, key)
         self.flags.setToolTip('Marqueurs' if self.marker == 'pick' else 'Drapeaux')
+        self.marker_section.title.setText('Marqueur' if self.marker == 'pick' else 'Drapeau')
         self.flags.blockSignals(False)
         self.viewer_bar.relayout()
         self.review.bar.relayout()
@@ -1413,6 +1443,8 @@ class Window(QMainWindow):
         self.filter_chip.setChecked(shown)
         self.filter_panel.setVisible(shown)
         self.bucket_section.setVisible(bool(self.selection))
+        self.kept_section.setVisible(not self.selection)
+        self.kept_portfolio.setVisible(not self.viewing_portfolio())
         self.display_section.setVisible(self.review_active)
         if shown:
             self.bucket_rule.sync()
@@ -1431,7 +1463,7 @@ class Window(QMainWindow):
 
     def update_filter_chip(self):
         parts = [combo.currentText() for combo in (self.stars, self.flags) if combo.currentIndex() > 0]+self.choices.active_labels()
-        # Elided: a long filter must not push the views out of the header. In a selection, Revoir already tells.
+        # Elided: a long filter must not push the views out of the header. In a selection, Afficher already tells.
         text = self.filter_chip.fontMetrics().elidedText(' · '.join(parts), Qt.TextElideMode.ElideRight, 100)
         self.filter_chip.setText(f'Filtre : {text}' if parts and not self.selection else 'Filtre')
         self.filter_chip.setToolTip(' · '.join(parts) or 'Afficher ou masquer le panneau des filtres')
@@ -1458,9 +1490,9 @@ class Window(QMainWindow):
     def sync_view_buttons(self):
         mode = 'wall' if self.review.mode == 'color' else self.review.mode
         self.view_buttons['buckets' if self.custom_active else mode if self.review_active else 'classic'].setChecked(True)
-        # Dealt at random or sorted from the bottom bar, these two have no use for the order of the names.
+        # The grid sorts from its bottom bar, and Pêle-mêle deals at random: never two sorts on screen.
         self.sort.setVisible(bool(self.session and self.session.photos) and not self.custom_active
-                             and not (self.review_active and self.review.mode in ('toile', 'color')))
+                             and not (self.review_active and self.review.mode in ('wall', 'toile', 'color')))
         self.sync_filter_panel()
 
     def show_viewer_bar(self):
@@ -1512,7 +1544,8 @@ class Window(QMainWindow):
     def open_custom(self, session=None):
         """A saved selection, opened like a project on its buckets, or the screen that creates one."""
         if session is None:
-            self.set_review(False)
+            # The choice of projects reads them from the disk: the latest notes must be there.
+            self.save_session()
             self.custom_active = True
             self.update_project_state()
             self.custom.new_session()
@@ -1522,6 +1555,25 @@ class Window(QMainWindow):
             self.custom_active = True
             self.custom.open_session(session)
             self.update_project_state()
+
+    def select_filtered(self):
+        """A new selection that starts from this project and its filters: only the name is left to give."""
+        key = str(self.portfolio.folder) if self.viewing_portfolio() else str(self.project_path)
+        source = {'key': key, 'stars': self.stars.currentData(), 'marker': self.flags.currentData(),
+                  'publish': self.choices.publish.isChecked(), 'liked': self.choices.liked.isChecked()}
+        self.open_custom()
+        self.custom.setup.start_from(source)
+
+    def add_filtered_to_portfolio(self):
+        if not self.photos or not self.ready_for_portfolio():
+            return
+        photos = [photo for photo in self.photos if not self.portfolio.contains(photo.path)]
+        if not photos:
+            self.toast('Ces photos sont déjà dans le portfolio.')
+            return
+        self.send_to_portfolio(photos, True)
+        self.remember(('portfolio', photos, True))
+        self.toast(f"{len(photos)} photo{'s' if len(photos) > 1 else ''} ajoutée{'s' if len(photos) > 1 else ''} au portfolio")
 
     def leave_custom(self):
         self.custom.close_session()
@@ -1539,7 +1591,7 @@ class Window(QMainWindow):
         ready = bool(self.selection and self.selection.buckets)
         swiping = self.review_active and self.review.mode == 'swipe'
         self.bucket_strip.setVisible(ready and bool(self.session and self.session.photos) and not self.custom_active and not swiping)
-        self.review_tabs.setVisible(ready and bool(self.session))
+        self.review_tabs.setVisible(ready and bool(self.session) and not self.choosing_photos())
 
     def swipe_to_bucket(self, photo, key, adding):
         if key:
@@ -1549,6 +1601,14 @@ class Window(QMainWindow):
             elif key in self.selection.buckets_of(photo.relative_path):
                 self.selection.toggle(photo.relative_path, key)
             self.buckets_done(before)
+
+    def choosing_photos(self):
+        """On the screen that picks the projects of a selection, which has its own way out."""
+        return self.custom_active and self.custom.currentWidget() is self.custom.setup
+
+    def edit_selection(self):
+        self.show_buckets()
+        self.custom.edit_selection()
 
     def show_buckets(self):
         current = self.current_photo()
@@ -1822,8 +1882,8 @@ class Window(QMainWindow):
     def fill_project_menu(self):
         menu = self.project_menu
         menu.clear()
-        menu.addAction('Ouvrir un projet…', self.open_folder)
-        recent_menu = menu.addMenu('Récents')
+        menu.addAction('Ajouter des photos…', self.open_folder)
+        recent_menu = menu.addMenu('Projets')
         entries = self.recents.entries()
         for entry in entries[:15]:
             path = entry['path']
@@ -1831,18 +1891,22 @@ class Window(QMainWindow):
             action.setToolTip(path)
         recent_menu.setToolTipsVisible(True)
         recent_menu.setEnabled(bool(entries))
-        menu.addAction("Retrouver d'anciens projets…", self.find_projects)
-        absent = len(getattr(self.session, 'absent', ()))
-        menu.addAction(f'Retrouver les photos manquantes ({absent})…' if absent else 'Retrouver les photos manquantes…', self.repair_photos).setEnabled(bool(absent))
-        if self.selection:
-            menu.addAction('Vérifier les photos de la sélection…', self.custom.check_photos)
-        menu.addSeparator()
-        menu.addAction('Sélections custom', self.show_custom_home)
+        selections = menu.addMenu('Sélections')
+        for session in self.custom.store.sessions()[:15]:
+            selections.addAction(session.name.replace('&', '&&'), lambda value=session: self.open_custom(value))
+        selections.addSeparator()
+        selections.addAction('Nouvelle sélection…', lambda: self.open_custom())
         menu.addAction('Portfolio', self.open_portfolio)
-        menu.addAction('Ouvrir le dossier du portfolio', self.reveal_portfolio).setEnabled(self.portfolio.available())
-        menu.addAction("Emplacement du portfolio…", self.choose_portfolio_folder)
         menu.addSeparator()
-        menu.addAction('Fermer le projet', self.close_project).setEnabled(self.session is not None)
+        if self.selection:
+            menu.addAction('Modifier la sélection…', self.edit_selection)
+            menu.addAction('Vérifier les photos de la sélection…', self.custom.check_photos)
+        absent = len(getattr(self.session, 'absent', ()))
+        if absent:
+            menu.addAction(f'Retrouver les photos manquantes ({absent})…', self.repair_photos)
+        menu.addAction("Retrouver d'anciens projets…", self.find_projects)
+        menu.addSeparator()
+        menu.addAction("Revenir à l'accueil", self.go_home).setEnabled(self.session is not None or self.custom_active)
 
     def open_recent(self, path):
         if not Path(path).is_dir():
@@ -1948,22 +2012,36 @@ class Window(QMainWindow):
         has_photos = bool(self.session and self.session.photos)
         page = 3 if self.custom_active else (2 if self.review_active else 1) if has_photos else 0
         self.home_button.setVisible(bool(self.session) or self.custom_active)
+        self.show_open_name()
         self.view_buttons['buckets'].setVisible(bool(self.selection))
         self.update_bucket_bars()
         if page == 0:
             self.home.refresh()
         self.pages.setCurrentIndex(page)
         self.sync_view_buttons()
-        in_project = has_photos and not self.custom_active
-        self.export_button.setVisible(in_project)
-        # Nothing to filter or switch on the welcome screen. Custom has its own controls, and its own export.
-        self.counter.setVisible(in_project)
-        self.segments.setVisible(has_photos)
-        self.undo_button.setVisible(has_photos)
-        self.redo_button.setVisible(has_photos)
+        choosing = self.choosing_photos()
+        # One export, in one place, whatever is open. Nothing to filter or switch on the welcome screen.
+        self.export_button.setVisible(bool(self.session) and not choosing and (has_photos or bool(self.selection)))
+        self.counter.setVisible((has_photos or bool(self.selection)) and not choosing)
+        self.segments.setVisible(has_photos and not choosing)
+        self.undo_button.setVisible(has_photos and not choosing)
+        self.redo_button.setVisible(has_photos and not choosing)
         self.sync_undo_buttons()
+        if self.session:
+            self.update_counter()
         name = self.selection.name if self.selection else project_label(self.project_path) if self.project_path else ''
         self.setWindowTitle(f'{APP_NAME} · {name}' if self.session else APP_NAME)
+
+    def show_open_name(self):
+        """The menu of the projects says which one is open."""
+        name = self.selection.name if self.selection else 'Portfolio' if self.viewing_portfolio() else project_label(self.project_path) if self.session else 'Projets'
+        metrics = self.project_button.fontMetrics()
+        shown = metrics.elidedText(name, Qt.TextElideMode.ElideMiddle, 170)
+        self.project_button.setText(shown.replace('&', '&&'))
+        self.project_button.setMinimumWidth(metrics.horizontalAdvance(shown)+58)
+        # Once something is open, its name takes the room of the name of the program.
+        self.brand.setVisible(not self.session and not self.custom_active)
+        self.project_button.setToolTip(name if self.selection else str(self.project_path) if self.session else '')
 
     def save_session(self):
         # Saving takes an inventory of the folder: too slow to do on each note
@@ -2049,7 +2127,7 @@ class Window(QMainWindow):
 
     def background_tasks(self):
         """Long work under way, as (label, how many left)."""
-        tasks = [('Vérification des photos', self.custom.check_left), ('Lecture des galeries', self.custom.setup.scanning()), ('Corbeille du portfolio', len(self.portfolio.removed)),
+        tasks = [('Vérification des photos', self.custom.check_left), ('Lecture des projets', self.custom.setup.scanning()), ('Corbeille du portfolio', len(self.portfolio.removed)),
                  ('Chargement des aperçus', len(self.pending)+len(self.custom.pending)),
                  ('Analyse des couleurs', self.review.analysis_left)]
         return [task for task in tasks if task[1]]
@@ -2090,7 +2168,7 @@ class Window(QMainWindow):
         self.sort.blockSignals(True)
         self.sort.setCurrentIndex(self.sort.findData(session.sort_mode))
         self.sort.blockSignals(False)
-        self.review.restore_state()
+        state = self.review.restore_state() or {}
         self.apply_filters()
         if session.photos and not self.photos:
             # The remembered filters no longer match anything: never open on an empty page.
@@ -2104,6 +2182,15 @@ class Window(QMainWindow):
                 self.bucket_rule.rebuild()
             self.apply_filters()
         self.update_project_state()
+        self.resume(state)
+
+    def resume(self, state):
+        """Back on the photo and in the view where the project was left. A selection opens on its buckets."""
+        row = next((i for i, photo in enumerate(self.photos) if photo.relative_path == state.get('photo')), None)
+        if row is not None:
+            self.list.setCurrentRow(row)
+        if not self.selection and self.photos and state.get('view') in ('wall', 'toile', 'color', 'swipe', 'instagram'):
+            self.set_view(state['view'])
 
     def note_counts(self):
         """Photos per note, among those the marker filter lets through."""
@@ -2429,7 +2516,9 @@ class Window(QMainWindow):
 
     def update_counter(self):
         self.update_filter_chip()
-        if self.photos:
+        if self.custom_active:
+            self.custom.update_counter()
+        elif self.photos:
             five = sum(p.stars == 5 for p in self.photos)
             current = self.current_photo()
             self.bucket_strip.update()

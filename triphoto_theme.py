@@ -54,6 +54,7 @@ QPushButton#ghost {{ background: transparent; color: {MUTED}; padding: 7px 9px; 
 QPushButton#ghost:hover {{ background: {CONTROL}; color: {TEXT}; }}
 QPushButton#primary {{ background: {TEXT}; color: {INK}; font-weight: 600; }}
 QPushButton#primary:hover {{ background: #ffffff; }}
+QPushButton#primary:disabled {{ background: #3a3a3c; color: #8a8a8e; }}
 QPushButton#seg {{ background: transparent; color: {MUTED}; border-radius: 6px; padding: 5px 13px; }}
 QPushButton#seg:hover {{ color: {TEXT}; }}
 QPushButton#seg:checked {{ background: {HOVER}; color: {TEXT}; }}
