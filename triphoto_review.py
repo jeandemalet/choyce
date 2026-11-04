@@ -457,6 +457,10 @@ class Surface(QWidget):
     def zoom_text(self):
         return '100 %'
 
+    def tile_at(self, position):
+        """The photo under this point of the widget. A view of one photo at a time only has that one."""
+        return self.current() if self.fixed_deck else None
+
     def badge_hit(self, position):
         """The photo whose button lies under this point of the widget, and which button."""
         return None
@@ -659,7 +663,9 @@ class Surface(QWidget):
         painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, text)
 
     def contextMenuEvent(self, event):
-        self.review.background_menu().exec(event.globalPos())
+        menu = self.review.background_menu()
+        self.window_.add_export_action(menu, self.window_.clicked_photos(self.tile_at(QPointF(event.pos()))))
+        menu.exec(event.globalPos())
 
 
 class WallView(Surface):

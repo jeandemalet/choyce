@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from PIL import Image
 from PySide6.QtCore import QEventLoop, QPoint, QPointF, QRectF, QTimer, Qt
+from PySide6.QtGui import QContextMenuEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QStyleOptionViewItem
 
@@ -834,6 +835,22 @@ def test_export_dialog(base):
     dialog.publish.click()
     dialog.marker.setCurrentIndex(dialog.marker.findData('reject'))
     assert dialog.photos() == [photos[3]] and 'Rejetées' in dialog.name.text()
+    # Hearts combine with the rest, and name the folder.
+    dialog.marker.setCurrentIndex(0)
+    photos[0].liked = photos[2].liked = photos[3].liked = True
+    dialog.stars.setCurrentIndex(0)
+    dialog.liked.click()
+    assert dialog.name.text() == "J'aime" and dialog.photos() == [photos[0], photos[2]], 'a rejected photo stays out'
+    dialog.stars.setCurrentIndex(dialog.stars.findData(5))
+    assert dialog.name.text() == "5 étoiles, J'aime" and dialog.photos() == [photos[0]]
+    dialog.stars.setCurrentIndex(dialog.stars.findData('ge3'))
+    assert dialog.name.text() == "3 étoiles et plus, J'aime" and dialog.photos() == [photos[0], photos[2]]
+    dialog.liked.click()
+    window.choices.liked.click()
+    started = triphoto_qt.ExportDialog(window)
+    assert started.liked.isChecked() and started.stars.currentIndex() == 0 and started.photos() == [photos[0], photos[2]], 'the filter in use comes along'
+    window.choices.liked.click()
+    photos[0].liked = photos[2].liked = photos[3].liked = False
     # Nothing to export: the button says so by refusing.
     dialog.marker.setCurrentIndex(0)
     dialog.stars.setCurrentIndex(dialog.stars.findData(1))
@@ -871,6 +888,95 @@ def test_export_dialog(base):
     assert dialog.project is not None and not dialog.portfolio.isVisibleTo(dialog)
     dialog.project.setCurrentIndex(dialog.project.findData('export dialog'))
     assert dialog.name.text().endswith('export dialog') and len(dialog.photos()) == 1
+    window.close()
+    clear_settings()
+
+
+def right_click(widget, position, label=None):
+    """The menu of a right click on this widget: its labels, after triggering the one named."""
+    labels = []
+    def read():
+        menu = QApplication.activePopupWidget()
+        labels.extend(action.text() for action in menu.actions())
+        chosen = next((action for action in menu.actions() if action.text() == label), None)
+        menu.close()
+        if chosen:
+            chosen.trigger()
+    QTimer.singleShot(50, read)
+    QApplication.sendEvent(widget, QContextMenuEvent(QContextMenuEvent.Reason.Mouse, position, widget.mapToGlobal(position)))
+    return labels
+
+
+def test_quick_export(base):
+    clear_settings()
+    root = make_project(base/'export rapide', 6)
+    window = open_window(root)
+    window.show()
+    photos = window.session.photos
+    answers = []
+    real_ask = triphoto_qt.ask
+    triphoto_qt.ask = lambda parent, title, text, buttons: answers.append(title) or 'close'
+    exports = root/'TriPhoto_Session'/'Exportation'
+    def exported(action, widget, position):
+        before = set(exports.iterdir()) if exports.exists() else set()
+        count = len(answers)
+        right_click(widget, position, action)
+        settle(window, lambda: window.export_job is None and len(answers) > count)
+        assert answers[-1] == 'Export terminé', answers
+        folder = (set(exports.iterdir())-before).pop()
+        return sorted(p.name for p in folder.iterdir())
+    try:
+        # The ribbon: the photo under the mouse, alone or with those selected.
+        window.set_view('classic')
+        window.list.setCurrentRow(0)
+        window.select_photos(photos[:3])
+        first = window.list.visualItemRect(window.list.item(1)).center()
+        assert exported('Exporter les 3 photos sélectionnées', window.list.viewport(), first) == sorted(p.relative_path for p in photos[:3])
+        # The selection is what goes, a rejected photo included.
+        window.change([photos[1]], pick=triphoto.PICK_REJECT)
+        assert len(exported('Exporter les 3 photos sélectionnées', window.viewer, QPoint(50, 50))) == 3
+        window.change([photos[1]], pick=triphoto.PICK_NEUTRAL)
+        # A view of a whole wall: on a photo outside the selection, that photo only.
+        window.set_view('wall')
+        view = window.review.view()
+        settle(window, lambda: view.visible_tiles())
+        view.pick(photos[0])
+        view.pick(photos[1], True)
+        rects = {photo.relative_path: rect for rect, photo in view.visible_tiles()}
+        place = lambda photo: QPoint(int(rects[photo.relative_path].center().x()), int(rects[photo.relative_path].center().y()-view.bar.value()))
+        assert exported('Exporter les 2 photos sélectionnées', view, place(photos[1])) == sorted(p.relative_path for p in photos[:2])
+        assert exported('Exporter cette photo', view, place(photos[3])) == [photos[3].relative_path]
+        # With nothing picked, an empty spot only offers what it did.
+        view.unpick()
+        assert not any(label.startswith('Exporter') for label in right_click(view, QPoint(view.width()-3, view.height()-3)))
+        # A view of one photo at a time: that one.
+        window.set_view('swipe')
+        assert 'Exporter cette photo' in right_click(window.review.view(), QPoint(50, 50))
+        # Inside a selection: side by side, in the folder of its exports, whichever view.
+        window.close_project()
+        paths = [str(photo.path) for photo in photos]
+        sorting = window.custom.store.create('Concours')
+        sorting.set_photos([{'path': path, 'gallery': 'export rapide', 'relative': Path(path).name} for path in paths])
+        sorting.buckets.append({'id': 'a', 'title': 'AG', 'subtitle': '', 'color': '#ff3b30'})
+        sorting.add(paths[0], 'a')
+        place_of_exports = base/'exports du concours'
+        place_of_exports.mkdir()
+        sorting.data['export_folder'] = str(place_of_exports)
+        sorting.save()
+        window.open_custom(sorting)
+        window.set_view('wall')
+        view = window.review.view()
+        settle(window, lambda: view.visible_tiles())
+        chosen = [photo for _, photo in view.visible_tiles()][:2]
+        view.pick(chosen[0])
+        view.pick(chosen[1], True)
+        count = len(answers)
+        right_click(view, QPoint(view.width()-3, view.height()-3), 'Exporter les 2 photos sélectionnées')
+        settle(window, lambda: window.export_job is None and len(answers) > count)
+        folder = place_of_exports/'Concours - photos choisies'
+        assert sorted(p.name for p in folder.iterdir()) == sorted(photo.path.name for photo in chosen)
+    finally:
+        triphoto_qt.ask = real_ask
     window.close()
     clear_settings()
 
@@ -2920,7 +3026,7 @@ def main():
     app.setStyleSheet(triphoto_qt.STYLE)
     base = Path(tempfile.mkdtemp(prefix='triphoto-tests-'))
     tests = [test_legacy_session, test_nested_session_ignored, test_dominant_color, test_recents, test_shortcuts,
-             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_export_by_its_button, test_themed_dialog, test_update, test_keys_undo_and_ribbon, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_repair_links, test_selection_review_and_health, test_defaults_and_viewer_room, test_user_journey]
+             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_quick_export, test_export_by_its_button, test_themed_dialog, test_update, test_keys_undo_and_ribbon, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_repair_links, test_selection_review_and_health, test_defaults_and_viewer_room, test_user_journey]
     failures = 0
     try:
         for test in tests:

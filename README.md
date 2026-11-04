@@ -122,9 +122,11 @@ L'avion de la barre flottante ou la touche `I` marque une photo à publier. C'es
 
 ## Export
 
-**Exporter…** demande quelles photos du projet copier : notes, marqueur, portfolio, à publier et, dans le portfolio, projet d'origine. Le dialogue part des filtres en cours, ou des 5 étoiles s'il n'y en a aucun, et compte les photos concernées. Il prend tout le projet, pas seulement ce qui est à l'écran, et une photo rejetée n'en sort que si on demande les rejetées.
+**Exporter…** demande quelles photos du projet copier : notes, marqueur, portfolio, à publier, j'aime et, dans le portfolio, projet d'origine. Ces réglages se combinent, par exemple J'aime avec « 3 étoiles et plus ». Le dialogue part des filtres en cours, ou des 5 étoiles s'il n'y en a aucun, et compte les photos concernées. Il prend tout le projet, pas seulement ce qui est à l'écran, et une photo rejetée n'en sort que si on demande les rejetées.
 
 Les copies vont dans `Exportation`, dans un sous-dossier au nom des réglages, par exemple `5 étoiles` ou `4 étoiles et plus, À publier`, ou `Instagram` depuis cette vue. Ce nom se change librement. Une barre de progression suit l'export, et Annuler l'interrompt sans rien laisser. Si ce sous-dossier contient déjà un export, Vision Board demande s'il faut le remplacer ou ranger le nouveau dans un sous-dossier daté, qu'un remplacement ultérieur ne touche pas. Les copies passent par un dossier de travail : un export interrompu laisse le précédent intact.
+
+Le clic droit sur une photo l'exporte aussitôt, sans dialogue, ainsi que toutes les photos sélectionnées si elle en fait partie ; dans le vide, il exporte la sélection en cours. Cela vaut pour toutes les vues et le ruban. Les copies vont dans `Exportation`, dans un sous-dossier `Sélection` daté qui ne remplace rien. Dans une sélection, elles vont à côté de ses exports, sans sous-dossier par bucket, et son dossier d'export n'est demandé que la première fois.
 
 ## Marquage
 

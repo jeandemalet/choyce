@@ -16,7 +16,7 @@ from pathlib import Path
 from collections import OrderedDict
 
 from PySide6.QtCore import Qt, QPoint, QSize, QRectF, QPointF, Signal, Slot, QObject, QRunnable, QThreadPool, QTimer, QItemSelection, QItemSelectionModel, QSettings, QStandardPaths, QUrl
-from PySide6.QtGui import QPixmap, QCursor, QDesktopServices, QIcon, QImage, QPainter, QPainterPath, QColor, QFont, QShortcut, QKeySequence, QColorSpace, QPen
+from PySide6.QtGui import QAction, QPixmap, QCursor, QDesktopServices, QIcon, QImage, QPainter, QPainterPath, QColor, QFont, QShortcut, QKeySequence, QColorSpace, QPen
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QComboBox, QSplitter, QListWidget, QListWidgetItem, QFrame, QScrollArea, QButtonGroup,
     QStackedWidget, QAbstractItemView, QDialog, QFileDialog, QLineEdit, QProgressBar, QStyledItemDelegate, QStyle, QMenu, QColorDialog)
@@ -247,6 +247,7 @@ class Viewer(QWidget):
         super().__init__()
         self.image = QImage()
         self.liked = lambda: None
+        self.add_export_action = lambda menu: None
         self.zoom = 1.0
         self.pan = QPointF()
         self.drag = None
@@ -379,6 +380,7 @@ class Viewer(QWidget):
         menu = self.background_menu(self)
         menu.addSeparator()
         menu.addAction('Ajuster la photo', lambda: self.set_zoom(1))
+        self.add_export_action(menu)
         menu.exec(event.globalPos())
 
 
@@ -529,6 +531,13 @@ class PhotoList(QListWidget):
         self.on_control = False
         if dragged:
             self.owner.bucket_drop(event.globalPosition().toPoint(), dragged)
+
+    def contextMenuEvent(self, event):
+        item = self.itemAt(event.pos())
+        if item:
+            menu = QMenu(self)
+            self.owner.add_export_action(menu, self.owner.clicked_photos(item.data(Qt.ItemDataRole.UserRole)))
+            menu.exec(event.globalPos())
 
 
 class CoverSignals(QObject):
@@ -905,6 +914,7 @@ class ExportDialog(QDialog):
         self.portfolio = self.toggle(toggles, 'Portfolio', choices.portfolio.isChecked())
         self.portfolio.setVisible(not window.viewing_portfolio())
         self.publish = self.toggle(toggles, 'À publier', choices.publish.isChecked())
+        self.liked = self.toggle(toggles, "J'aime", choices.liked.isChecked())
         toggles.addStretch(1)
         grid.addWidget(QLabel('Seulement', objectName='muted'), 2, 0)
         grid.addLayout(toggles, 2, 1)
@@ -980,7 +990,7 @@ class ExportDialog(QDialog):
 
     def photos(self):
         return self.owner.export_selection(self.stars.currentData(), self.marker.currentData(), self.portfolio.isChecked(),
-                                           self.publish.isChecked(), self.project.currentData() if self.project else 'all')
+                                           self.publish.isChecked(), self.project.currentData() if self.project else 'all', self.liked.isChecked())
 
     def suggested_name(self):
         """Named after its settings: "5 étoiles", "4 étoiles et plus, À publier"."""
@@ -991,7 +1001,7 @@ class ExportDialog(QDialog):
             parts.append(self.stars.currentText())
         if self.marker.currentIndex() > 0:
             parts.append(self.marker.currentText().replace(' uniquement', ''))
-        parts += [button.text() for button in (self.portfolio, self.publish) if button.isChecked()]
+        parts += [button.text() for button in (self.portfolio, self.publish, self.liked) if button.isChecked()]
         if self.project and self.project.currentIndex() > 0:
             parts.append(self.project.currentData())
         return ', '.join(parts) or ('Portfolio' if self.owner.viewing_portfolio() else 'Toutes les photos')
@@ -1185,6 +1195,7 @@ class Window(QMainWindow):
         self.viewer = Viewer()
         self.viewer.backgroundChanged.connect(self.background_changed)
         self.viewer.liked = lambda: self.current_photo().liked if self.current_photo() else None
+        self.viewer.add_export_action = lambda menu: self.add_export_action(menu, self.clicked_photos())
         self.viewer.heartClicked.connect(self.toggle_like)
         splitter.addWidget(self.viewer)
         self.list = PhotoList()
@@ -2880,11 +2891,38 @@ class Window(QMainWindow):
         if dialog.exec():
             self.run_export(dialog.photos(), dialog.folder_name())
 
-    def export_selection(self, stars, marker, portfolio, publish, project):
+    def export_selection(self, stars, marker, portfolio, publish, project, liked=False):
         """Among the whole gallery, whatever is on screen. A rejected photo only leaves when asked for."""
         return [p for p in self.session.photos if stars_match(p, stars) and marker_matches(p, marker)
                 and (p.pick != PICK_REJECT or marker == 'reject') and (not portfolio or self.in_portfolio(p))
-                and (not publish or p.publish) and (project == 'all' or self.portfolio.project_of(p.relative_path) == project)]
+                and (not publish or p.publish) and (not liked or p.liked) and (project == 'all' or self.portfolio.project_of(p.relative_path) == project)]
+
+    def clicked_photos(self, photo=None):
+        """What a right click concerns: the photo under the mouse and its selection, or the selection alone on an empty spot."""
+        return self.with_selection(photo) if photo else self.target_photos()
+
+    def add_export_action(self, menu, photos):
+        """At the head of a right click's menu. Exporting one photo, or all those selected, asks nothing."""
+        if not photos:
+            return
+        action = QAction('Exporter cette photo' if len(photos) == 1 else f'Exporter les {len(photos)} photos sélectionnées', menu)
+        action.setEnabled(not (self.export_job or self.relocating or self.update_job))
+        action.triggered.connect(lambda checked=False: self.quick_export(photos))
+        first = menu.actions()[0] if menu.actions() else None
+        menu.insertAction(first, action)
+        if first:
+            menu.insertSeparator(first)
+
+    def quick_export(self, photos):
+        """A folder of its own, named after the moment: nothing to choose and nothing replaced. A rejected photo goes too, since it was asked for."""
+        if self.selection:
+            self.custom.export_photos(photos)
+            return
+        stamp, suffix = f"Sélection {time.strftime('%Y-%m-%d %Hh%M')}", 2
+        name = stamp
+        while (self.session.session_dir/EXPORT_ROOT_NAME/name).exists():
+            name, suffix = f'{stamp}-{suffix}', suffix+1
+        self.run_export(photos, name)
 
     def run_export(self, photos, name):
         if self.viewing_portfolio():

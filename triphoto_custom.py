@@ -1195,7 +1195,11 @@ class Stage(QWidget):
         self.update()
 
     def contextMenuEvent(self, event):
-        self.page.window.viewer.background_menu(self).exec(event.globalPos())
+        window, photo = self.page.window, self.page.current()
+        menu = window.viewer.background_menu(self)
+        if photo:
+            window.add_export_action(menu, [Photo(path=Path(photo['path']), relative_path=photo['path'])])
+        menu.exec(event.globalPos())
 
     def arrows(self):
         return QRectF(14, self.height()/2-22, 44, 44), QRectF(self.width()-58, self.height()/2-22, 44, 44)
@@ -1979,6 +1983,9 @@ class CustomPage(QStackedWidget):
             return
         self.session.data['export_folder'] = chosen
         name = export_folder_name(self.session.name) or 'Custom'
+        window.start_custom_export(ExportJob(present, self.free_destination(chosen, name)), len(present))
+
+    def free_destination(self, chosen, name):
         destination = Path(chosen)/name
         if destination.exists():
             # An earlier export stays as it is, whatever it has become since.
@@ -1986,7 +1993,26 @@ class CustomPage(QStackedWidget):
             destination = Path(chosen)/f'{name} {stamp}'
             while destination.exists():
                 destination, suffix = Path(chosen)/f'{name} {stamp}-{suffix}', suffix+1
-        window.start_custom_export(ExportJob(present, destination), len(present))
+        return destination
+
+    def export_photos(self, photos):
+        """From a right click: these photos side by side, where this selection exports. The folder is asked for once."""
+        chosen = self.session.data.get('export_folder', '')
+        if not chosen or not Path(chosen).is_dir():
+            chosen = self.ask_export_folder()
+            if not chosen:
+                return
+            self.session.data['export_folder'] = chosen
+        plan, used = [], set()
+        for photo in photos:
+            stem, suffix = os.path.splitext(photo.path.name)
+            name, number = stem+suffix, 2
+            while name.lower() in used:
+                name, number = f'{stem} ({number}){suffix}', number+1
+            used.add(name.lower())
+            plan.append(('', name, photo.relative_path))
+        name = f"{export_folder_name(self.session.name) or 'Custom'} - photos choisies"
+        self.window.start_custom_export(ExportJob(plan, self.free_destination(chosen, name)), len(plan))
 
     def remove_photos(self, paths):
         self.session.remove_photos(paths)
