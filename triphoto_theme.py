@@ -262,12 +262,13 @@ def draw_send(painter, rect, color, filled=False):
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     r = QRectF(rect)
     tip = QPointF(r.right(), r.top())
-    points = QPolygonF([QPointF(r.left(), r.top()+r.height()*.08), tip, QPointF(r.left()+r.width()*.6, r.bottom()),
-                        QPointF(r.left()+r.width()*.42, r.top()+r.height()*.46)])
+    # Slanted, with a deep notch: with a flat top it reads as a funnel once small and filled.
+    notch = QPointF(r.left()+r.width()*.4, r.top()+r.height()*.6)
+    points = QPolygonF([QPointF(r.left(), r.top()+r.height()*.38), tip, QPointF(r.left()+r.width()*.62, r.bottom()), notch])
     painter.setBrush(QColor(color) if filled else Qt.BrushStyle.NoBrush)
     painter.setPen(QPen(QColor(color), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
     painter.drawPolygon(points)
-    painter.drawLine(QPointF(r.left()+r.width()*.42, r.top()+r.height()*.46), tip)
+    painter.drawLine(notch, tip)
     painter.restore()
 
 

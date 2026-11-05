@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup, QGri
     QLineEdit, QPushButton, QScrollBar, QSlider, QStackedWidget, QVBoxLayout, QWidget)
 from PIL import Image, ImageStat
 from triphoto import PICK_NEUTRAL, PICK_REJECT, PICK_SELECT
+from triphoto_prefs import MARK_TIPS
 from triphoto_theme import ACCENT, ASSETS, BACKGROUNDS, FAINT, MUTED, REJECT, SELECT, TEXT, contrast_on, draw_bookmark, draw_bucket_chips, draw_check, draw_clear_star, draw_comment, draw_cross, draw_flag, draw_heart, draw_send, draw_stars
 
 # The color view has no button: it is the grid sorted by something else than the name.
@@ -300,10 +301,10 @@ class RatingBar(QWidget):
         keep, send = self.choice_rects()
         point = event.position()
         marks = self.mark_rects()
-        self.setToolTip('Retirer les étoiles' if self.clear_rect().contains(point) else 'Portfolio : ajouter ou retirer' if keep.contains(point)
-                        else 'À publier : marquer ou retirer' if send.contains(point)
-                        else ('Retenir' if marks[0].contains(point) else 'Rejeter' if marks[-1].contains(point) else '') if self.window.marker == 'pick'
-                        else 'Drapeau' if marks[0].contains(point) else '')
+        self.setToolTip('Retirer les étoiles' if self.clear_rect().contains(point) else MARK_TIPS['portfolio'] if keep.contains(point)
+                        else MARK_TIPS['publish'] if send.contains(point)
+                        else (MARK_TIPS['select'] if marks[0].contains(point) else MARK_TIPS['reject'] if marks[-1].contains(point) else '') if self.window.marker == 'pick'
+                        else MARK_TIPS['flag'] if marks[0].contains(point) else '')
 
     def mousePressEvent(self, event):
         # Otherwise the press reaches the photo under the bar, which then follows the mouse.
@@ -495,7 +496,7 @@ class Surface(QWidget):
     def hover_badge(self, position):
         hit = self.badge_hit(position)
         self.setCursor(Qt.CursorShape.PointingHandCursor) if hit else self.unsetCursor()
-        self.setToolTip({'clear': 'Retirer les étoiles', 'heart': "J'aime"}[hit[1]] if hit else '')
+        self.setToolTip({'clear': 'Retirer les étoiles', 'heart': MARK_TIPS['like']}[hit[1]] if hit else '')
 
     def targets(self):
         return self.window_.selected_photos() if self.active else []
@@ -651,7 +652,7 @@ class Surface(QWidget):
         elif photo.pick == PICK_REJECT:
             draw_cross(painter, icon, REJECT)
         x += 15 if photo.pick != PICK_NEUTRAL else 0
-        if self.window_.portfolio.contains(photo.path):
+        if self.window_.in_portfolio(photo):
             draw_bookmark(painter, QRectF(x-3, plate.top()+5, 9, 9), ACCENT, True)
             x += 15
         if photo.publish:
@@ -1857,7 +1858,7 @@ class ChoiceFilter(QFrame):
     def set_buckets(self):
         """Inside a selection, the filter on its buckets takes the place of the choice of a project."""
         self.project.hide()
-        self.portfolio.hide()
+        self.portfolio.show()
         self.window.bucket_rule.rebuild()
         self.window.bucket_rule.show()
 
@@ -2157,7 +2158,7 @@ class InstagramView(Surface):
             left, right = self.chevrons()
             near = self.action_at(position) or left.contains(position) or right.contains(position)
             self.setCursor(Qt.CursorShape.PointingHandCursor) if near else self.unsetCursor()
-            self.setToolTip({'send': 'À publier', 'keep': 'Portfolio', 'heart': "J'aime"}.get(self.action_at(position), ''))
+            self.setToolTip({'send': MARK_TIPS['publish'], 'keep': MARK_TIPS['portfolio'], 'heart': MARK_TIPS['like']}.get(self.action_at(position), ''))
 
     def mouseReleaseEvent(self, event):
         self.pan_drag = None
@@ -2433,11 +2434,9 @@ class ReviewPage(QWidget):
         self.account_edit.textEdited.connect(self.set_instagram_account)
         self.account_edit.returnPressed.connect(self.account_edit.clearFocus)
         row.addWidget(self.account_edit)
-        insta_right, row = self.option_pill()
-        self.publish_only = self.option_button(row, 'À publier', lambda *_: self.window.choices.publish.click(), True)
         self.sync_color_order()
         self.options = {'toile': (None, toile_pill), 'swipe': (swipe_left, swipe_right), 'color': (color_left, color_pill), 'wall': (wall_left, wall_right),
-                        'instagram': (insta_left, insta_right)}
+                        'instagram': (insta_left, None)}
         self.refresh_marker_options()
 
     def sort_controls(self, row, shuffled=False):
@@ -2536,7 +2535,6 @@ class ReviewPage(QWidget):
     def sync_filters(self):
         self.note_filter.sync()
         self.marker_filter.sync()
-        self.publish_only.setChecked(self.window.choices.publish.isChecked())
 
     def instagram_account(self):
         return self.settings.value('instagram_account', 'votre_compte') or 'votre_compte'

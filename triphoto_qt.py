@@ -17,7 +17,7 @@ from collections import OrderedDict
 
 from PySide6.QtCore import Qt, QPoint, QSize, QRectF, QPointF, Signal, Slot, QObject, QRunnable, QThreadPool, QTimer, QItemSelection, QItemSelectionModel, QSettings, QStandardPaths, QUrl
 from PySide6.QtGui import QAction, QPixmap, QCursor, QDesktopServices, QIcon, QImage, QPainter, QPainterPath, QColor, QFont, QShortcut, QKeySequence, QColorSpace, QPen
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+from PySide6.QtWidgets import (QToolTip, QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QComboBox, QSplitter, QListWidget, QListWidgetItem, QFrame, QScrollArea, QButtonGroup,
     QStackedWidget, QAbstractItemView, QDialog, QFileDialog, QLineEdit, QProgressBar, QStyledItemDelegate, QStyle, QMenu, QColorDialog)
 from PIL import Image, ImageCms, ImageWin
@@ -25,7 +25,7 @@ from triphoto import (export_folder_name, APP_NAME, APP_VERSION, PhotoSession, s
     export_original_copy, EXPORT_DIR_NAME, PICK_NEUTRAL, PICK_REJECT, PICK_SELECT, SESSION_DIR_NAME)
 from triphoto_custom import BucketFilter, BucketStrip, CustomPage, PopupMenu, ReviewTabs, SelectionSession
 from triphoto_portfolio import MANIFEST_FILE, Portfolio, PortfolioSession, RelocateJob, UNSORTED
-from triphoto_prefs import (ALIASES, LinkSearchJob, PreferencesDialog, Recents, ScanJob, age_label, ask, inform, known_links, locate_photos, locate_project, moved_path, path_key, shortcut_map)
+from triphoto_prefs import (ALIASES, LinkSearchJob, MARK_TIPS, PreferencesDialog, Recents, age_label, ask, inform, known_links, locate_photos, locate_project, moved_path, path_key, shortcut_map)
 from triphoto_review import MODES, BackgroundPicker, ChoiceFilter, MarkerFilter, NoteFilter, RatingBar, ReviewPage
 from triphoto_update import UpdateCheck, UpdateDownload, can_install, launch_installer, write_installer
 from triphoto_theme import (ACCENT, ASSETS, BACKGROUNDS, FAINT, INK, RAISED, REJECT, SELECT, STYLE, TEXT,
@@ -251,7 +251,7 @@ class Viewer(QWidget):
         self.zoom = 1.0
         self.pan = QPointF()
         self.drag = None
-        self.message = 'Ouvrez un dossier pour commencer'
+        self.message = 'Ajoutez des photos pour commencer'
         self.settings = app_settings()
         self.background = self.settings.value('background', '#808080')
         self.setMinimumSize(360, 260)
@@ -388,6 +388,20 @@ class PhotoDelegate(QStyledItemDelegate):
     def __init__(self, window):
         super().__init__(window)
         self.window = window
+
+    def helpEvent(self, event, view, option, index):
+        """The icons of a thumbnail say what they are, in the same words as everywhere else."""
+        rect = self.card(option)
+        thumb = QRectF(rect.x(), rect.y(), rect.width(), rect.height()-28)
+        keep = self.bookmark(thumb)
+        point = QPointF(event.pos())
+        tip = MARK_TIPS['portfolio'] if keep.adjusted(-3, -3, 3, 3).contains(point) else MARK_TIPS['like'] if self.heart(thumb).adjusted(-3, -3, 3, 3).contains(point) else None
+        if tip is None and index.data(Qt.ItemDataRole.UserRole).publish and QRectF(keep.left()+16, thumb.top()+6, 13, 13).contains(point):
+            tip = MARK_TIPS['publish']
+        if tip:
+            QToolTip.showText(event.globalPos(), tip, view)
+            return True
+        return super().helpEvent(event, view, option, index)
 
     def sizeHint(self, option, index):
         return QSize(250, self.window.list.row_height())
@@ -760,8 +774,8 @@ class HomePage(QWidget):
         self.actions.addWidget(self.section)
         self.add_button = QPushButton('Ajouter des photos', objectName='primary')
         self.add_button.clicked.connect(lambda checked=False: window.open_folder())
-        self.find_button = QPushButton("Retrouver d'anciens projets", objectName='ghost')
-        self.find_button.clicked.connect(lambda checked=False: window.find_projects())
+        self.find_button = QPushButton('Rechercher sur un disque', objectName='ghost')
+        self.find_button.clicked.connect(lambda checked=False: window.search_links())
         self.lead = QWidget()
         self.trail = QWidget()
         self.actions.addWidget(self.lead, 1)
@@ -904,9 +918,9 @@ class ExportDialog(QDialog):
         grid.setVerticalSpacing(8)
         self.stars = self.copy_combo(window.stars)
         self.marker = self.copy_combo(window.flags)
-        grid.addWidget(QLabel('Notes', objectName='muted'), 0, 0)
+        grid.addWidget(QLabel('Note', objectName='muted'), 0, 0)
         grid.addWidget(self.stars, 0, 1)
-        grid.addWidget(QLabel('Marqueur', objectName='muted'), 1, 0)
+        grid.addWidget(QLabel(window.marker_section.title.text(), objectName='muted'), 1, 0)
         grid.addWidget(self.marker, 1, 1)
         choices = window.choices
         toggles = QHBoxLayout()
@@ -1103,7 +1117,6 @@ class Window(QMainWindow):
         self.undo_stack = []
         self.redo_stack = []
         self.shortcuts = []
-        self.scans = []
         self.link_search = None
         self.display_profile = None
         self.display_signature = None
@@ -1136,7 +1149,7 @@ class Window(QMainWindow):
         self.home_button = self.button(left, '‹ Accueil', self.go_home, 'ghost')
         self.home_button.setToolTip('Revenir à l’accueil. Vos notes et vos rangements sont enregistrés.')
         self.home_button.hide()
-        self.project_button = QPushButton('Projets', objectName='menu')
+        self.project_button = QPushButton('Ouvrir', objectName='menu')
         self.project_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.project_menu = QMenu(self)
         self.project_menu.aboutToShow.connect(self.fill_project_menu)
@@ -1263,7 +1276,7 @@ class Window(QMainWindow):
         filter_lines.setContentsMargins(16, 14, 14, 16)
         filter_lines.setSpacing(6)
         filter_top = QHBoxLayout()
-        filter_top.addWidget(QLabel('Filtres', objectName='dialogTitle'))
+        filter_top.addWidget(QLabel('Filtre', objectName='dialogTitle'))
         filter_top.addStretch(1)
         self.button(filter_top, 'Tout effacer', self.clear_filters, 'ghost')
         filter_lines.addLayout(filter_top)
@@ -1916,8 +1929,7 @@ class Window(QMainWindow):
         absent = len(getattr(self.session, 'absent', ()))
         if absent:
             menu.addAction(f'Retrouver les photos manquantes ({absent})…', self.repair_photos)
-        menu.addAction("Retrouver d'anciens projets…", self.find_projects)
-        menu.addAction('Recherche complète des liens…', self.search_links)
+        menu.addAction('Rechercher sur un disque…', self.search_links)
         menu.addSeparator()
         menu.addAction("Revenir à l'accueil", self.go_home).setEnabled(self.session is not None or self.custom_active)
 
@@ -2000,7 +2012,7 @@ class Window(QMainWindow):
         return changed
 
     def search_links(self):
-        """Everything lost, looked for in one pass over a disk or a folder."""
+        """Everything lost, and the projects not listed yet, looked for on a disk or in a folder."""
         if self.link_search:
             self.toast('Une recherche est déjà en cours.')
             return
@@ -2008,54 +2020,39 @@ class Window(QMainWindow):
         if not chosen:
             return
         self.custom.save()
-        self.toast('Recherche complète en cours…', 600000)
+        self.toast('Recherche sur le disque en cours…', 600000)
         self.link_search = LinkSearchJob(*known_links(self.portfolio, self.custom.store.sessions(), self.recents), chosen)
         self.link_search.signals.done.connect(self.links_found, Qt.ConnectionType.QueuedConnection)
         self.pool.start(self.link_search, 1)
 
-    def links_found(self, moves, photos, folders):
+    def links_found(self, moves, photos, folders, projects):
         self.link_search = None
         self.toast_frame.hide()
-        if not photos and not folders:
-            inform(self, 'Recherche complète', 'Aucun lien perdu : tous les projets et toutes les photos sont à leur place.')
-            return
         for old, new in moves.items():
             if self.portfolio.folder is not None and str(self.portfolio.folder) == old:
                 self.portfolio.set_folder(new)
             self.recents.relocate(old, new)
-        self.apply_found(moves)
+        if moves:
+            self.apply_found(moves)
+        added = self.recents.merge([entry for entry in projects if not self.is_portfolio_path(entry['path'])])
         found = sum(Path(new).is_file() for new in moves.values())
         places = len(moves)-found
         left = photos+folders-len(moves)
-        lines = [f"{found} photo{'s' if found > 1 else ''} retrouvée{'s' if found > 1 else ''} sur {photos}."]
+        lines = []
+        if photos:
+            lines.append(f"{found} photo{'s' if found > 1 else ''} retrouvée{'s' if found > 1 else ''} sur {photos}.")
         if folders:
             lines.append(f"{places} dossier{'s' if places > 1 else ''} retrouvé{'s' if places > 1 else ''} sur {folders}.")
         if left:
             lines.append(f"{left} restent introuvables : ils sont peut-être sur un autre disque." if left > 1 else 'Un élément reste introuvable : il est peut-être sur un autre disque.')
-        inform(self, 'Recherche complète', '\n'.join(lines))
+        if added:
+            lines.append(f"{added} nouveau{'x' if added > 1 else ''} projet{'s' if added > 1 else ''} sur l'accueil.")
+        inform(self, 'Recherche sur le disque', '\n'.join(lines) or 'Rien de perdu ni de nouveau : tout est déjà à sa place.')
         self.home.refresh()
 
     def forget_recent(self, path):
         self.recents.remove(path)
         self.home.refresh()
-
-    def find_projects(self):
-        chosen = QFileDialog.getExistingDirectory(self, "Dossier ou disque où chercher d'anciens projets")
-        if not chosen:
-            return
-        self.toast('Recherche des projets en cours…', 60000)
-        job = ScanJob(chosen)
-        job.signals.done.connect(self.projects_found, Qt.ConnectionType.QueuedConnection)
-        self.scans.append(job)
-        self.pool.start(job, 1)
-
-    def projects_found(self, found):
-        self.scans.clear()
-        found = [entry for entry in found if not self.is_portfolio_path(entry['path'])]
-        added = self.recents.merge(found)
-        self.toast(f'{len(found)} projets trouvés, {added} ajoutés aux récents.' if found else 'Aucun ancien projet dans ce dossier.')
-        if self.pages.currentIndex() == 0:
-            self.home.refresh()
 
     def prompt_for_photos(self):
         # With recent projects to pick from, the file dialog would only be in the way.
@@ -2088,7 +2085,7 @@ class Window(QMainWindow):
 
     def show_open_name(self):
         """The menu of the projects says which one is open."""
-        name = self.selection.name if self.selection else 'Portfolio' if self.viewing_portfolio() else project_label(self.project_path) if self.session else 'Projets'
+        name = self.selection.name if self.selection else 'Portfolio' if self.viewing_portfolio() else project_label(self.project_path) if self.session else 'Ouvrir'
         metrics = self.project_button.fontMetrics()
         shown = metrics.elidedText(name, Qt.TextElideMode.ElideMiddle, 170)
         self.project_button.setText(shown.replace('&', '&&'))
@@ -2961,7 +2958,7 @@ class Window(QMainWindow):
         if self.selection:
             self.custom.export_photos(photos)
             return
-        stamp, suffix = f"Sélection {time.strftime('%Y-%m-%d %Hh%M')}", 2
+        stamp, suffix = f"Photos choisies {time.strftime('%Y-%m-%d %Hh%M')}", 2
         name = stamp
         while (self.session.session_dir/EXPORT_ROOT_NAME/name).exists():
             name, suffix = f'{stamp}-{suffix}', suffix+1

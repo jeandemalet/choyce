@@ -31,10 +31,10 @@ ACTIONS = [
     ('rate3', '3 étoiles', ['3']),
     ('rate4', '4 étoiles', ['4']),
     ('rate5', '5 étoiles', ['5', 'Shift+V']),
-    ('flag', 'Drapeau', ['F']),
-    ('like', "J'aime", ['L']),
-    ('portfolio', 'Ajouter au portfolio ou retirer', ['K']),
-    ('publish', 'À publier', ['I']),
+    ('flag', 'Drapeau : ajouter ou retirer', ['F']),
+    ('like', "J'aime : ajouter ou retirer", ['L']),
+    ('portfolio', 'Portfolio : ajouter ou retirer', ['K']),
+    ('publish', 'À publier : ajouter ou retirer', ['I']),
     ('select', 'Retenir', ['P']),
     ('reject', 'Rejeter', ['X']),
     ('neutral', 'Neutre', ['U']),
@@ -52,16 +52,21 @@ ACTIONS = [
     ('mode_classic', 'Vue Classique', ['Ctrl+0']),
     ('mode_wall', 'Vue Grille', ['Ctrl+1']),
     ('mode_toile', 'Vue Pêle-mêle', ['Ctrl+2']),
-    ('mode_color', 'Vue Grille triée', ['Ctrl+3']),
+    ('mode_color', 'Vue Grille, triée par couleur', ['Ctrl+3']),
     ('mode_swipe', 'Vue Tindr', ['Ctrl+4']),
     ('mode_instagram', 'Vue Instagram', ['Ctrl+5']),
     ('custom_home', 'Accueil', ['Ctrl+6']),
-    ('refresh', 'Actualiser le dossier', ['F5']),
-    ('open', 'Ouvrir un projet', ['Ctrl+O']),
+    ('refresh', 'Actualiser le projet', ['F5']),
+    ('open', 'Ajouter des photos', ['Ctrl+O']),
     ('close', 'Fermer le projet', ['Ctrl+W']),
     ('preferences', 'Préférences', ['Ctrl+,']),
 ]
 # Not listed in the dialog: Shift held after rating must still navigate.
+# The name of each mark, the same in every tooltip.
+MARK_TIPS = {'portfolio': 'Portfolio : ajouter ou retirer', 'publish': 'À publier : ajouter ou retirer', 'like': "J'aime : ajouter ou retirer",
+             'flag': 'Drapeau : ajouter ou retirer', 'select': 'Retenir', 'reject': 'Rejeter'}
+# Each marking system only shows its own commands.
+MARKER_ACTIONS = {'flag': ('flag',), 'pick': ('select', 'reject', 'neutral')}
 ALIASES = {'prev': ['Shift+Left'], 'next': ['Shift+Right'], 'redo': ['Ctrl+Shift+Z']}
 
 
@@ -347,22 +352,8 @@ def find_sessions(folder, max_depth=6):
     return found
 
 
-class ScanSignals(QObject):
-    done = Signal(list)
-
-
-class ScanJob(QRunnable):
-    def __init__(self, folder):
-        super().__init__()
-        self.folder = folder
-        self.signals = ScanSignals()
-
-    def run(self):
-        self.signals.done.emit(find_sessions(self.folder))
-
-
 class LinkSearchSignals(QObject):
-    done = Signal(dict, int, int)
+    done = Signal(dict, int, int, list)
 
 
 class LinkSearchJob(QRunnable):
@@ -376,7 +367,8 @@ class LinkSearchJob(QRunnable):
         photos = {path for path in self.photos if not os.path.isfile(path)}
         folders = {path: cover for path, cover in self.folders.items() if not os.path.isdir(path)}
         moves = search_links(photos, folders, self.root, lambda: self.cancelled) if photos or folders else {}
-        self.signals.done.emit(moves, len(photos), len(folders))
+        projects = find_sessions(self.root) if not self.cancelled else []
+        self.signals.done.emit(moves, len(photos), len(folders), projects)
 
 
 def age_label(timestamp):
@@ -448,6 +440,8 @@ class PreferencesDialog(QDialog):
                 self.table.setCellWidget(row, column+1, edit)
                 self.edits[name].append(edit)
             self.table.setRowHeight(row, 36)
+        self.marker.buttonToggled.connect(lambda *_: self.show_marker_actions())
+        self.show_marker_actions()
         self.table.setColumnWidth(1, 130)
         self.table.setColumnWidth(2, 130)
         layout.addWidget(self.table, 1)
@@ -462,6 +456,11 @@ class PreferencesDialog(QDialog):
         box.button(QDialogButtonBox.StandardButton.Cancel).setText('Annuler')
         buttons.addWidget(box)
         layout.addLayout(buttons)
+
+    def show_marker_actions(self):
+        current = self.marker.checkedButton().property('key')
+        for row, (name, _, _) in enumerate(ACTIONS):
+            self.table.setRowHidden(row, any(name in names and key != current for key, names in MARKER_ACTIONS.items()))
 
     def show_portfolio_place(self):
         folder = self.parent().portfolio.folder

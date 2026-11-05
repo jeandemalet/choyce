@@ -521,7 +521,7 @@ class ReviewTabs(QFrame):
 
 class BucketFilter(QFrame):
     """The buckets in the Filtre panel: for each one, plainly, whether its photos are left out, kept in, or whether it does not matter."""
-    STATES = (('exclude', 'Exclure', 'stateOff'), ('include', 'Inclure', 'stateOn'), ('', 'Peu importe', 'state'))
+    STATES = (('', 'Peu importe', 'state'), ('include', 'Inclure', 'stateOn'), ('exclude', 'Exclure', 'stateOff'))
 
     def __init__(self, window):
         super().__init__()
@@ -1002,7 +1002,7 @@ class SetupPage(QWidget):
     def refresh(self):
         reading = any(row.check.isChecked() and row.photos is None and not row.missing for row in self.rows.values())
         count = len(self.chosen())
-        self.total.setText('Lecture des projets…' if reading else f"{count} photo{'s' if count > 1 else ''} sélectionnée{'s' if count > 1 else ''}")
+        self.total.setText('Lecture des projets…' if reading else f"{count} photo{'s' if count > 1 else ''} dans cette sélection")
         self.go.setEnabled(not reading and bool(count or self.session) and bool(self.name.text().strip()))
 
     def confirm(self):
@@ -2024,7 +2024,7 @@ class CustomPage(QStackedWidget):
         if not chosen:
             return
         self.session.data['export_folder'] = chosen
-        name = export_folder_name(self.session.name) or 'Custom'
+        name = export_folder_name(self.session.name) or 'Sélection'
         window.start_custom_export(ExportJob(present, self.free_destination(chosen, name)), len(present))
 
     def free_destination(self, chosen, name):
@@ -2053,7 +2053,7 @@ class CustomPage(QStackedWidget):
                 name, number = f'{stem} ({number}){suffix}', number+1
             used.add(name.lower())
             plan.append(('', name, photo.relative_path))
-        name = f"{export_folder_name(self.session.name) or 'Custom'} - photos choisies"
+        name = f"{export_folder_name(self.session.name) or 'Sélection'} - photos choisies"
         self.window.start_custom_export(ExportJob(plan, self.free_destination(chosen, name)), len(plan))
 
     def remove_photos(self, paths):

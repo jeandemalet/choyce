@@ -1735,9 +1735,9 @@ def test_instagram(base):
     assert view.frames()[1].height() < height*.6
     view.zoom_reset()
     # À publier as a filter of the carousel, from its own bar.
-    review.publish_only.click()
+    window.choices.publish.click()
     assert [p.relative_path for p in view.deck] == [photo.relative_path] and window.choices.publish.isChecked()
-    review.publish_only.click()
+    window.choices.publish.click()
     assert len(view.deck) == 8
     window.close()
     window.portfolio.wait()
@@ -2781,6 +2781,42 @@ def test_repair_links(base):
     clear_settings()
 
 
+def test_same_words_everywhere(base):
+    clear_settings()
+    root = make_project(base/'mots', 4)
+    window = open_window(root)
+    photos = window.photos
+    # Each marking system lists its own commands only.
+    dialog = triphoto_prefs.PreferencesDialog(window, window.settings)
+    rows = {name: row for row, (name, _, _) in enumerate(triphoto_prefs.ACTIONS)}
+    assert not dialog.table.isRowHidden(rows['flag']) and dialog.table.isRowHidden(rows['reject'])
+    next(button for button in dialog.marker.buttons() if button.property('key') == 'pick').setChecked(True)
+    assert dialog.table.isRowHidden(rows['flag']) and not dialog.table.isRowHidden(rows['reject'])
+    dialog.reject()
+    # The export dialog names the filter like the panel does.
+    export = triphoto_qt.ExportDialog(window)
+    assert [label.text() for label in export.findChildren(triphoto_qt.QLabel) if label.text() in ('Note', 'Drapeau', 'Notes', 'Marqueur')] == ['Note', 'Drapeau']
+    export.reject()
+    # A selection shows the signet of the portfolio, so it can filter on it too.
+    window.portfolio.set_folder(base/'mots copies') if (base/'mots copies').mkdir() is None else None
+    window.toggle_portfolio()
+    window.close_project()
+    window.pool.waitForDone()
+    window.review.analysis_pool.waitForDone()
+    sorting = window.custom.store.create('Mots')
+    sorting.data['photos'] = [{'path': str(p.path), 'gallery': 'x', 'relative': p.path.name} for p in photos]
+    sorting.save()
+    window.open_custom(sorting)
+    window.set_view('wall')
+    settle(window, lambda: len(window.photos) == 4)
+    assert not window.choices.portfolio.isHidden()
+    window.choices.portfolio.click()
+    settle(window, lambda: len(window.photos) == 1)
+    window.choices.portfolio.click()
+    window.close()
+    clear_settings()
+
+
 def test_search_links(base):
     clear_settings()
     root = make_project(base/'recherche'/'avant'/'Temp Mariage', 6)
@@ -2838,7 +2874,7 @@ def test_search_links(base):
         window.search_links()
         window.pool.waitForDone()
         wait(100)
-        assert answers[-1].startswith('Aucun lien perdu')
+        assert answers[-1].startswith('Rien de perdu')
         window.close()
     finally:
         triphoto_qt.inform = real_inform
@@ -3054,7 +3090,7 @@ def test_user_journey(base):
     window.review.view().pick(window.photos[2])
     wanted = window.current_photo().relative_path
     window.go_home()
-    assert window.pages.currentIndex() == 0 and window.project_button.text() == 'Projets'
+    assert window.pages.currentIndex() == 0 and window.project_button.text() == 'Ouvrir'
     home = window.home
     wait()
     assert home.grid_holder.y() < home.portfolio_card.y() < home.custom_button.y()
@@ -3101,7 +3137,7 @@ def main():
     app.setStyleSheet(triphoto_qt.STYLE)
     base = Path(tempfile.mkdtemp(prefix='triphoto-tests-'))
     tests = [test_legacy_session, test_nested_session_ignored, test_dominant_color, test_recents, test_shortcuts,
-             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_quick_export, test_export_by_its_button, test_themed_dialog, test_update, test_keys_undo_and_ribbon, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_repair_links, test_search_links, test_selection_review_and_health, test_defaults_and_viewer_room, test_user_journey]
+             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_quick_export, test_export_by_its_button, test_themed_dialog, test_update, test_keys_undo_and_ribbon, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_repair_links, test_same_words_everywhere, test_search_links, test_selection_review_and_health, test_defaults_and_viewer_room, test_user_journey]
     failures = 0
     try:
         for test in tests:
