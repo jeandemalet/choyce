@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections import deque
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QObject, QRunnable, Signal
@@ -15,6 +16,10 @@ from triphoto import SESSION_DIR_NAME, SESSION_FILE_NAME, SUPPORTED_EXTENSIONS
 MAX_RECENTS = 30
 SCAN_SKIPPED = {'$recycle.bin', 'system volume information', 'windows', 'program files', 'program files (x86)',
                 'programdata', 'appdata', 'node_modules', '.git'}
+# Say nothing of a project on their own: only the folder above them does.
+GENERIC_FOLDERS = {'output', 'selects', 'capture', 'export', 'raw', 'jpeg', 'jpg'}
+# From this many photos, a folder holding them all is the lost one whatever its name.
+SURE_FOLDER = 5
 
 # (identifier, label, default keys). Two keys at most per action.
 ACTIONS = [
@@ -224,18 +229,94 @@ def locate_project(old, chosen):
     return (chosen, 'photos') if photos_below(chosen) else (None, 'empty')
 
 
+def closeness(old, candidate):
+    """How many folders two paths share, counted from the end."""
+    same = 0
+    for a, b in zip(reversed(Path(old).parts), reversed(Path(candidate).parts)):
+        if a.lower() != b.lower():
+            break
+        same += 1
+    return same
+
+
 def locate_photos(missing, chosen):
     """Each lost path found by its name below a folder, as {old: new}. Among several, the one in the most similar folders."""
     below = photos_below(chosen)
-    def closeness(old, candidate):
-        same = 0
-        for a, b in zip(reversed(Path(old).parent.parts), reversed(Path(candidate).parent.parts)):
-            if a.lower() != b.lower():
-                break
-            same += 1
-        return same
-    return {old: max(below[Path(old).name.lower()], key=lambda candidate: closeness(old, candidate))
+    return {old: max(below[Path(old).name.lower()], key=lambda candidate: closeness(Path(old).parent, Path(candidate).parent))
             for old in missing if Path(old).name.lower() in below}
+
+
+def known_links(portfolio, sessions, recents):
+    """Every place Vision Board refers to, as (photos, {project folder: name of its cover}). Touches no disk."""
+    photos, folders = set(), {}
+    for item in portfolio.items.values():
+        if item.get('linked') and item.get('source'):
+            photos.add(item['source'])
+    for session in sessions:
+        photos.update(photo['path'] for photo in session.photos)
+        photos.update(session.data.get('removed', []))
+        for source in session.data.get('sources', []):
+            folders.setdefault(source['key'], '')
+    for entry in recents.entries():
+        folders[entry['path']] = Path(entry.get('cover') or '').name
+    if portfolio.folder is not None:
+        folders.setdefault(str(portfolio.folder), '')
+    return photos, folders
+
+
+def search_links(photos, folders, root, cancelled=lambda: False):
+    """Where lost photos and folders are now below a disk, as {old: new}.
+
+    One pass over the folders, shallowest first, keeping only the names looked for. It ends as soon as
+    each lost folder of photos has been found whole and no project remains to find, which spares the rest of the disk.
+    """
+    wanted = {}
+    for path in photos:
+        wanted.setdefault(str(Path(path).parent), set()).add(Path(path).name.lower())
+    names = set().union(*wanted.values()) if wanted else set()
+    names.update(cover.lower() for cover in folders.values() if cover)
+    hits, projects, pending = {}, [], set(wanted)
+    queue = deque([os.path.normpath(str(root))])
+    while queue and not cancelled() and (pending or folders):
+        current = queue.popleft()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    name = entry.name.lower()
+                    if entry.is_dir(follow_symlinks=False):
+                        if entry.name == SESSION_DIR_NAME:
+                            projects.append(current)
+                        elif name not in SCAN_SKIPPED and not name.startswith('.'):
+                            queue.append(entry.path)
+                    elif name in names:
+                        hits.setdefault(current, {})[name] = entry.name
+        except OSError:
+            continue
+        if current in hits:
+            pending = {folder for folder in pending if not (wanted[folder] <= hits[current].keys()
+                       and (len(wanted[folder]) >= SURE_FOLDER or Path(folder).name.lower() == Path(current).name.lower()))}
+    moves, best = {}, {}
+    # The folder holding the most photos of a lost one takes them all, so that a stray copy elsewhere does not scatter them.
+    for folder, lost in wanted.items():
+        held = [place for place, found in hits.items() if lost & found.keys()]
+        if held:
+            best[folder] = max(held, key=lambda place: (len(lost & hits[place].keys()), closeness(folder, place)))
+    for path in photos:
+        folder, name = str(Path(path).parent), Path(path).name.lower()
+        place = best.get(folder)
+        if place and name not in hits[place]:
+            place = max((p for p, found in hits.items() if name in found), key=lambda p: closeness(folder, p), default=None)
+        if place:
+            moves[path] = os.path.join(place, hits[place][name])
+    for folder, cover in folders.items():
+        needed = 2 if Path(folder).name.lower() in GENERIC_FOLDERS else 1
+        ranked = sorted(((cover.lower() in hits.get(place, {}), closeness(folder, place), place) for place in projects
+                         if closeness(folder, place) >= needed or cover.lower() in hits.get(place, {})), reverse=True)
+        if ranked and (len(ranked) == 1 or ranked[0][:2] != ranked[1][:2]):
+            moves[folder] = ranked[0][2]
+        elif folder in best:
+            moves[folder] = best[folder]
+    return moves
 
 
 def summary(photos):
@@ -278,6 +359,24 @@ class ScanJob(QRunnable):
 
     def run(self):
         self.signals.done.emit(find_sessions(self.folder))
+
+
+class LinkSearchSignals(QObject):
+    done = Signal(dict, int, int)
+
+
+class LinkSearchJob(QRunnable):
+    def __init__(self, photos, folders, root):
+        super().__init__()
+        self.photos, self.folders, self.root = photos, folders, root
+        self.cancelled = False
+        self.signals = LinkSearchSignals()
+
+    def run(self):
+        photos = {path for path in self.photos if not os.path.isfile(path)}
+        folders = {path: cover for path, cover in self.folders.items() if not os.path.isdir(path)}
+        moves = search_links(photos, folders, self.root, lambda: self.cancelled) if photos or folders else {}
+        self.signals.done.emit(moves, len(photos), len(folders))
 
 
 def age_label(timestamp):

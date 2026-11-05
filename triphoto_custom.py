@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QFil
 from triphoto import SESSION_DIR_NAME, SESSION_FILE_NAME, Photo, PhotoSession, export_folder_name, write_json_atomic
 from triphoto_portfolio import PortfolioSession, move_to_trash, source_key
 from triphoto_prefs import ask, inform
-from triphoto_review import BackgroundPicker
+from triphoto_review import ANALYSIS_FILE, STATE_FILE, BackgroundPicker
 from triphoto_theme import CONTROL, FAINT, INK, MUTED, RAISED, TEXT, contrast_on, draw_tick, pastel
 
 PREVIEW_SIDE = 2000
@@ -156,30 +156,72 @@ class Sorting:
         self.data['photos'] = photos+sorted_before
 
     def repoint(self, moves):
-        """New places of photos, as a function from an old path to a new one or None. Nothing sorted is lost."""
-        changed = {}
+        """New places of photos, as a function from an old path to a new one or None. Nothing sorted is lost, and a photo found again where the selection already holds it becomes one."""
+        changed, kept = {}, []
+        present = {source_key(photo['path']): photo['path'] for photo in self.photos}
         for photo in self.photos:
             new = moves(photo['path'])
             if new:
+                held = present.get(source_key(new))
+                if held and held != photo['path']:
+                    changed[photo['path']] = held
+                    continue
                 changed[photo['path']] = new
+                present[source_key(new)] = new
                 photo['path'] = new
+            kept.append(photo)
+        moved_sources = 0
+        for source in self.data.get('sources', []):
+            new = moves(source['key'])
+            if new:
+                source['key'] = new
+                moved_sources += 1
+        if self.data.get('removed'):
+            self.data['removed'] = [moves(path) or path for path in self.data['removed']]
         if not changed:
-            return 0
-        self.data['assigned'] = {changed.get(path, path): keys for path, keys in self.data['assigned'].items()}
+            if moved_sources:
+                self.save()
+            return moved_sources
+        self.data['photos'] = kept
+        assigned = {}
+        for path, keys in self.data['assigned'].items():
+            merged = assigned.setdefault(changed.get(path, path), [])
+            merged.extend(key for key in keys if key not in merged)
+        self.data['assigned'] = assigned
         self.data['position'] = changed.get(self.data.get('position'), self.data.get('position'))
         self.undo_stack.clear()
         self.redo_stack.clear()
-        # The notes of its views follow the same keys.
-        notes = self.path.with_suffix('')/SESSION_DIR_NAME/SESSION_FILE_NAME
-        try:
-            saved = json.loads(notes.read_text(encoding='utf-8'))
-            for item in saved.get('photos', []):
-                item['relative_path'] = changed.get(item.get('relative_path'), item.get('relative_path'))
-            write_json_atomic(notes, saved)
-        except (OSError, ValueError):
-            pass
+        self.repoint_views(changed)
         self.save()
         return len(changed)
+
+    def repoint_views(self, changed):
+        """The notes, the analysis and the state of its views follow the same keys, which spares a new analysis."""
+        folder = self.path.with_suffix('')/SESSION_DIR_NAME
+        try:
+            saved = json.loads((folder/SESSION_FILE_NAME).read_text(encoding='utf-8'))
+            items = {}
+            for item in saved.get('photos', []):
+                key = changed.get(item.get('relative_path'), item.get('relative_path'))
+                item['relative_path'] = key
+                if key not in items or item.get('stars', 0) > items[key].get('stars', 0):
+                    items[key] = item
+            saved['photos'] = list(items.values())
+            write_json_atomic(folder/SESSION_FILE_NAME, saved)
+        except (OSError, ValueError):
+            pass
+        try:
+            analysis = json.loads((folder/ANALYSIS_FILE).read_text(encoding='utf-8'))
+            write_json_atomic(folder/ANALYSIS_FILE, {changed.get(key, key): value for key, value in analysis.items()})
+        except (OSError, ValueError, AttributeError):
+            pass
+        try:
+            state = json.loads((folder/STATE_FILE).read_text(encoding='utf-8'))
+            state['photo'] = changed.get(state.get('photo'), state.get('photo'))
+            state['set_aside'] = [changed.get(key, key) for key in state.get('set_aside', [])]
+            write_json_atomic(folder/STATE_FILE, state)
+        except (OSError, ValueError, AttributeError):
+            pass
 
     def _set(self, path, keys):
         self.undo_stack.append((path, list(self.buckets_of(path))))

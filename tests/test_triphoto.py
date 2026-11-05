@@ -2781,6 +2781,81 @@ def test_repair_links(base):
     clear_settings()
 
 
+def test_search_links(base):
+    clear_settings()
+    root = make_project(base/'recherche'/'avant'/'Temp Mariage', 6)
+    triphoto.PhotoSession(root).save()
+    answers = []
+    real_inform = triphoto_qt.inform
+    triphoto_qt.inform = lambda parent, title, text: answers.append(text)
+    try:
+        window = open_window(root)
+        paths = [str(p.path) for p in window.session.photos]
+        (base/'recherche'/'copies').mkdir()
+        window.portfolio.set_folder(base/'recherche'/'copies')
+        window.close_project()
+        window.pool.waitForDone()
+        window.review.analysis_pool.waitForDone()
+        sorting = window.custom.store.create('Liens')
+        kept = base/'recherche'/'ailleurs'
+        kept.mkdir()
+        shutil.copy2(paths[0], kept/Path(paths[0]).name)
+        sorting.data['sources'] = [{'key': str(root), 'stars': 'all', 'marker': 'all', 'publish': False}]
+        sorting.data['buckets'] = [{'id': 'a', 'title': 'A', 'subtitle': '', 'color': '#30d158'}, {'id': 'b', 'title': 'B', 'subtitle': '', 'color': '#0a84ff'}]
+        sorting.data['photos'] = [{'path': path, 'gallery': 'x', 'relative': Path(path).name} for path in paths]
+        sorting.data['assigned'] = {paths[1]: ['a']}
+        sorting.save()
+        # The project moved far from its old place, and one of its photos has a stray copy.
+        disk = base/'recherche'/'disque'
+        (disk/'jeux'/'profond').mkdir(parents=True)
+        (disk/'Préselection').mkdir()
+        moved = disk/'Préselection'/'Temp Mariage'
+        os.replace(root, moved)
+        (disk/'jeux'/'profond'/Path(paths[1]).name).write_bytes(b'copie')
+        # A lost copy of a photo the selection also holds elsewhere becomes that photo, with its buckets.
+        twin = next(photo for photo in moved.iterdir() if photo.name == Path(paths[0]).name)
+        again = window.custom.store.sessions()[0]
+        lost_twin = str(base/'recherche'/'parti'/'Mariage'/'autre.jpg')
+        shutil.copy2(twin, moved/'autre.jpg')
+        again.data['photos'] += [{'path': str(moved/'autre.jpg'), 'gallery': 'x', 'relative': 'autre.jpg'}, {'path': lost_twin, 'gallery': 'x', 'relative': 'autre.jpg'}]
+        again.data['assigned'][lost_twin] = ['b']
+        again.data['assigned'][str(moved/'autre.jpg')] = ['a']
+        again.save()
+        window.ask_folder = lambda title: str(disk)
+        window.search_links()
+        window.pool.waitForDone()
+        wait(100)
+        found = window.custom.store.sessions()[0]
+        assert all(Path(photo['path']).is_file() for photo in found.photos)
+        assert all(Path(photo['path']).parent == moved for photo in found.photos), 'the folder holding most of them wins over a stray copy'
+        assert len(found.photos) == 7, 'the two copies of a photo became one'
+        assert set(found.data['assigned'][str(moved/'autre.jpg')]) == {'a', 'b'}, 'buckets merged'
+        assert found.data['assigned'][str(moved/Path(paths[1]).name)] == ['a']
+        assert found.data['sources'][0]['key'] == str(moved)
+        assert [e for e in window.recents.entries() if triphoto.norm_path(e['path']) == triphoto.norm_path(moved)]
+        assert answers[-1].startswith('7 photos retrouvées sur 7.') and 'introuvable' not in answers[-1], answers
+        # Nothing lost: nothing to do, and it says so.
+        window.search_links()
+        window.pool.waitForDone()
+        wait(100)
+        assert answers[-1].startswith('Aucun lien perdu')
+        window.close()
+    finally:
+        triphoto_qt.inform = real_inform
+    clear_settings()
+    # The walk stops once everything is found: what lies deeper is never read.
+    deep = base/'arret'
+    make_project(deep/'Temp', 6)
+    make_project(deep/'a'/'b'/'c'/'Temp', 6)
+    lost = [str(base/'perdu'/'Temp'/f'photo_{index:03d}.jpg') for index in range(6)]
+    assert all(Path(new).parent == deep/'Temp' for new in triphoto_prefs.search_links(set(lost), {}, deep).values())
+    # A folder named Output says nothing by itself; the one above decides.
+    make_project(deep/'Un'/'Output', 1)
+    triphoto.PhotoSession(deep/'Un'/'Output').save()
+    assert triphoto_prefs.search_links(set(), {str(base/'perdu'/'Deux'/'Output'): ''}, deep) == {}
+    assert triphoto_prefs.search_links(set(), {str(base/'perdu'/'Un'/'Output'): ''}, deep) == {str(base/'perdu'/'Un'/'Output'): str(deep/'Un'/'Output')}
+
+
 def test_selection_review_and_health(base):
     clear_settings()
     root = make_project(base/'sante', 6)
@@ -3026,7 +3101,7 @@ def main():
     app.setStyleSheet(triphoto_qt.STYLE)
     base = Path(tempfile.mkdtemp(prefix='triphoto-tests-'))
     tests = [test_legacy_session, test_nested_session_ignored, test_dominant_color, test_recents, test_shortcuts,
-             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_quick_export, test_export_by_its_button, test_themed_dialog, test_update, test_keys_undo_and_ribbon, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_repair_links, test_selection_review_and_health, test_defaults_and_viewer_room, test_user_journey]
+             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_quick_export, test_export_by_its_button, test_themed_dialog, test_update, test_keys_undo_and_ribbon, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_repair_links, test_search_links, test_selection_review_and_health, test_defaults_and_viewer_room, test_user_journey]
     failures = 0
     try:
         for test in tests:

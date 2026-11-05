@@ -25,7 +25,7 @@ from triphoto import (export_folder_name, APP_NAME, APP_VERSION, PhotoSession, s
     export_original_copy, EXPORT_DIR_NAME, PICK_NEUTRAL, PICK_REJECT, PICK_SELECT, SESSION_DIR_NAME)
 from triphoto_custom import BucketFilter, BucketStrip, CustomPage, PopupMenu, ReviewTabs, SelectionSession
 from triphoto_portfolio import MANIFEST_FILE, Portfolio, PortfolioSession, RelocateJob, UNSORTED
-from triphoto_prefs import (ALIASES, PreferencesDialog, Recents, ScanJob, age_label, ask, inform, locate_photos, locate_project, moved_path, path_key, shortcut_map)
+from triphoto_prefs import (ALIASES, LinkSearchJob, PreferencesDialog, Recents, ScanJob, age_label, ask, inform, known_links, locate_photos, locate_project, moved_path, path_key, shortcut_map)
 from triphoto_review import MODES, BackgroundPicker, ChoiceFilter, MarkerFilter, NoteFilter, RatingBar, ReviewPage
 from triphoto_update import UpdateCheck, UpdateDownload, can_install, launch_installer, write_installer
 from triphoto_theme import (ACCENT, ASSETS, BACKGROUNDS, FAINT, INK, RAISED, REJECT, SELECT, STYLE, TEXT,
@@ -1104,6 +1104,7 @@ class Window(QMainWindow):
         self.redo_stack = []
         self.shortcuts = []
         self.scans = []
+        self.link_search = None
         self.display_profile = None
         self.display_signature = None
         self.color_generation = 0
@@ -1916,6 +1917,7 @@ class Window(QMainWindow):
         if absent:
             menu.addAction(f'Retrouver les photos manquantes ({absent})…', self.repair_photos)
         menu.addAction("Retrouver d'anciens projets…", self.find_projects)
+        menu.addAction('Recherche complète des liens…', self.search_links)
         menu.addSeparator()
         menu.addAction("Revenir à l'accueil", self.go_home).setEnabled(self.session is not None or self.custom_active)
 
@@ -1977,20 +1979,61 @@ class Window(QMainWindow):
             return
         self.activity.announce('Recherche des photos…')
         found = locate_photos(missing, chosen)
-        selection = self.selection
         if found:
-            self.custom.save()
-            self.portfolio.repoint(found.get)
-            if selection:
-                selection.repoint(found.get)
-            for session in self.custom.store.sessions():
-                if not selection or session.path != selection.path:
-                    session.repoint(found.get)
-            if selection:
-                self.selection_changed()
-            else:
-                self.refresh()
+            self.apply_found(found)
         self.toast(f'{len(found)} photo{"s" if len(found) > 1 else ""} retrouvée{"s" if len(found) > 1 else ""} sur {len(missing)}.', 4000)
+
+    def apply_found(self, found):
+        """New places, as {old: new}, in the portfolio and the selections, the open one first."""
+        selection = self.selection
+        self.custom.save()
+        changed = self.portfolio.repoint(found.get)
+        if selection:
+            changed += selection.repoint(found.get)
+        for session in self.custom.store.sessions():
+            if not selection or session.path != selection.path:
+                changed += session.repoint(found.get)
+        if selection:
+            self.selection_changed()
+        elif self.session:
+            self.refresh()
+        return changed
+
+    def search_links(self):
+        """Everything lost, looked for in one pass over a disk or a folder."""
+        if self.link_search:
+            self.toast('Une recherche est déjà en cours.')
+            return
+        chosen = self.ask_folder('Disque ou dossier à parcourir')
+        if not chosen:
+            return
+        self.custom.save()
+        self.toast('Recherche complète en cours…', 600000)
+        self.link_search = LinkSearchJob(*known_links(self.portfolio, self.custom.store.sessions(), self.recents), chosen)
+        self.link_search.signals.done.connect(self.links_found, Qt.ConnectionType.QueuedConnection)
+        self.pool.start(self.link_search, 1)
+
+    def links_found(self, moves, photos, folders):
+        self.link_search = None
+        self.toast_frame.hide()
+        if not photos and not folders:
+            inform(self, 'Recherche complète', 'Aucun lien perdu : tous les projets et toutes les photos sont à leur place.')
+            return
+        for old, new in moves.items():
+            if self.portfolio.folder is not None and str(self.portfolio.folder) == old:
+                self.portfolio.set_folder(new)
+            self.recents.relocate(old, new)
+        self.apply_found(moves)
+        found = sum(Path(new).is_file() for new in moves.values())
+        places = len(moves)-found
+        left = photos+folders-len(moves)
+        lines = [f"{found} photo{'s' if found > 1 else ''} retrouvée{'s' if found > 1 else ''} sur {photos}."]
+        if folders:
+            lines.append(f"{places} dossier{'s' if places > 1 else ''} retrouvé{'s' if places > 1 else ''} sur {folders}.")
+        if left:
+            lines.append(f"{left} restent introuvables : ils sont peut-être sur un autre disque." if left > 1 else 'Un élément reste introuvable : il est peut-être sur un autre disque.')
+        inform(self, 'Recherche complète', '\n'.join(lines))
+        self.home.refresh()
 
     def forget_recent(self, path):
         self.recents.remove(path)
@@ -3048,6 +3091,8 @@ class Window(QMainWindow):
         self.custom.shutdown()
         if self.update_job:
             self.update_job.cancelled.set()
+        if self.link_search:
+            self.link_search.cancelled = True
         self.detail_timer.stop()
         self.visible_timer.stop()
         self.preload_timer.stop()
