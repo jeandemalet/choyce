@@ -23,12 +23,13 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QFil
 from triphoto import SESSION_DIR_NAME, SESSION_FILE_NAME, Photo, PhotoSession, export_folder_name, write_json_atomic
 from triphoto_portfolio import PortfolioSession, move_to_trash, source_key
 from triphoto_prefs import ask, inform
-from triphoto_review import ANALYSIS_FILE, STATE_FILE, BackgroundPicker
+from triphoto_review import ANALYSIS_FILE, STATE_FILE
 from triphoto_theme import CONTROL, FAINT, INK, MUTED, RAISED, TEXT, contrast_on, draw_tick, pastel
 
 PREVIEW_SIDE = 2000
 DETAIL_SIDE = 6000
 PREVIEWS_KEPT = 12
+BUCKETS_FILE = 'buckets.json'
 ALL, UNSORTED = 'all', 'none'
 BUCKET_COLORS = ['#ff3b30', '#0a84ff', '#ffd60a', '#30d158', '#ff2d92', '#ff9500', '#00d4d8', '#bf5af2', '#a4e000', '#5e5ce6']
 
@@ -258,6 +259,13 @@ class Sorting:
         if wanted != keys:
             self._set(path, wanted)
 
+    def file_of(self, path):
+        """The file behind a key: in a selection, the key is the file."""
+        return Path(path)
+
+    def key_of(self, file):
+        return file
+
     def undo(self):
         """The photo it concerned, or None with nothing to take back."""
         if not self.undo_stack:
@@ -302,8 +310,56 @@ class Sorting:
                     while name.lower() in used:
                         name, number = f'{stem} ({number}){suffix}', number+1
                     used.add(name.lower())
-                    plan.append((export_folder_name(bucket['title']), name, path))
+                    plan.append((export_folder_name(bucket['title']), name, str(self.file_of(path))))
         return plan
+
+
+class ProjectBuckets(Sorting):
+    """The buckets of a project or of the portfolio, kept with its notes. A key is the relative path, which survives a move of the folder."""
+
+    def __init__(self, path, data, source):
+        super().__init__(path, data)
+        self.source = source
+
+    @classmethod
+    def of(cls, session, name):
+        path = session.session_dir/BUCKETS_FILE
+        data = None
+        for candidate in (path, Path(str(path)+'.bak')):
+            try:
+                data = cls.read(candidate)
+                break
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        buckets = cls(path, data or {'version': 1, 'id': '', 'name': name, 'created': time.time(), 'updated': time.time(),
+                                     'photos': [], 'buckets': [], 'assigned': {}, 'position': ''}, session)
+        buckets.data['name'] = name
+        buckets.tidy()
+        return buckets
+
+    @property
+    def photos(self):
+        return [{'path': photo.relative_path, 'gallery': self.name, 'relative': photo.relative_path} for photo in self.source.photos]
+
+    def tidy(self):
+        """A photo out of reach keeps its buckets: its disk may only be unplugged."""
+        self.data['buckets'] = [bucket for bucket in self.buckets if isinstance(bucket, dict) and bucket.get('id') and bucket.get('title')]
+        known = {bucket['id'] for bucket in self.buckets}
+        self.data['assigned'] = {path: [key for key in keys if key in known] for path, keys in self.data['assigned'].items() if isinstance(keys, list)}
+        for bucket in self.buckets:
+            if not bucket.get('color'):
+                bucket['color'] = self.free_color()
+
+    def file_of(self, path):
+        return next((photo.path for photo in self.source.photos if photo.relative_path == path), Path(path))
+
+    def key_of(self, file):
+        return next((photo.relative_path for photo in self.source.photos if str(photo.path) == file), file)
+
+    def save(self):
+        # Nothing on the disk of a project that has no bucket.
+        if self.buckets or self.path.exists():
+            super().save()
 
 
 class SelectionSession(PhotoSession):
@@ -333,7 +389,7 @@ class SelectionSession(PhotoSession):
 
 
 class BucketStrip(QWidget):
-    """Under the views of a selection: a click puts the photo in a bucket or takes it out, a photo dragged here moves it or adds it to another one."""
+    """Under the views, in bucket mode: a click puts the photo in a bucket or takes it out, a photo dragged here moves it or adds it to another one."""
 
     def __init__(self, window):
         super().__init__()
@@ -348,11 +404,15 @@ class BucketStrip(QWidget):
         self.hide()
 
     def keys(self):
-        return [bucket['id'] for bucket in self.window.selection.buckets] if self.window.selection else []
+        return [bucket['id'] for bucket in self.window.buckets.buckets] if self.window.buckets else []
+
+    def add_rect(self):
+        """With no bucket yet, the whole strip offers the first one."""
+        return QRectF(self.width()-12-44, 8, 44, self.height()-16) if self.keys() else QRectF(12, 8, self.width()-24, self.height()-16)
 
     def rects(self):
         keys = self.keys()
-        width = (self.width()-24-8*(len(keys)-1))/max(1, len(keys))
+        width = (self.width()-24-52-8*(len(keys)-1))/max(1, len(keys))
         return [(key, QRectF(12+index*(width+8), 8, width, self.height()-16)) for index, key in enumerate(keys)]
 
     def hit(self, point):
@@ -368,7 +428,7 @@ class BucketStrip(QWidget):
 
     def drag_to(self, point, photo):
         self.dragging = True
-        self.held = set(self.window.selection.buckets_of(photo.relative_path))
+        self.held = set(self.window.buckets.buckets_of(photo.relative_path))
         self.hovered = self.hit(QPointF(self.mapFromGlobal(point)))
         self.update()
 
@@ -382,9 +442,15 @@ class BucketStrip(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor(INK))
-        selection = self.window.selection
+        selection = self.window.buckets
         if not selection:
             return
+        add = self.add_rect()
+        painter.setBrush(QColor(RAISED))
+        painter.setPen(QPen(QColor(FAINT), 1.2, Qt.PenStyle.DashLine))
+        painter.drawRoundedRect(add, 9, 9)
+        painter.setPen(QColor(MUTED))
+        painter.drawText(add, Qt.AlignmentFlag.AlignCenter, '+' if self.keys() else 'Ajouter un bucket')
         targets = self.window.target_photos()
         held = set(selection.buckets_of(targets[0].relative_path)) if targets else set()
         font = painter.font()
@@ -456,67 +522,17 @@ class BucketStrip(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.add_rect().contains(event.position()):
+            self.window.custom.add_bucket()
+            return
         hit = self.hit(event.position())
         if event.button() == Qt.MouseButton.LeftButton and hit and hit[0]:
             self.window.toggle_bucket(hit[0])
 
-
-class ReviewTabs(QFrame):
-    """Which bucket is being reviewed, in one click, in every view of a selection."""
-
-    def __init__(self, window):
-        super().__init__(objectName='home')
-        self.window = window
-        self.row = QHBoxLayout(self)
-        self.row.setContentsMargins(12, 6, 12, 0)
-        self.row.setSpacing(2)
-        self.tabs = {}
-        self.hide()
-
-    def rebuild(self):
-        while self.row.count():
-            widget = self.row.takeAt(0).widget()
-            if widget:
-                widget.setParent(None)
-                widget.deleteLater()
-        self.tabs = {}
-        selection = self.window.selection
-        if not selection:
-            return
-        self.row.addWidget(QLabel('Afficher', objectName='muted'))
-        self.row.addSpacing(6)
-        for key in [ALL]+[bucket['id'] for bucket in selection.buckets]+[UNSORTED]:
-            button = QPushButton(objectName='seg', checkable=True)
-            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            button.clicked.connect(lambda checked=False, value=key: self.show_only(value))
-            self.row.addWidget(button)
-            self.tabs[key] = button
-        self.row.addStretch(1)
-        self.sync()
-
-    def sync(self):
-        selection = self.window.selection
-        if not selection:
-            return
-        # A bucket just added or removed.
-        if set(self.tabs) != {ALL, UNSORTED}|{bucket['id'] for bucket in selection.buckets}:
-            self.rebuild()
-            return
-        rule = selection.rule()
-        simple = not rule['exclude'] and len(rule['include']) <= 1
-        current = UNSORTED if rule['none'] else (rule['include'][0] if rule['include'] else ALL) if simple else None
-        counts = {ALL: len(selection.photos), UNSORTED: sum(not selection.buckets_of(photo['path']) for photo in selection.photos)}
-        for key, button in self.tabs.items():
-            title = {ALL: 'Toutes', UNSORTED: 'Sans bucket'}.get(key) or selection.bucket(key)['title']
-            count = counts[key] if key in counts else selection.count(key)
-            button.setText(f"{title.replace('&', '&&')}  {count}")
-            button.setChecked(key == current)
-
-    def show_only(self, key):
-        self.window.selection.set_rule(include=[] if key in (ALL, UNSORTED) else [key], exclude=[], none=key == UNSORTED, all=False)
-        self.window.custom.save_timer.start()
-        self.window.bucket_rule.sync()
-        self.window.filters_changed()
+    def contextMenuEvent(self, event):
+        hit = self.hit(QPointF(event.pos()))
+        if hit and hit[0]:
+            self.window.custom.bucket_menu(hit[0], event.globalPos())
 
 
 class BucketFilter(QFrame):
@@ -550,8 +566,8 @@ class BucketFilter(QFrame):
         for group in self.groups:
             group.deleteLater()
         self.buttons, self.counts, self.groups = {}, {}, []
-        self.options = None
-        selection = self.window.selection
+        self.options = self.none_button = None
+        selection = self.window.buckets
         if not selection:
             return
         if not selection.buckets:
@@ -582,6 +598,10 @@ class BucketFilter(QFrame):
             row.addStretch(1)
             self.lines.addLayout(row)
             self.lines.addSpacing(6)
+        self.none_button = QPushButton('Seulement les photos sans bucket', objectName='seg', checkable=True)
+        self.none_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.none_button.clicked.connect(lambda checked=False: self.change(none=checked, include=[], exclude=[], all=False))
+        self.lines.addWidget(self.none_button)
         self.options = QWidget()
         lines = QVBoxLayout(self.options)
         lines.setContentsMargins(0, 2, 0, 0)
@@ -606,7 +626,7 @@ class BucketFilter(QFrame):
         return button
 
     def sync(self):
-        selection = self.window.selection
+        selection = self.window.buckets
         if not selection or not self.options:
             return
         rule = selection.rule()
@@ -614,12 +634,13 @@ class BucketFilter(QFrame):
             state = 'include' if key in rule['include'] else 'exclude' if key in rule['exclude'] else ''
             buttons[state].setChecked(True)
             self.counts[key].setText(str(selection.count(key)))
+        self.none_button.setChecked(bool(rule['none']))
         self.any_button.setChecked(not rule['all'])
         self.all_button.setChecked(bool(rule['all']))
         self.options.setVisible(len(rule['include']) > 1)
 
     def set_state(self, key, value):
-        rule = self.window.selection.rule()
+        rule = self.window.buckets.rule()
         include = [other for other in rule['include'] if other != key]
         exclude = [other for other in rule['exclude'] if other != key]
         if value:
@@ -627,13 +648,13 @@ class BucketFilter(QFrame):
         self.change(include=include, exclude=exclude, none=False)
 
     def change(self, **changes):
-        self.window.selection.set_rule(**changes)
+        self.window.buckets.set_rule(**changes)
         self.window.custom.save_timer.start()
         self.window.filters_changed()
         self.sync()
 
     def labels(self):
-        selection = self.window.selection
+        selection = self.window.buckets
         rule = selection.rule()
         if rule['none']:
             return ['Sans bucket']
@@ -1132,8 +1153,9 @@ class BucketCard(QWidget):
             painter.setBrush(QColor(MUTED))
             for offset in (-6, 0, 6):
                 painter.drawEllipse(self.dots().center()+QPointF(offset, 0), 1.7, 1.7)
-        title = bucket['title'] if bucket else 'Ajouter un bucket'
-        subtitle = bucket.get('subtitle', '') if bucket else 'Les buckets se placent ici : glissez-y les photos.'
+        first = not self.page.session.buckets
+        title = bucket['title'] if bucket else 'Ajouter un bucket' if first else '+ Ajouter'
+        subtitle = bucket.get('subtitle', '') if bucket else 'Les buckets se placent ici : glissez-y les photos.' if first else ''
         inner = area.adjusted(14, 12, -14, -10)
         heading = inner.adjusted(0, 0, -28, 0)
         if holds:
@@ -1170,9 +1192,7 @@ class BucketCard(QWidget):
 
     def show_menu(self, where):
         if self.key:
-            key, page = self.key, self.page
-            PopupMenu(page.window, [('Voir les photos…', lambda: page.show_bucket(key)), ('Modifier…', lambda: page.edit_bucket(key)),
-                                    ('Supprimer…', lambda: page.delete_bucket(key))]).open_at(where)
+            self.page.bucket_menu(self.key, where)
 
     def contextMenuEvent(self, event):
         self.show_menu(event.globalPos())
@@ -1240,7 +1260,7 @@ class Stage(QWidget):
         window, photo = self.page.window, self.page.current()
         menu = window.viewer.background_menu(self)
         if photo:
-            window.add_export_action(menu, [Photo(path=Path(photo['path']), relative_path=photo['path'])])
+            window.add_export_action(menu, [Photo(path=self.page.session.file_of(photo['path']), relative_path=photo['path'])])
         menu.exec(event.globalPos())
 
     def arrows(self):
@@ -1522,13 +1542,14 @@ class BucketSheet(QDialog):
         image = self.images.get(path)
         if image is None and path not in self.asked:
             self.asked.add(path)
-            job = self.page.window.custom_loader(Path(path), 400)
+            job = self.page.window.custom_loader(self.page.session.file_of(path), 400)
             job.signals.ready.connect(self.loaded, Qt.ConnectionType.QueuedConnection)
             self.pool.start(job)
         return image
 
     @Slot(str, int, QImage, str, int)
     def loaded(self, path, side, image, error, generation):
+        path = self.page.session.key_of(path)
         if image.isNull():
             self.broken.add(path)
         else:
@@ -1606,19 +1627,12 @@ class CustomPage(QStackedWidget):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        bar = QHBoxLayout()
-        bar.setContentsMargins(12, 8, 12, 8)
-        bar.setSpacing(8)
+        # Shown in the panel of the view, with the other settings.
         self.photo_name = QLabel(objectName='muted')
-        bar.addWidget(self.photo_name, 1)
-        self.zoom_button = self.plain_button(bar, '100 %', lambda: self.stage.zoom_reset())
+        self.zoom_button = QPushButton('100 %', objectName='ghost')
+        self.zoom_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.zoom_button.clicked.connect(lambda checked=False: self.stage.zoom_reset())
         self.zoom_button.setToolTip('Revenir à la photo ajustée (touche 0)')
-        self.picker = BackgroundPicker(self.window, page)
-        bar.addWidget(self.picker)
-        bar.addSpacing(8)
-        self.plain_button(bar, 'Modifier la sélection', self.edit_selection)
-        self.plain_button(bar, 'Ajouter un bucket', self.add_bucket)
-        layout.addLayout(bar)
         self.stage = Stage(self)
         layout.addWidget(self.stage, 1)
         scroll = QScrollArea()
@@ -1686,6 +1700,10 @@ class CustomPage(QStackedWidget):
         self.setCurrentWidget(self.work)
         self.show_photo()
 
+    def bucket_menu(self, key, where):
+        PopupMenu(self.window, [('Voir les photos…', lambda: self.show_bucket(key)), ('Modifier…', lambda: self.edit_bucket(key)),
+                                ('Supprimer…', lambda: self.delete_bucket(key))]).open_at(where)
+
     def back(self):
         """Up one level: from the choice of galleries to the sorting, from the sorting to the welcome screen."""
         if self.currentWidget() is self.setup:
@@ -1712,9 +1730,9 @@ class CustomPage(QStackedWidget):
         self.window.sync_undo_buttons()
         self.save_timer.start()
         self.window.bucket_strip.update()
-        self.window.review_tabs.sync()
+        self.window.bucket_rule.sync()
         # A photo may now pass the filter, or no longer.
-        if self.window.selection is self.session:
+        if self.window.buckets is self.session:
             self.window.apply_filters()
         self.update_counter()
         for card in self.cards.values():
@@ -1732,7 +1750,7 @@ class CustomPage(QStackedWidget):
 
     def filters_changed(self):
         """Stays on the same photo if it is still there. Otherwise the next one has taken its place."""
-        if self.session is None or self.window.selection is not self.session:
+        if self.session is None or self.window.buckets is not self.session:
             return
         current = self.current()
         self.cached_order = None
@@ -1781,12 +1799,13 @@ class CustomPage(QStackedWidget):
         self.request_images()
 
     def background_changed(self):
-        self.picker.sync()
         self.stage.update()
 
     def show_photo(self):
         self.index = max(0, min(self.index, len(self.order())-1))
-        self.request_images()
+        # Buckets kept out of sight load nothing.
+        if self.window.custom_active:
+            self.request_images()
         self.update_counter()
         self.stage.update()
         for card in self.cards.values():
@@ -1809,7 +1828,7 @@ class CustomPage(QStackedWidget):
                 self.start_loading(path, DETAIL_SIDE, 1)
 
     def start_loading(self, path, side, priority):
-        job = self.window.custom_loader(Path(path), side)
+        job = self.window.custom_loader(self.session.file_of(path), side)
         job.setAutoDelete(False)
         job.signals.ready.connect(self.loaded, Qt.ConnectionType.QueuedConnection)
         self.pending[path] = job
@@ -1817,6 +1836,9 @@ class CustomPage(QStackedWidget):
 
     @Slot(str, int, QImage, str, int)
     def loaded(self, path, side, image, error, generation):
+        if self.session is None:
+            return
+        path = self.session.key_of(path)
         self.pending.pop(path, None)
         if error or image.isNull():
             self.failed[path] = error
@@ -1944,7 +1966,11 @@ class CustomPage(QStackedWidget):
             widget = self.card_row.takeAt(0).widget()
             widget.setParent(None)
             widget.deleteLater()
-        self.cards = {bucket['id']: BucketCard(self, bucket['id']) for bucket in self.session.buckets} or {None: BucketCard(self, None)}
+        self.cards = {bucket['id']: BucketCard(self, bucket['id']) for bucket in self.session.buckets}
+        self.cards[None] = BucketCard(self, None)
+        if self.session.buckets:
+            self.cards[None].setMinimumWidth(150)
+            self.cards[None].setMaximumWidth(150)
         for card in self.cards.values():
             self.card_row.addWidget(card)
 
@@ -1993,7 +2019,7 @@ class CustomPage(QStackedWidget):
 
     # The export.
     def ask_export_folder(self):
-        return QFileDialog.getExistingDirectory(self.window, 'Dossier où exporter la sélection', self.session.data.get('export_folder', ''))
+        return QFileDialog.getExistingDirectory(self.window, 'Dossier où exporter les buckets', self.session.data.get('export_folder', ''))
 
     def export(self):
         window = self.window

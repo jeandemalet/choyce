@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (QToolTip, QApplication, QMainWindow, QWidget, QVB
 from PIL import Image, ImageCms, ImageWin
 from triphoto import (export_folder_name, APP_NAME, APP_VERSION, PhotoSession, sort_photos, SORT_OPTIONS, load_screen_preview, original_inventory,
     export_original_copy, EXPORT_DIR_NAME, PICK_NEUTRAL, PICK_REJECT, PICK_SELECT, SESSION_DIR_NAME)
-from triphoto_custom import BucketFilter, BucketStrip, CustomPage, PopupMenu, ReviewTabs, SelectionSession
+from triphoto_custom import ProjectBuckets, BucketFilter, BucketStrip, CustomPage, PopupMenu, SelectionSession
 from triphoto_portfolio import MANIFEST_FILE, Portfolio, PortfolioSession, RelocateJob, UNSORTED
 from triphoto_prefs import (ALIASES, LinkSearchJob, MARK_TIPS, PreferencesDialog, Recents, age_label, ask, inform, known_links, locate_photos, locate_project, moved_path, path_key, shortcut_map)
 from triphoto_review import MODES, BackgroundPicker, ChoiceFilter, MarkerFilter, NoteFilter, RatingBar, ReviewPage
@@ -231,6 +231,7 @@ class HoverButton(QPushButton):
         super().enterEvent(event)
 
 
+VIEW_WIDTH = 230
 FILTER_WIDTH = 318
 # Fitted, a photo stops above the floating bar instead of lying under it.
 BAR_ROOM = 66
@@ -1060,9 +1061,10 @@ class ActivityBar(QFrame):
 
     def place(self):
         self.adjustSize()
-        # In the other views, above the settings along the bottom.
+        # Beside the panel of the view, and above the note along the bottom.
         strip = self.window_.bucket_strip.height()+36 if self.window_.bucket_strip.isVisible() else 0
-        self.move(12, self.window_.height()-self.height()-strip-(168 if self.window_.custom_active else 68 if self.window_.review_active else 12))
+        panel = self.window_.view_panel.width() if self.window_.view_panel.isVisible() else 0
+        self.move(panel+12, self.window_.height()-self.height()-strip-(168 if self.window_.custom_active else 68 if self.window_.review_active else 12))
         self.raise_()
         self.show()
 
@@ -1101,6 +1103,8 @@ class Window(QMainWindow):
         self.recents = Recents(self.settings)
         # The custom selection open like a project, if any.
         self.selection = None
+        # The buckets of what is open, whether a selection, a project or the portfolio.
+        self.buckets = None
         self.portfolio = Portfolio(self.settings)
         self.portfolio.failed.connect(self.portfolio_failed)
         self.portfolio.changed.connect(self.portfolio_changed)
@@ -1174,15 +1178,14 @@ class Window(QMainWindow):
         self.flags.hide()
         left.addStretch(1)
         right.addStretch(1)
-        self.sort = self.combo(right, 'Tri', SORT_OPTIONS)
-        right.addSpacing(6)
+        self.sort = self.combo(QHBoxLayout(), 'Tri', SORT_OPTIONS)
         segments = QFrame(objectName='segments')
         segment_row = QHBoxLayout(segments)
         segment_row.setContentsMargins(3, 3, 3, 3)
         segment_row.setSpacing(2)
         group = QButtonGroup(self)
         self.view_buttons = {}
-        for key, label in [('buckets', 'Buckets'), ('classic', 'Classique'), *MODES]:
+        for key, label in [('classic', 'Classique'), *MODES]:
             button = QPushButton(label, objectName='mainseg', checkable=True)
             button.setMinimumWidth(button.sizeHint().width())
             group.addButton(button)
@@ -1191,7 +1194,6 @@ class Window(QMainWindow):
             segment_row.addWidget(button)
             self.view_buttons[key] = button
         self.view_buttons['classic'].setChecked(True)
-        self.view_buttons['buckets'].hide()
         self.segments = segments
         self.filter_chip = HoverButton('Filtre', objectName='seg', checkable=True)
         self.filter_chip.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -1202,6 +1204,12 @@ class Window(QMainWindow):
         top.addLayout(left, 1)
         top.addWidget(segments)
         top.addWidget(self.filter_chip)
+        top.addSpacing(6)
+        self.bucket_button = QPushButton('Buckets', objectName='seg', checkable=True)
+        self.bucket_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.bucket_button.setToolTip('Mode buckets : ils s’affichent en bas et les touches 1 à 5 les remplissent, au lieu de noter.')
+        self.bucket_button.clicked.connect(self.toggle_bucket_mode)
+        top.addWidget(self.bucket_button)
         top.addLayout(right, 1)
         self.header = header
         layout.addWidget(header)
@@ -1234,8 +1242,7 @@ class Window(QMainWindow):
         self.viewer_bar.portfolio.connect(self.toggle_portfolio)
         self.viewer_bar.publish.connect(self.toggle_publish)
         self.viewer_bar.hide()
-        self.viewer_picker = BackgroundPicker(self, self.viewer, floating=True)
-        self.viewer_picker.hide()
+        self.viewer_picker = BackgroundPicker(self)
         self.note_filter = NoteFilter(self)
         self.marker_filter = MarkerFilter(self)
         self.choices = ChoiceFilter(self)
@@ -1253,7 +1260,6 @@ class Window(QMainWindow):
         self.custom_active = False
         self.pages.addWidget(self.custom)
         self.bucket_strip = BucketStrip(self)
-        self.review_tabs = ReviewTabs(self)
         self.bucket_ghost = QLabel(self)
         self.bucket_ghost.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.bucket_ghost.hide()
@@ -1306,18 +1312,18 @@ class Window(QMainWindow):
         self.kept_portfolio = self.button(kept_lines, 'Ajouter au portfolio', self.add_filtered_to_portfolio, 'seg')
         self.kept_selection = self.button(kept_lines, 'Créer une sélection…', self.select_filtered, 'seg')
         self.kept_section = section('Avec ces photos', kept)
-        # What is displayed apart from what is filtered: black and white, background and zoom of the views.
-        self.display_section = section('Affichage', self.review.tools)
         filter_lines.addStretch(1)
+        self.build_view_panel()
         self.custom.currentChanged.connect(lambda *_: self.update_project_state())
         content = QHBoxLayout()
         content.setSpacing(0)
         column = QVBoxLayout()
         column.setSpacing(0)
-        # In every view: above, which photos are shown; below, where they are sent.
-        column.addWidget(self.review_tabs)
+        # Below every view, in bucket mode, where the photos are sent.
         column.addWidget(self.pages, 1)
         column.addWidget(self.bucket_strip)
+        # Above, how the photos are looked at; on the left, the settings of that view; on the right, which photos.
+        content.addWidget(self.view_panel)
         content.addLayout(column, 1)
         content.addWidget(self.filter_panel)
         layout.addLayout(content, 1)
@@ -1388,11 +1394,11 @@ class Window(QMainWindow):
         self.shortcuts = []
         commands = {
             'prev': lambda: self.navigate(-1), 'next': lambda: self.navigate(1),
-            'flag': self.toggle_flag, 'like': self.toggle_like, 'portfolio': self.toggle_portfolio, 'publish': self.toggle_publish, 'select': lambda: self.set_pick(PICK_SELECT),
+            'bucket_mode': self.toggle_bucket_mode, 'flag': self.toggle_flag, 'like': self.toggle_like, 'portfolio': self.toggle_portfolio, 'publish': self.toggle_publish, 'select': lambda: self.set_pick(PICK_SELECT),
             'reject': lambda: self.set_pick(PICK_REJECT), 'neutral': lambda: self.set_pick(PICK_NEUTRAL),
             'select_all': self.select_all, 'deselect': self.deselect, 'undo': self.undo, 'redo': self.redo, 'fit': self.fit,
             'zoom_in': lambda: self.zoom_by(1.15), 'zoom_out': lambda: self.zoom_by(1/1.15),
-            'background': self.cycle_background, 'review': lambda: self.set_review(not self.review_active),
+            'background': self.cycle_background, 'review': lambda: self.set_view('classic') if self.review_active else self.set_review(True),
             'shuffle': lambda: self.review.shuffle() if self.review_active else None,
             'mono': lambda: self.review.toggle_mono() if self.review_active else None,
             'refresh': self.refresh, 'open': self.open_folder, 'close': self.close_project, 'preferences': self.open_preferences,
@@ -1462,15 +1468,14 @@ class Window(QMainWindow):
     def sync_filter_panel(self):
         has_photos = bool(self.session and self.session.photos)
         # In a selection, the buckets filter too. Choosing its galleries is not looking at photos.
-        with_filter = has_photos and (not self.custom_active or (bool(self.selection) and self.custom.currentWidget() is self.custom.work))
+        with_filter = has_photos and not self.choosing_photos()
         self.filter_chip.setVisible(with_filter)
         shown = with_filter and self.filter_open[self.filter_place()]
         self.filter_chip.setChecked(shown)
         self.filter_panel.setVisible(shown)
-        self.bucket_section.setVisible(bool(self.selection))
+        self.bucket_section.setVisible(bool(self.buckets and (self.buckets.buckets or self.bucket_mode)))
         self.kept_section.setVisible(not self.selection)
         self.kept_portfolio.setVisible(not self.viewing_portfolio())
-        self.display_section.setVisible(self.review_active)
         if shown:
             self.bucket_rule.sync()
             self.update_filter_chip()
@@ -1481,8 +1486,8 @@ class Window(QMainWindow):
             combo.setCurrentIndex(0)
             combo.blockSignals(False)
         self.choices.reset()
-        if self.selection:
-            self.selection.set_rule(include=[], exclude=[], none=False, all=False)
+        if self.buckets:
+            self.buckets.set_rule(include=[], exclude=[], none=False, all=False)
             self.bucket_rule.sync()
         self.filters_changed()
 
@@ -1490,9 +1495,8 @@ class Window(QMainWindow):
         parts = [combo.currentText() for combo in (self.stars, self.flags) if combo.currentIndex() > 0]+self.choices.active_labels()
         # Elided: a long filter must not push the views out of the header. In a selection, Afficher already tells.
         text = self.filter_chip.fontMetrics().elidedText(' · '.join(parts), Qt.TextElideMode.ElideRight, 100)
-        self.filter_chip.setText(f'Filtre : {text}' if parts and not self.selection else 'Filtre')
+        self.filter_chip.setText(f'Filtre : {text}' if parts else 'Filtre')
         self.filter_chip.setToolTip(' · '.join(parts) or 'Afficher ou masquer le panneau des filtres')
-        self.review_tabs.sync()
         count = len(self.photos)
         self.filter_count.setText(f"{count} photo{'s' if count > 1 else ''} affichée{'s' if count > 1 else ''}")
 
@@ -1505,19 +1509,81 @@ class Window(QMainWindow):
             self.viewer.set_zoom(1)
 
     def set_view(self, key):
-        if key == 'buckets':
-            self.show_buckets()
-        elif key == 'classic':
-            self.set_review(False)
+        if key == 'classic':
+            self.show_buckets() if self.bucket_mode else self.set_review(False)
         else:
             self.open_review_mode(key)
 
+    def build_view_panel(self):
+        """The settings of the view on screen, and nothing else."""
+        self.view_panel = QFrame(objectName='dock')
+        self.view_panel.setFixedWidth(VIEW_WIDTH)
+        outer = QVBoxLayout(self.view_panel)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet('QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }')
+        outer.addWidget(scroll)
+        body = QWidget()
+        scroll.setWidget(body)
+        lines = QVBoxLayout(body)
+        lines.setContentsMargins(14, 14, 14, 16)
+        lines.setSpacing(14)
+        self.view_title = QLabel(objectName='dialogTitle')
+        lines.addWidget(self.view_title)
+        def group(title, widget):
+            box = QWidget()
+            inner = QVBoxLayout(box)
+            inner.setContentsMargins(0, 0, 0, 0)
+            inner.setSpacing(5)
+            inner.addWidget(QLabel(title, objectName='muted'))
+            inner.addWidget(widget)
+            lines.addWidget(box)
+            return box
+        self.sort.setMinimumWidth(0)
+        self.sort.setMaximumWidth(16777215)
+        self.sort_section = group('Trier par', self.sort)
+        self.background_section = group('Fond', self.viewer_picker)
+        stage = QWidget()
+        stage_lines = QVBoxLayout(stage)
+        stage_lines.setContentsMargins(0, 0, 0, 0)
+        stage_lines.setSpacing(5)
+        self.custom.photo_name.setWordWrap(True)
+        stage_lines.addWidget(self.custom.photo_name)
+        stage_lines.addWidget(self.custom.zoom_button)
+        self.stage_section = group('Photo', stage)
+        self.selection_section = QWidget()
+        selection_lines = QVBoxLayout(self.selection_section)
+        selection_lines.setContentsMargins(0, 0, 0, 0)
+        self.button(selection_lines, 'Modifier la sélection', self.edit_selection, 'seg')
+        lines.addWidget(self.selection_section)
+        # Black and white, background and zoom of the views.
+        lines.addWidget(self.review.tools)
+        for pills in (*self.review.options.values(), (self.review.swipe_bucket_pill,)):
+            for pill in pills:
+                if pill is not None:
+                    lines.addWidget(pill)
+        lines.addStretch(1)
+
+    def sync_view_panel(self):
+        has_photos = bool(self.session and self.session.photos)
+        self.view_panel.setVisible(has_photos and not self.choosing_photos() or (bool(self.selection) and self.custom_active and not self.choosing_photos()))
+        mode = 'wall' if self.review.mode == 'color' else self.review.mode
+        self.view_title.setText(self.view_buttons[mode if self.review_active else 'classic'].text())
+        # The grid sorts from its own settings, and Pêle-mêle deals at random: never two sorts on screen.
+        self.sort_section.setVisible(not self.custom_active and not (self.review_active and mode in ('wall', 'toile')))
+        self.stage_section.setVisible(self.custom_active)
+        self.selection_section.setVisible(bool(self.selection))
+        self.background_section.setVisible(not self.review_active)
+        self.review.tools.setVisible(self.review_active)
+        self.review.place_overlays()
+
     def sync_view_buttons(self):
         mode = 'wall' if self.review.mode == 'color' else self.review.mode
-        self.view_buttons['buckets' if self.custom_active else mode if self.review_active else 'classic'].setChecked(True)
-        # The grid sorts from its bottom bar, and Pêle-mêle deals at random: never two sorts on screen.
-        self.sort.setVisible(bool(self.session and self.session.photos) and not self.custom_active
-                             and not (self.review_active and self.review.mode in ('wall', 'toile', 'color')))
+        self.view_buttons[mode if self.review_active else 'classic'].setChecked(True)
+        self.sync_view_panel()
         self.sync_filter_panel()
 
     def show_viewer_bar(self):
@@ -1527,21 +1593,15 @@ class Window(QMainWindow):
             return
         self.viewer_bar.update()
         self.viewer_bar.show()
-        self.viewer_picker.show()
 
     def hide_viewer_bar(self):
-        if self.viewer_bar.underMouse() or self.viewer_picker.underMouse():
+        if self.viewer_bar.underMouse():
             self.viewer_bar_timer.start(1000)
         else:
             self.viewer_bar.hide()
-            self.viewer_picker.hide()
 
     def place_viewer_bar(self):
-        self.viewer_picker.adjustSize()
-        x = (self.viewer.width()-self.viewer_bar.width()-self.viewer_picker.width()-8)//2
-        y = self.viewer.height()-self.viewer_bar.height()-16
-        self.viewer_bar.move(x, y)
-        self.viewer_picker.move(x+self.viewer_bar.width()+8, y)
+        self.viewer_bar.move((self.viewer.width()-self.viewer_bar.width())//2, self.viewer.height()-self.viewer_bar.height()-16)
 
     def set_background(self, color):
         self.viewer.set_background(color)
@@ -1577,7 +1637,7 @@ class Window(QMainWindow):
             return
         self.set_folder(session.path.with_suffix(''), SelectionSession(session))
         if self.selection is session:
-            self.custom_active = True
+            self.custom_active = self.bucket_mode
             self.custom.open_session(session)
             self.update_project_state()
 
@@ -1611,20 +1671,37 @@ class Window(QMainWindow):
         elif self.custom_active:
             self.leave_custom()
 
+    @property
+    def bucket_mode(self):
+        """The buckets at the bottom and the keys 1 to 5 for them. A selection is made for that, a project rather for its notes."""
+        return bool(self.buckets and self.buckets.data.get('strip', self.selection is not None))
+
+    def toggle_bucket_mode(self, *args):
+        if not self.buckets:
+            return
+        self.buckets.data['strip'] = not self.bucket_mode
+        self.custom.save_timer.start()
+        if not self.review_active:
+            self.show_buckets() if self.bucket_mode else self.set_review(False)
+        self.review.sync_swipe_bucket()
+        self.review.place_overlays()
+        self.review.view().update()
+        self.update_project_state()
+
     def update_bucket_bars(self):
         """The strip is for the views that drag or click to a bucket. Tindr decides by swiping, about one of them."""
-        ready = bool(self.selection and self.selection.buckets)
         swiping = self.review_active and self.review.mode == 'swipe'
-        self.bucket_strip.setVisible(ready and bool(self.session and self.session.photos) and not self.custom_active and not swiping)
-        self.review_tabs.setVisible(ready and bool(self.session) and not self.choosing_photos())
+        self.bucket_strip.setVisible(self.bucket_mode and bool(self.session and self.session.photos) and not self.custom_active and not swiping)
+        self.bucket_button.setChecked(self.bucket_mode)
+        self.bucket_button.setVisible(bool(self.buckets) and not self.choosing_photos() and (bool(self.session.photos) or bool(self.selection)))
 
     def swipe_to_bucket(self, photo, key, adding):
         if key:
-            before = len(self.selection.undo_stack)
+            before = len(self.buckets.undo_stack)
             if adding:
-                self.selection.add(photo.relative_path, key)
-            elif key in self.selection.buckets_of(photo.relative_path):
-                self.selection.toggle(photo.relative_path, key)
+                self.buckets.add(photo.relative_path, key)
+            elif key in self.buckets.buckets_of(photo.relative_path):
+                self.buckets.toggle(photo.relative_path, key)
             self.buckets_done(before)
 
     def choosing_photos(self):
@@ -1645,19 +1722,20 @@ class Window(QMainWindow):
 
     def selection_changed(self):
         """Other photos or other buckets: what shows them follows."""
-        self.session.refresh()
-        self.choices.set_buckets()
-        self.review_tabs.rebuild()
+        if self.selection:
+            self.session.refresh()
+            self.choices.set_buckets()
+        self.bucket_rule.rebuild()
         self.review.sync_swipe_bucket()
         self.bucket_strip.update()
         self.update_project_state()
         self.filters_changed()
 
     def photo_buckets(self, photo):
-        """The buckets of a photo as (title, color); nothing outside a selection."""
-        if not self.selection:
+        """The buckets of a photo as (title, color)."""
+        if not self.buckets:
             return []
-        buckets = [self.selection.bucket(key) for key in self.selection.buckets_of(photo.relative_path)]
+        buckets = [self.buckets.bucket(key) for key in self.buckets.buckets_of(photo.relative_path)]
         return [(bucket['title'], bucket['color']) for bucket in buckets if bucket]
 
     def bucket_drag(self, point, photo):
@@ -1681,32 +1759,32 @@ class Window(QMainWindow):
 
     def move_to_bucket(self, photo, key, mode='move'):
         """The photo, and the others picked with it. Seen through a bucket, it leaves that one and keeps its others."""
-        rule = self.selection.rule()
+        rule = self.buckets.rule()
         source = rule['include'][0] if len(rule['include']) == 1 else None
-        before = len(self.selection.undo_stack)
+        before = len(self.buckets.undo_stack)
         for target in self.with_selection(photo):
             if mode == 'remove':
-                if key in self.selection.buckets_of(target.relative_path):
-                    self.selection.toggle(target.relative_path, key)
+                if key in self.buckets.buckets_of(target.relative_path):
+                    self.buckets.toggle(target.relative_path, key)
             else:
-                self.selection.move(target.relative_path, key, source, mode == 'add')
-        title = self.selection.bucket(key)['title']
+                self.buckets.move(target.relative_path, key, source, mode == 'add')
+        title = self.buckets.bucket(key)['title']
         self.toast({'remove': f'Retirée de {title}', 'add': f'Ajoutée aussi à {title}', 'move': f'Déplacée vers {title}'}[mode], 1000)
         self.buckets_done(before)
 
     def rate_key(self, value):
-        """In a selection, the keys of the notes are those of its buckets: 1 for the first one, the zero star for none."""
+        """In bucket mode, the keys of the notes are those of the buckets: 1 for the first one, the zero star for none."""
         if self.custom_active:
             self.custom.key_bucket(value)
-        elif not self.selection:
+        elif not self.bucket_mode:
             self.rate(value)
         elif not value:
-            before = len(self.selection.undo_stack)
+            before = len(self.buckets.undo_stack)
             for photo in self.target_photos():
-                self.selection.clear(photo.relative_path)
+                self.buckets.clear(photo.relative_path)
             self.buckets_done(before)
-        elif value <= len(self.selection.buckets):
-            self.toggle_bucket(self.selection.buckets[value-1]['id'])
+        elif value <= len(self.buckets.buckets):
+            self.toggle_bucket(self.buckets.buckets[value-1]['id'])
 
     def toggle_bucket(self, key):
         """In the bucket or out of it, on the photo shown and those picked with it."""
@@ -1714,19 +1792,19 @@ class Window(QMainWindow):
         if not photos:
             self.toast('Choisissez d’abord une photo.', 1600)
             return
-        before = len(self.selection.undo_stack)
-        adding = key not in self.selection.buckets_of(photos[0].relative_path)
+        before = len(self.buckets.undo_stack)
+        adding = key not in self.buckets.buckets_of(photos[0].relative_path)
         count = f'{len(photos)} photos ' if len(photos) > 1 else ''
-        self.toast(f"{count}{'Ajoutée' if adding and not count else 'ajoutées' if adding else 'Retirée' if not count else 'retirées'} {'à' if adding else 'de'} {self.selection.bucket(key)['title']}", 1000)
+        self.toast(f"{count}{'Ajoutée' if adding and not count else 'ajoutées' if adding else 'Retirée' if not count else 'retirées'} {'à' if adding else 'de'} {self.buckets.bucket(key)['title']}", 1000)
         for photo in photos:
             if adding:
-                self.selection.add(photo.relative_path, key)
-            elif key in self.selection.buckets_of(photo.relative_path):
-                self.selection.toggle(photo.relative_path, key)
+                self.buckets.add(photo.relative_path, key)
+            elif key in self.buckets.buckets_of(photo.relative_path):
+                self.buckets.toggle(photo.relative_path, key)
         self.buckets_done(before)
 
     def buckets_done(self, before):
-        changed = len(self.selection.undo_stack)-before
+        changed = len(self.buckets.undo_stack)-before
         if changed:
             self.remember(('buckets', changed))
             self.custom.changed()
@@ -2064,7 +2142,6 @@ class Window(QMainWindow):
         page = 3 if self.custom_active else (2 if self.review_active else 1) if has_photos else 0
         self.home_button.setVisible(bool(self.session) or self.custom_active)
         self.show_open_name()
-        self.view_buttons['buckets'].setVisible(bool(self.selection))
         self.update_bucket_bars()
         if page == 0:
             self.home.refresh()
@@ -2112,9 +2189,9 @@ class Window(QMainWindow):
         if self.session:
             self.save_session()
             self.remember_project()
-        if self.selection:
+        if self.buckets:
             self.custom.close_session()
-            self.selection = None
+            self.selection = self.buckets = None
             self.bucket_rule.hide()
         self.review.reset()
         self.review_active = False
@@ -2193,6 +2270,7 @@ class Window(QMainWindow):
         self.close_project()
         self.session = session
         self.selection = getattr(session, 'sorting', None)
+        self.buckets = self.selection or ProjectBuckets.of(session, 'Portfolio' if self.is_portfolio_path(path) else project_label(Path(path)))
         self.project_path = Path(path)
         self.baseline = original_inventory(path)
         self.portfolio.reconcile()
@@ -2200,9 +2278,10 @@ class Window(QMainWindow):
             self.portfolio.apply_seeds(session.photos)
         if self.selection:
             self.choices.set_buckets()
-            self.review_tabs.rebuild()
         else:
             self.choices.set_projects(sorted({self.portfolio.project_of(p.relative_path) for p in session.photos}) if self.viewing_portfolio() else [])
+        self.bucket_rule.rebuild()
+        self.bucket_rule.show()
         if session.photos:
             self.remember_project(time.time())
         absent = len(getattr(session, 'absent', ()))
@@ -2228,8 +2307,8 @@ class Window(QMainWindow):
                 combo.setCurrentIndex(0)
                 combo.blockSignals(False)
             self.choices.reset()
-            if self.selection:
-                self.selection.set_rule(include=[], exclude=[], none=False)
+            if self.buckets:
+                self.buckets.set_rule(include=[], exclude=[], none=False)
                 self.bucket_rule.rebuild()
             self.apply_filters()
         self.update_project_state()
@@ -2240,8 +2319,12 @@ class Window(QMainWindow):
         row = next((i for i, photo in enumerate(self.photos) if photo.relative_path == state.get('photo')), None)
         if row is not None:
             self.list.setCurrentRow(row)
+        if not self.selection:
+            self.custom.open_session(self.buckets)
         if not self.selection and self.photos and state.get('view') in ('wall', 'toile', 'color', 'swipe', 'instagram'):
             self.set_view(state['view'])
+        elif not self.selection and self.photos and self.bucket_mode:
+            self.show_buckets()
 
     def note_counts(self):
         """Photos per note, among those the marker filter lets through."""
@@ -2581,7 +2664,7 @@ class Window(QMainWindow):
                 self.counter.setText(f'{self.list.currentRow()+1} / {len(self.photos)}')
             metrics = self.name_label.fontMetrics()
             # A selection has more views in the header: its ribbon and its bars name the photo.
-            self.name_label.setText(metrics.elidedText(current.path.name, Qt.TextElideMode.ElideMiddle, 150) if current and not self.selection else '')
+            self.name_label.setText(metrics.elidedText(current.path.name, Qt.TextElideMode.ElideMiddle, 150) if current and not self.selection and not self.review_active else '')
             self.counter.setToolTip(f'{len(self.list.selectedItems())} sélectionnée(s) · {five} à 5 étoiles')
         else:
             self.counter.setText('Aucune photo')
@@ -2619,15 +2702,15 @@ class Window(QMainWindow):
         self.undo_stack.append(entry)
         del self.undo_stack[:-300]
         self.redo_stack.clear()
-        if self.selection:
-            self.selection.redo_stack.clear()
+        if self.buckets:
+            self.buckets.redo_stack.clear()
         self.sync_undo_buttons()
 
     def can_undo(self):
-        return bool(self.undo_stack or (self.selection and self.selection.undo_stack))
+        return bool(self.undo_stack or (self.buckets and self.buckets.undo_stack))
 
     def can_redo(self):
-        return bool(self.redo_stack or (self.selection and self.selection.redo_stack))
+        return bool(self.redo_stack or (self.buckets and self.buckets.redo_stack))
 
     def sync_undo_buttons(self):
         self.undo_button.setEnabled(self.can_undo())
@@ -2660,7 +2743,7 @@ class Window(QMainWindow):
             opposite = ('view', step[1], step[2]())
             self.toast(f'{step[1]} {word}', 1200)
         elif kind == 'buckets':
-            paths = [(self.selection.undo if undoing else self.selection.redo)() for _ in range(step[1])]
+            paths = [(self.buckets.undo if undoing else self.buckets.redo)() for _ in range(step[1])]
             opposite = step
             self.custom.changed()
             if self.review_active:
@@ -2733,9 +2816,9 @@ class Window(QMainWindow):
             return False
         if choices.liked.isChecked() and not photo.liked:
             return False
-        if self.selection:
-            return self.selection.matches(photo.relative_path)
-        if choices.project.currentIndex() <= 0:
+        if self.buckets and not self.buckets.matches(photo.relative_path):
+            return False
+        if self.selection or choices.project.currentIndex() <= 0:
             return True
         return self.portfolio.project_of(photo.relative_path) == choices.project.currentData()
 
@@ -2927,13 +3010,20 @@ class Window(QMainWindow):
             return
         if not self.session or self.export_job or self.relocating:
             return
+        if self.buckets and self.buckets.data['assigned']:
+            choice = ask(self, 'Exporter', 'Copier les photos rangées, avec un dossier par bucket, ou choisir les photos par leurs notes et leurs marques ?',
+                         [('cancel', 'Annuler', False), ('filters', 'Par filtres', False), ('buckets', 'Un dossier par bucket', True)])
+            if choice == 'buckets':
+                self.custom.export()
+            if choice != 'filters':
+                return
         dialog = ExportDialog(self)
         if dialog.exec():
             self.run_export(dialog.photos(), dialog.folder_name())
 
     def export_selection(self, stars, marker, portfolio, publish, project, liked=False):
         """Among the whole gallery, whatever is on screen. A rejected photo only leaves when asked for."""
-        return [p for p in self.session.photos if stars_match(p, stars) and marker_matches(p, marker)
+        return [p for p in self.session.photos if stars_match(p, stars) and marker_matches(p, marker) and self.buckets.matches(p.relative_path)
                 and (p.pick != PICK_REJECT or marker == 'reject') and (not portfolio or self.in_portfolio(p))
                 and (not publish or p.publish) and (not liked or p.liked) and (project == 'all' or self.portfolio.project_of(p.relative_path) == project)]
 

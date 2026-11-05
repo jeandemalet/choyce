@@ -1221,7 +1221,7 @@ def test_views_and_filter_panel(base):
     window = open_window(root)
     review = window.review
     # One row of views: Classique is the page with the ribbon, the others follow.
-    assert list(window.view_buttons) == ['buckets', 'classic', 'wall', 'toile', 'swipe', 'instagram']
+    assert list(window.view_buttons) == ['classic', 'wall', 'toile', 'swipe', 'instagram']
     # In the grid, Trier par leads to the sorts by color and back to the name.
     window.set_view('wall')
     review.wall_sort.setCurrentIndex(review.wall_sort.findData('contrast'))
@@ -1233,7 +1233,7 @@ def test_views_and_filter_panel(base):
     assert window.sort.currentData() == 'name_desc' and review.wall_sort_button.text() == 'Décroissant'
     review.wall_sort_button.click()
     window.set_view('classic')
-    assert not window.view_buttons['buckets'].isVisible()
+    assert not window.bucket_strip.isVisible() and not window.bucket_mode
     assert window.home_button.isVisible()
     assert [window.view_buttons[key].text() for key in ('toile', 'swipe', 'instagram')] == ['Pêle-mêle', 'Tindr', 'Instagram']
     assert window.view_buttons['classic'].isChecked() and window.pages.currentIndex() == 1
@@ -1252,7 +1252,7 @@ def test_views_and_filter_panel(base):
     panel = window.filter_panel
     wait(30)
     assert panel.isVisible() and review.tools.isVisible() and window.filter_chip.isChecked()
-    assert panel.geometry().right() == window.width()-1 and review.width() == window.width()-panel.width()
+    assert panel.geometry().right() == window.width()-1 and review.width() == window.width()-panel.width()-window.view_panel.width()
     window.note_filter.buttons[5].click()
     assert panel.isVisible() and 'affichée' in window.filter_count.text()
     window.clear_filters()
@@ -1260,7 +1260,7 @@ def test_views_and_filter_panel(base):
     # Filtre closes it, for every view.
     window.filter_chip.click()
     wait(30)
-    assert not panel.isVisible() and not window.filter_chip.isChecked() and review.width() == window.width()
+    assert not panel.isVisible() and not window.filter_chip.isChecked() and review.width() == window.width()-window.view_panel.width()
     window.set_view('toile')
     assert not panel.isVisible()
     window.filter_chip.click()
@@ -2171,12 +2171,12 @@ def test_activity_bar(base):
     activity.poll()
     assert '30 sur 40' in activity.label.text()
     window.background_tasks = real_tasks
-    assert activity.geometry().bottom() <= window.height() and activity.x() == 12
-    # Above the settings of the other views, which it must not cover.
+    assert activity.geometry().bottom() <= window.height() and activity.x() == window.view_panel.width()+12
+    # Above the note of the other views, which it must not cover.
     window.set_view('wall')
     activity.poll()
     wait(50)
-    assert activity.geometry().bottom() < review.mapTo(window, review.options['wall'][0].geometry().topLeft()).y()
+    assert activity.geometry().bottom() < review.mapTo(window, review.bar.geometry().topLeft()).y()
     window.set_view('classic')
     review.analysis_left = 0
     activity.poll()
@@ -2326,7 +2326,7 @@ def test_custom_view(base):
     custom.add_bucket()
     custom.add_bucket()
     first, second = [bucket['id'] for bucket in session.buckets]
-    assert session.bucket(first)['subtitle'] == 'Mariage, mars' and set(custom.cards) == {first, second}
+    assert session.bucket(first)['subtitle'] == 'Mariage, mars' and set(custom.cards) == {first, second, None}
     assert session.bucket(second)['color'] == '#0a84ff'
     wait(50)
     # The menu of the bucket at the far right stays inside the window.
@@ -2369,7 +2369,7 @@ def test_custom_view(base):
     assert stage.zoom == 1 and custom.zoom_button.text() == '100 %'
     # The background is that of the other views.
     window.set_background('#ffffff')
-    assert custom.picker.swatches[0].isChecked()
+    assert window.viewer_picker.swatches[0].isChecked()
     # A real drag from the photo to a bucket: it goes there, and the next photo comes.
     stage = custom.stage
     dragged = custom.current()['path']
@@ -2521,7 +2521,7 @@ def test_selection_views(base):
     # It opens on its buckets, and the other views are there, with the way back.
     window.open_custom(sorting)
     assert window.custom_active and window.pages.currentIndex() == 3 and window.home_button.isVisible()
-    assert window.view_buttons['buckets'].isVisible() and window.view_buttons['buckets'].isChecked()
+    assert window.view_buttons['classic'].isChecked() and window.bucket_button.isChecked()
     assert not window.bucket_strip.isVisible() and len(window.session.photos) == 6
     window.set_view('wall')
     review = window.review
@@ -2555,7 +2555,7 @@ def test_selection_views(base):
     state('b', 'include')
     assert {str(p.path) for p in window.photos} == {paths[0], paths[1], paths[2], paths[3]}
     assert rule.options.isVisibleTo(rule) and 'AG ou WPJA' in window.filter_chip.toolTip()
-    assert window.filter_chip.text() == 'Filtre', 'Revoir tells which bucket is shown'
+    assert window.filter_chip.text().startswith('Filtre :'), 'it says which bucket is shown'
     # Two of them included stay so, each with its own state.
     assert rule.buttons['a']['include'].isChecked() and rule.buttons['b']['include'].isChecked()
     rule.all_button.click()
@@ -2565,14 +2565,14 @@ def test_selection_views(base):
     wait(10)
     state('b', 'exclude')
     assert {str(p.path) for p in window.photos} == {paths[0], paths[1]} and 'sans WPJA' in window.filter_chip.toolTip()
-    window.review_tabs.tabs['none'].click()
+    window.bucket_rule.none_button.click()
     assert {str(p.path) for p in window.photos} == {paths[4], paths[5]}
-    window.review_tabs.tabs['all'].click()
+    window.clear_filters()
     assert len(window.photos) == 6 and not sorting.rule()['include']
     window.grab()
     # The Buckets view shows what the filter lets through, and the filter is at hand there.
     state('b', 'include')
-    window.set_view('buckets')
+    window.set_view('classic')
     assert custom.position()[1] == 2 and window.filter_chip.isVisible()
     window.set_view('wall')
     state('b', '')
@@ -2646,7 +2646,7 @@ def test_selection_views(base):
     # Tindr decides about one bucket, without the strip.
     window.set_view('swipe')
     swipe = review.view()
-    assert not strip.isVisible() and window.review_tabs.isVisible() and review.swipe_bucket_pill.isVisible() and not review.swipe_left.parentWidget().isVisible()
+    assert not strip.isVisible() and review.swipe_bucket_pill.isVisible() and not review.swipe_left.parentWidget().isVisible()
     review.swipe_bucket.setCurrentIndex(review.swipe_bucket.findData('b'))
     assert review.swipe_labels() == ('Retirer de WPJA', 'Ajouter à WPJA')
     card = swipe.current()
@@ -2688,12 +2688,12 @@ def test_selection_views(base):
     assert insta.CARD == '#000000' and insta.SCREEN != '#000000'
     window.grab()
     assert strip.isVisible()
-    window.set_view('classic')
+    window.set_review(False)
     window.grab()
     assert window.bucket_strip.isVisible() and not window.review_active
     # Back on the buckets, on the photo left in the other view.
     current = window.current_photo()
-    window.set_view('buckets')
+    window.set_view('classic')
     assert window.custom_active and custom.current()['path'] == current.relative_path
     # The way back, from every mode, and the project list knows nothing of it.
     window.home_button.click()
@@ -2781,6 +2781,75 @@ def test_repair_links(base):
     clear_settings()
 
 
+def test_buckets_in_a_project(base):
+    clear_settings()
+    root = make_project(base/'seaux', 6)
+    window = open_window(root)
+    custom, strip = window.custom, window.bucket_strip
+    names = [p.relative_path for p in window.photos]
+    # Outside bucket mode: the notes, and nothing written beside them.
+    assert not window.bucket_mode and not strip.isVisible() and window.bucket_button.isVisible() and window.bucket_section.isHidden()
+    window.rate_key(4)
+    assert window.current_photo().stars == 4
+    window.save_session()
+    custom.save()
+    assert not (window.session.session_dir/triphoto_custom.BUCKETS_FILE).exists()
+    # In bucket mode Classique holds the photo in large, and the keys fill the buckets.
+    window.bucket_button.click()
+    assert window.bucket_mode and window.custom_active and window.view_buttons['classic'].isChecked() and window.view_panel.isVisible()
+    assert None in custom.cards and not window.bucket_section.isHidden()
+    window.buckets.buckets.append({'id': 'a', 'title': 'Livre', 'subtitle': '', 'color': triphoto_custom.BUCKET_COLORS[0]})
+    custom.buckets_changed()
+    assert 'a' in custom.cards and None in custom.cards
+    settle(window, lambda: custom.current_image() is not None, 8000)
+    first = custom.current()['path']
+    assert first == window.current_photo().relative_path
+    window.rate_key(1)
+    assert window.buckets.buckets_of(first) == ['a'] and custom.current()['path'] != first, 'put in the bucket, and on to the next one'
+    assert window.photos[0].stars == 4, 'its note stays'
+    # The strip, in the other views, and the same keys.
+    window.set_view('wall')
+    assert strip.isVisible() and not window.custom_active
+    wall = window.review.view()
+    assert window.photo_buckets(window.photos[0]) == [('Livre', triphoto_custom.BUCKET_COLORS[0])]
+    # The filter, in or out of the mode.
+    window.bucket_rule.buttons['a']['include'].click()
+    assert [p.relative_path for p in window.photos] == [first]
+    window.clear_filters()
+    window.bucket_button.click()
+    assert not window.bucket_mode and not strip.isVisible() and window.review_active and not window.bucket_section.isHidden()
+    assert window.photo_buckets(window.photos[0]), 'still shown on the photos'
+    window.set_view('classic')
+    assert window.pages.currentIndex() == 1
+    # Back later, or after the folder moved: the buckets follow, by relative path.
+    window.close_project()
+    window.pool.waitForDone()
+    window.review.analysis_pool.waitForDone()
+    moved = base/'seaux ailleurs'
+    os.replace(root, moved)
+    window.set_folder(moved)
+    settle(window, lambda: window.current_photo() is not None)
+    assert window.buckets.buckets_of(first) == ['a'] and window.buckets.file_of(first) == moved/first
+    # The export offers one folder per bucket.
+    destination = base/'seaux export'
+    destination.mkdir()
+    real_ask = triphoto_qt.ask
+    triphoto_qt.ask = lambda parent, title, text, buttons: 'buckets'
+    custom.ask_export_folder = lambda: str(destination)
+    real_inform = triphoto_qt.inform
+    triphoto_qt.inform = lambda *args: None
+    real_custom_inform = triphoto_custom.inform
+    triphoto_custom.inform = lambda *args: None
+    try:
+        window.export()
+        settle(window, lambda: window.export_job is None, 8000)
+        assert any(found.name == first for found in destination.rglob('*.jpg'))
+    finally:
+        triphoto_qt.ask, triphoto_qt.inform, triphoto_custom.inform = real_ask, real_inform, real_custom_inform
+    window.close()
+    clear_settings()
+
+
 def test_same_words_everywhere(base):
     clear_settings()
     root = make_project(base/'mots', 4)
@@ -2832,7 +2901,7 @@ def test_search_links(base):
         window.close_project()
         window.pool.waitForDone()
         window.review.analysis_pool.waitForDone()
-        sorting = window.custom.store.create('Liens')
+        sorting = window.custom.store.create('Recherche')
         kept = base/'recherche'/'ailleurs'
         kept.mkdir()
         shutil.copy2(paths[0], kept/Path(paths[0]).name)
@@ -2850,7 +2919,7 @@ def test_search_links(base):
         (disk/'jeux'/'profond'/Path(paths[1]).name).write_bytes(b'copie')
         # A lost copy of a photo the selection also holds elsewhere becomes that photo, with its buckets.
         twin = next(photo for photo in moved.iterdir() if photo.name == Path(paths[0]).name)
-        again = window.custom.store.sessions()[0]
+        again = next(session for session in window.custom.store.sessions() if session.name == 'Recherche')
         lost_twin = str(base/'recherche'/'parti'/'Mariage'/'autre.jpg')
         shutil.copy2(twin, moved/'autre.jpg')
         again.data['photos'] += [{'path': str(moved/'autre.jpg'), 'gallery': 'x', 'relative': 'autre.jpg'}, {'path': lost_twin, 'gallery': 'x', 'relative': 'autre.jpg'}]
@@ -2861,7 +2930,7 @@ def test_search_links(base):
         window.search_links()
         window.pool.waitForDone()
         wait(100)
-        found = window.custom.store.sessions()[0]
+        found = next(session for session in window.custom.store.sessions() if session.name == 'Recherche')
         assert all(Path(photo['path']).is_file() for photo in found.photos)
         assert all(Path(photo['path']).parent == moved for photo in found.photos), 'the folder holding most of them wins over a stray copy'
         assert len(found.photos) == 7, 'the two copies of a photo became one'
@@ -2918,13 +2987,13 @@ def test_selection_review_and_health(base):
         sorting.save()
         window.open_custom(sorting)
         # One click reviews a bucket, from every view, and says which one is shown.
-        tabs = window.review_tabs
-        assert tabs.isVisible() and set(tabs.tabs) == {'all', 'a', 'b', 'none'} and tabs.tabs['all'].isChecked()
-        assert '3' in tabs.tabs['a'].text()
-        tabs.tabs['a'].click()
-        assert custom.position()[1] == 3 and tabs.tabs['a'].isChecked() and not tabs.tabs['all'].isChecked()
-        window.set_view('classic')
-        assert len(window.photos) == 3 and tabs.isVisible() and window.bucket_strip.isVisible()
+        rule = window.bucket_rule
+        assert set(rule.buttons) == {'a', 'b'} and rule.buttons['a'][''].isChecked()
+        assert rule.counts['a'].text() == '3'
+        rule.buttons['a']['include'].click()
+        assert custom.position()[1] == 3 and rule.buttons['a']['include'].isChecked()
+        window.set_review(False)
+        assert len(window.photos) == 3 and window.bucket_strip.isVisible()
         # In Classique too, a thumbnail goes to another bucket, and is seen no more in this one.
         window.show()
         window.list.doItemsLayout()
@@ -2956,9 +3025,9 @@ def test_selection_review_and_health(base):
         assert sorting.buckets_of(moved.relative_path) == ['b'] and len(window.photos) == 2 and not strip.dragging
         window.undo()
         assert sorting.buckets_of(moved.relative_path) == ['a'] and len(window.photos) == 3
-        tabs.tabs['none'].click()
+        rule.none_button.click()
         assert {p.relative_path for p in window.photos} == set(paths[4:])
-        tabs.tabs['all'].click()
+        window.clear_filters()
         assert len(window.photos) == 6
         # The check finds what is empty, cut short or gone.
         window.close_project()
@@ -3107,9 +3176,8 @@ def test_user_journey(base):
     window.custom.session.data['buckets'].append({'id': 'a', 'title': 'Sony', 'subtitle': '', 'color': triphoto_custom.BUCKET_COLORS[0]})
     window.custom.buckets_changed()
     wait()
-    assert window.review_tabs.y() < window.pages.y() < window.bucket_strip.y() or window.review_tabs.y() < window.pages.y()
     window.set_view('wall')
-    assert window.review_tabs.y() < window.pages.y() < window.bucket_strip.y()
+    assert window.pages.y() < window.bucket_strip.y()
     window.fill_project_menu()
     labels = [action.text() for action in window.project_menu.actions()]
     assert 'Modifier la sélection…' in labels and 'Sélections' in labels and 'Portfolio' in labels
@@ -3137,7 +3205,7 @@ def main():
     app.setStyleSheet(triphoto_qt.STYLE)
     base = Path(tempfile.mkdtemp(prefix='triphoto-tests-'))
     tests = [test_legacy_session, test_nested_session_ignored, test_dominant_color, test_recents, test_shortcuts,
-             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_quick_export, test_export_by_its_button, test_themed_dialog, test_update, test_keys_undo_and_ribbon, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_repair_links, test_same_words_everywhere, test_search_links, test_selection_review_and_health, test_defaults_and_viewer_room, test_user_journey]
+             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_quick_export, test_export_by_its_button, test_themed_dialog, test_update, test_keys_undo_and_ribbon, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_repair_links, test_buckets_in_a_project, test_same_words_everywhere, test_search_links, test_selection_review_and_health, test_defaults_and_viewer_room, test_user_journey]
     failures = 0
     try:
         for test in tests:

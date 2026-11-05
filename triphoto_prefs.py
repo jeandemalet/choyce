@@ -55,6 +55,7 @@ ACTIONS = [
     ('mode_color', 'Vue Grille, triée par couleur', ['Ctrl+3']),
     ('mode_swipe', 'Vue Tindr', ['Ctrl+4']),
     ('mode_instagram', 'Vue Instagram', ['Ctrl+5']),
+    ('bucket_mode', 'Mode buckets', ['Ctrl+B']),
     ('custom_home', 'Accueil', ['Ctrl+6']),
     ('refresh', 'Actualiser le projet', ['F5']),
     ('open', 'Ajouter des photos', ['Ctrl+O']),

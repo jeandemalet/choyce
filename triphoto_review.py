@@ -619,7 +619,7 @@ class Surface(QWidget):
 
     def pick_for_drag(self, photo, extend):
         """In a selection, pressing a photo already picked keeps the others, so that they can be dragged together."""
-        if extend or not self.window_.selection or not any(other is photo for other in self.targets()):
+        if extend or not self.window_.bucket_mode or not any(other is photo for other in self.targets()):
             self.pick(photo, extend)
 
     def paint_badges(self, painter, rect, photo):
@@ -950,7 +950,7 @@ class WallView(Surface):
 
     def drop_zones(self):
         # In a selection, a photo goes to the buckets under the view.
-        if self.window_.selection:
+        if self.window_.bucket_mode:
             return []
         left, width = self.content_box()
         side = max(96., left-6)
@@ -962,7 +962,7 @@ class WallView(Surface):
         return any(zone.contains(position) for zone in self.drop_zones())
 
     def paint_drag(self, painter):
-        if self.window_.selection:
+        if self.window_.bucket_mode:
             return
         label = self.review.drop_label()
         hovered = self.zone_at(self.drag_position)
@@ -1036,7 +1036,7 @@ class WallView(Surface):
             if photo:
                 extend = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
                 self.pick_for_drag(photo, extend)
-                self.press = (photo, event.position()) if not extend and (not self.by_color or self.window_.selection) else None
+                self.press = (photo, event.position()) if not extend and (not self.by_color or self.window_.bucket_mode) else None
             else:
                 self.unpick()
 
@@ -1051,7 +1051,7 @@ class WallView(Surface):
         if self.dragging:
             self.drag_position = event.position()
             self.update()
-            if self.window_.selection:
+            if self.window_.bucket_mode:
                 self.window_.bucket_drag(event.globalPosition().toPoint(), self.press[0])
 
     def mouseReleaseEvent(self, event):
@@ -1061,7 +1061,7 @@ class WallView(Surface):
             self.unsetCursor()
             self.review.set_bottom_visible(True)
             self.update()
-            if self.window_.selection:
+            if self.window_.bucket_mode:
                 self.window_.bucket_drop(event.globalPosition().toPoint(), press[0])
             elif self.zone_at(event.position()):
                 self.review.drop_out(press[0])
@@ -1235,7 +1235,7 @@ class ToileView(Surface):
     def tile_size(self, photo):
         """The size follows the note."""
         # In a selection the notes stand aside: all the prints have the size of the best ones.
-        side = 400 if self.window_.selection else 250+photo.stars*30
+        side = 400 if self.window_.bucket_mode else 250+photo.stars*30
         ratio = self.review.aspect(photo)
         return (side, side/ratio) if ratio >= 1 else (side*ratio, side)
 
@@ -1335,7 +1335,7 @@ class ToileView(Surface):
             position = self.positions[photo.relative_path]
             position[0] += delta.x()/self.scale_
             position[1] += delta.y()/self.scale_
-            if self.window_.selection:
+            if self.window_.bucket_mode:
                 self.window_.bucket_drag(event.globalPosition().toPoint(), photo)
         else:
             self.pan += delta
@@ -1347,7 +1347,7 @@ class ToileView(Surface):
         if self.drag is not None and self.drag[0] is None and not self.moved:
             self.unpick()
         if self.drag is not None and self.drag[0] is not None and self.moved:
-            if self.window_.selection:
+            if self.window_.bucket_mode:
                 self.window_.bucket_drop(event.globalPosition().toPoint(), self.drag[0])
             else:
                 self.remember_move(self.drag[0].relative_path, self.drag_start)
@@ -1859,14 +1859,12 @@ class ChoiceFilter(QFrame):
         """Inside a selection, the filter on its buckets takes the place of the choice of a project."""
         self.project.hide()
         self.portfolio.show()
-        self.window.bucket_rule.rebuild()
-        self.window.bucket_rule.show()
 
     def active_labels(self):
         labels = [button.text() for button in (self.portfolio, self.publish, self.liked) if button.isChecked()]
         if self.project.currentIndex() > 0:
             labels.append(self.project.currentText().replace('&&', '&'))
-        if self.window.selection:
+        if self.window.buckets:
             labels += self.window.bucket_rule.labels()
         return labels
 
@@ -2287,6 +2285,8 @@ class ReviewPage(QWidget):
         self.tools = QWidget()
         lines = QVBoxLayout(self.tools)
         lines.setContentsMargins(0, 0, 0, 0)
+        lines.addWidget(QLabel('Affichage', objectName='muted'))
+        lines.setContentsMargins(0, 0, 0, 0)
         lines.setSpacing(8)
         row = QHBoxLayout()
         row.setSpacing(4)
@@ -2326,18 +2326,17 @@ class ReviewPage(QWidget):
         return button
 
     def option_pill(self):
-        pill = QFrame(self, objectName='pill')
-        pill.setFixedHeight(46)
-        row = QHBoxLayout(pill)
-        row.setContentsMargins(12, 0, 12, 0)
-        row.setSpacing(8)
+        """A group of settings, stacked in the panel of the view."""
+        pill = QFrame(self)
+        row = QVBoxLayout(pill)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(5)
         pill.hide()
         return pill, row
 
     def option_combo(self, row, values, setting, default, width, slot):
         combo = QComboBox()
         combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        combo.setFixedWidth(width)
         for key, label in values:
             combo.addItem(label, key)
         # Settings come back as text after a restart, whatever the type stored.
@@ -2360,7 +2359,7 @@ class ReviewPage(QWidget):
         return button
 
     def build_options(self):
-        """Bottom bar, around the note of the photo: left and right groups per mode."""
+        """The settings of each view, shown in its panel: two groups per mode."""
         toile, wall, color = self.views['toile'], self.views['wall'], self.views['color']
         self.action_combos = []
         toile_pill, row = self.option_pill()
@@ -2369,14 +2368,15 @@ class ReviewPage(QWidget):
         row.addWidget(QLabel('En largeur', objectName='muted'))
         self.columns_slider = QSlider(Qt.Orientation.Horizontal)
         self.columns_slider.setRange(2, 16)
-        self.columns_slider.setFixedWidth(110)
         self.columns_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.columns_slider.setValue(toile.columns)
         self.columns_slider.valueChanged.connect(self.set_columns)
-        row.addWidget(self.columns_slider)
         self.columns_label = QLabel(str(toile.columns))
         self.columns_label.setFixedWidth(18)
-        row.addWidget(self.columns_label)
+        line = QHBoxLayout()
+        line.addWidget(self.columns_slider, 1)
+        line.addWidget(self.columns_label)
+        row.addLayout(line)
         swipe_left, row = self.option_pill()
         row.addWidget(QLabel('À gauche', objectName='muted'))
         self.swipe_left = self.action_combo(row, 'swipe_left')
@@ -2388,11 +2388,13 @@ class ReviewPage(QWidget):
         row.addWidget(QLabel('Bucket', objectName='muted'))
         self.swipe_bucket = QComboBox()
         self.swipe_bucket.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.swipe_bucket.setMinimumWidth(150)
         row.addWidget(self.swipe_bucket)
-        row.addWidget(QLabel('À gauche : retirer. À droite : ajouter.', objectName='muted'))
+        hint = QLabel('À gauche : retirer. À droite : ajouter.', objectName='muted')
+        hint.setWordWrap(True)
+        row.addWidget(hint)
         self.swipe_bucket_pill.hide()
         color_left, row = self.option_pill()
+        row.addWidget(QLabel('Disposition', objectName='muted'))
         self.option_combo(row, [('staggered', 'Décalée'), ('rows', 'Rangées')], 'color_layout', 'rows', 100, self.set_color_layout)
         self.groups_button = self.option_button(row, 'Blocs de couleur', self.set_color_groups, True, color.groups)
         color_pill, row = self.option_pill()
@@ -2401,6 +2403,7 @@ class ReviewPage(QWidget):
         self.close_color.setToolTip('Referme les vides laissés par les photos retirées')
         self.close_color.hide()
         wall_left, row = self.option_pill()
+        row.addWidget(QLabel('Disposition', objectName='muted'))
         self.option_combo(row, [('staggered', 'Décalée'), ('rows', 'Rangées')], 'wall_layout', 'staggered', 100, self.set_wall_layout)
         # The staggered layout follows its modules: this choice only applies to rows.
         self.emphasis_combo = self.option_combo(row, [('equal', 'Formats égaux'), ('landscape', 'Horizontales en avant'), ('portrait', 'Verticales en avant')],
@@ -2409,14 +2412,11 @@ class ReviewPage(QWidget):
         row.addWidget(QLabel('Largeur', objectName='muted'))
         self.width_slider = QSlider(Qt.Orientation.Horizontal)
         self.width_slider.setRange(35, 100)
-        self.width_slider.setFixedWidth(90)
         self.width_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.width_slider.setValue(wall.width_percent)
         self.width_slider.valueChanged.connect(self.set_wall_width)
         row.addWidget(self.width_slider)
-        row.addSpacing(12)
         self.option_button(row, 'Mélanger', self.shuffle)
-        row.addSpacing(8)
         self.wall_sort, self.wall_sort_button = self.sort_controls(row, shuffled=True)
         wall_right, row = self.option_pill()
         row.addWidget(QLabel('Sortie', objectName='muted'))
@@ -2430,7 +2430,6 @@ class ReviewPage(QWidget):
         insta_left, row = self.option_pill()
         row.addWidget(QLabel('Compte', objectName='muted'))
         self.account_edit = QLineEdit(self.instagram_account())
-        self.account_edit.setFixedWidth(130)
         self.account_edit.textEdited.connect(self.set_instagram_account)
         self.account_edit.returnPressed.connect(self.account_edit.clearFocus)
         row.addWidget(self.account_edit)
@@ -2444,7 +2443,6 @@ class ReviewPage(QWidget):
         row.addWidget(QLabel('Trier par', objectName='muted'))
         combo = QComboBox()
         combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        combo.setFixedWidth(116)
         combo.addItem('Nom', 'name')
         combo.addItem('Date', 'date')
         for label, one_way, *_ in COLOR_ORDERS:
@@ -2454,7 +2452,6 @@ class ReviewPage(QWidget):
         combo.currentIndexChanged.connect(lambda *_: self.set_sort(combo.currentData()))
         row.addWidget(combo)
         button = self.option_button(row, '', self.flip_sort)
-        button.setFixedWidth(96)
         return combo, button
 
     def set_sort(self, value):
@@ -2484,7 +2481,7 @@ class ReviewPage(QWidget):
         self.sync_color_order()
 
     def sync_swipe_bucket(self):
-        selection = self.window.selection
+        selection = self.window.buckets
         if not selection:
             return
         wanted = self.swipe_bucket.currentData()
@@ -2501,7 +2498,6 @@ class ReviewPage(QWidget):
     def action_combo(self, row, setting):
         combo = QComboBox()
         combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        combo.setFixedWidth(150)
         combo.currentIndexChanged.connect(lambda *_: self.settings.setValue(setting, combo.currentData()) if combo.currentData() else None)
         combo.setProperty('setting', setting)
         row.addWidget(combo)
@@ -2562,43 +2558,19 @@ class ReviewPage(QWidget):
     def place_overlays(self):
         options = getattr(self, 'options', {})
         # In a selection, a photo dragged out of the grid goes to a bucket: no action to choose.
-        selection = bool(self.window.selection)
+        selection = self.window.bucket_mode
+        current = self.mode if self.window.review_active else None
         no_exit = options['wall'][1] if selection and 'wall' in options else None
         swiping = options.get('swipe', (None, None)) if selection else (None, None)
         for mode, group in options.items():
             for pill in group:
                 if pill is not None:
-                    pill.setVisible(mode == self.mode and self.bottom_visible and pill is not no_exit and pill not in swiping)
+                    pill.setVisible(mode == current and pill is not no_exit and pill not in swiping)
         if 'swipe' in options:
-            self.swipe_bucket_pill.setVisible(selection and self.mode == 'swipe' and self.bottom_visible)
+            self.swipe_bucket_pill.setVisible(selection and current == 'swipe')
         show_bar = self.bottom_visible and bool(self.targets())
         self.bar.setVisible(show_bar)
-        left, right = options.get(self.mode, (None, None))
-        right = None if right is no_exit else right
-        if selection and self.mode == 'swipe':
-            left, right = self.swipe_bucket_pill, None
-        for pill in (left, right):
-            if pill is not None:
-                pill.adjustSize()
-        y = self.height()-self.bar.height()-14
-        sides = [pill.width() for pill in (left, right) if pill is not None]
-        line = [part for part in (left, self.bar if show_bar else None, right) if part is not None]
-        total = sum(part.width() for part in line)+8*(len(line)-1)
-        if total <= self.width()-24:
-            x = (self.width()-total)//2
-            for part in line:
-                part.move(x, y)
-                x += part.width()+8
-        else:
-            # Too narrow for one line: the options go just above the note.
-            self.bar.move((self.width()-self.bar.width())//2, y)
-            above = y-54 if show_bar else y
-            width = sum(sides)+8*(len(sides)-1)
-            x = max(8, (self.width()-width)//2)
-            for pill in (left, right):
-                if pill is not None:
-                    pill.move(x, above)
-                    x += pill.width()+8
+        self.bar.move((self.width()-self.bar.width())//2, self.height()-self.bar.height()-14)
 
     def resizeEvent(self, event):
         self.stack.setGeometry(self.rect())
@@ -2769,13 +2741,13 @@ class ReviewPage(QWidget):
             self.window.change([photo])
 
     def swipe_labels(self):
-        if self.window.selection:
+        if self.window.bucket_mode:
             title = self.swipe_bucket.currentText().replace('&&', '&')
             return f'Retirer de {title}', f'Ajouter à {title}'
         return self.swipe_left.currentText(), self.swipe_right.currentText()
 
     def apply_swipe(self, photo, direction):
-        if self.window.selection:
+        if self.window.bucket_mode:
             self.window.swipe_to_bucket(photo, self.swipe_bucket.currentData(), direction > 0)
             return
         self.apply_action(photo, (self.swipe_right if direction > 0 else self.swipe_left).currentData())
