@@ -175,6 +175,12 @@ Les projets créés avec une ancienne version s'ouvrent tels quels. Une ancienne
 
 Formats pris en charge : JPEG, PNG, TIFF, WebP et BMP. Les fichiers RAW ne sont pas lus.
 
+## Ajouter à et envoyer sur un téléphone
+
+Le clic droit sur une photo, ou sur toutes celles sélectionnées, propose aussi **Ajouter à…**, pour le portfolio, une sélection existante ou une nouvelle, et **Envoyer sur un téléphone…**.
+
+L'envoi sur un téléphone ne demande rien à installer sur celui-ci. Choyce affiche un QR code : le téléphone le scanne avec son appareil photo, sur le même Wi-Fi que l'ordinateur, et ouvre une page avec les photos envoyées, à toucher pour les enregistrer une à une ou à télécharger d'un coup. Ajoutée à l'écran d'accueil, cette page sert aux envois suivants, qui apparaissent en haut : le téléphone reste enregistré d'un lancement à l'autre et après une mise à jour, tant qu'on ne le retire pas dans la même fenêtre. La page ne répond que lorsque Choyce est ouvert. Au premier envoi, Windows demande d'autoriser Choyce sur les réseaux privés.
+
 ## Organisation du code
 
 - `triphoto.py` : session, couleurs, export et ancienne interface Tk ;
@@ -185,6 +191,7 @@ Formats pris en charge : JPEG, PNG, TIFF, WebP et BMP. Les fichiers RAW ne sont 
 - `triphoto_portfolio.py` : liste du portfolio et ouverture de ses photos ;
 - `triphoto_prefs.py` : projets récents, raccourcis et préférences ;
 - `triphoto_update.py` : détection et installation des nouvelles versions ;
+- `triphoto_share.py` : page des téléphones et envoi des photos sur le Wi-Fi ;
 - `triphoto_theme.py` : palette, feuille de style et icônes vectorielles.
 
 Les tests travaillent sur des images de synthèse, avec des réglages séparés des vôtres :

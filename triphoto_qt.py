@@ -27,6 +27,7 @@ from triphoto_custom import ProjectBuckets, BucketFilter, BucketStrip, CustomPag
 from triphoto_portfolio import MANIFEST_FILE, Portfolio, PortfolioSession, RelocateJob, UNSORTED
 from triphoto_prefs import (ALIASES, LinkSearchJob, MARK_TIPS, PreferencesDialog, Recents, age_label, ask, inform, known_links, locate_photos, locate_project, moved_path, path_key, shortcut_map)
 from triphoto_review import MODES, BackgroundPicker, ChoiceFilter, MarkerFilter, NoteFilter, RatingBar, ReviewPage
+from triphoto_share import Portal
 from triphoto_update import UpdateCheck, UpdateDownload, can_install, launch_installer, write_installer
 from triphoto_theme import (ACCENT, ASSETS, BACKGROUNDS, FAINT, INK, RAISED, REJECT, SELECT, STYLE, TEXT,
     contrast_on, draw_bookmark, draw_bucket_chips, draw_check, draw_clear_star, draw_cross, draw_flag, draw_heart, draw_send, draw_stars)
@@ -1098,6 +1099,99 @@ class AddToDialog(QDialog):
         self.accept()
 
 
+class PhoneDialog(QDialog):
+    """A QR code that a new phone scans once, and the phones that already have their page."""
+
+    def __init__(self, window, share):
+        super().__init__(window)
+        self.owner, self.portal = window, window.phone_portal
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        frame = QFrame(objectName='dialog')
+        outer.addWidget(frame)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(24, 22, 24, 18)
+        layout.setSpacing(8)
+        layout.addWidget(QLabel('Envoyer sur un téléphone', objectName='dialogTitle'))
+        count = len(share['photos'])
+        layout.addWidget(QLabel(f"{share['title']} · {count} photo{'s' if count > 1 else ''}", objectName='muted'))
+        layout.addSpacing(6)
+        self.devices_box = QVBoxLayout()
+        self.devices_box.setSpacing(2)
+        layout.addLayout(self.devices_box)
+        self.qr = QLabel(alignment=Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(self.qr)
+        self.how = QLabel(objectName='faint')
+        self.how.setWordWrap(True)
+        self.how.setFixedWidth(360)
+        layout.addWidget(self.how)
+        layout.addSpacing(6)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        done = QPushButton('Fermer', objectName='primary')
+        done.clicked.connect(self.accept)
+        buttons.addWidget(done)
+        layout.addLayout(buttons)
+        self.qr.setPixmap(qr_pixmap(self.portal.pair_url(), 240))
+        self.refresh()
+
+    def refresh(self):
+        while self.devices_box.count():
+            item = self.devices_box.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                while item.layout().count():
+                    child = item.layout().takeAt(0)
+                    if child.widget():
+                        child.widget().deleteLater()
+        devices = sorted(self.portal.devices.items(), key=lambda item: -item[1].get('seen', 0))
+        if devices:
+            self.devices_box.addWidget(QLabel('Téléphones enregistrés', objectName='muted'))
+            for key, device in devices:
+                row = QHBoxLayout()
+                row.addWidget(QLabel(f"{device.get('name', 'Téléphone')}  ·  vu {age_label(device.get('seen'))}"), 1)
+                forget = QPushButton('Retirer', objectName='ghost')
+                forget.clicked.connect(lambda checked=False, key=key: self.forget(key))
+                row.addWidget(forget)
+                self.devices_box.addLayout(row)
+            self.devices_box.addSpacing(8)
+        address = self.portal.address()
+        if devices:
+            text = ("Sur un téléphone enregistré, ouvrez Choyce depuis son écran d'accueil : cet envoi est en haut. "
+                    f"Pour un autre téléphone, scannez le QR code avec son appareil photo. Même Wi-Fi que l'ordinateur ({address}).")
+        else:
+            text = (f"Scannez le QR code avec l'appareil photo du téléphone, sur le même Wi-Fi que l'ordinateur ({address}). "
+                    "Rien à installer. Ajoutée à l'écran d'accueil, la page reste valable pour les prochains envois, même après une mise à jour de Choyce.")
+        self.how.setText(text)
+
+    def forget(self, key):
+        self.portal.forget(key)
+        self.refresh()
+
+
+def qr_pixmap(text, side):
+    """Black on white with a quiet margin, as every phone camera expects."""
+    import qrcode
+    code = qrcode.QRCode(border=3, error_correction=qrcode.constants.ERROR_CORRECT_M)
+    code.add_data(text)
+    code.make(fit=True)
+    matrix = code.get_matrix()
+    cells = len(matrix)
+    scale = max(1, side//cells)
+    image = QImage(cells*scale, cells*scale, QImage.Format.Format_RGB32)
+    image.fill(QColor('white'))
+    painter = QPainter(image)
+    for y, line in enumerate(matrix):
+        for x, dark in enumerate(line):
+            if dark:
+                painter.fillRect(x*scale, y*scale, scale, scale, QColor('black'))
+    painter.end()
+    return QPixmap.fromImage(image)
+
+
 class ActivityBar(QFrame):
     """What is working in the background, at the bottom of the window. Short tasks stay silent: a flash at every photo would only distract."""
     DELAY = .7
@@ -1321,6 +1415,10 @@ class Window(QMainWindow):
         self.pages.addWidget(splitter)
         self.pages.addWidget(self.review)
         self.custom = CustomPage(self, SETTINGS_SCOPE, project_label)
+        # The phones that joined find their page whenever Choyce is open.
+        self.phone_portal = Portal(self.custom.store.folder.parent)
+        if self.phone_portal.devices:
+            self.phone_portal.start()
         self.custom_active = False
         self.pages.addWidget(self.custom)
         self.bucket_strip = BucketStrip(self)
@@ -3124,8 +3222,11 @@ class Window(QMainWindow):
         adding.setEnabled(not self.relocating)
         adding.triggered.connect(lambda checked=False: self.add_photos_to(photos))
         first = menu.actions()[0] if menu.actions() else None
+        phone = QAction('Envoyer sur un téléphone…', menu)
+        phone.triggered.connect(lambda checked=False: self.send_to_phone(photos))
         menu.insertAction(first, action)
         menu.insertAction(first, adding)
+        menu.insertAction(first, phone)
         if first:
             menu.insertSeparator(first)
 
@@ -3152,6 +3253,17 @@ class Window(QMainWindow):
             self.toast(f'Déjà dans « {name} ».' if len(photos) == 1 else f'Ces photos sont déjà dans « {name} ».')
         else:
             self.toast(f"{count} photo{'s' if count > 1 else ''} ajoutée{'s' if count > 1 else ''} à « {name} »")
+
+    def send_to_phone(self, photos):
+        """A new sending at the top of the phones' page, and the way for a new phone to join."""
+        if not photos:
+            return
+        if not self.phone_portal.start():
+            inform(self, 'Envoi impossible', "Choyce n'a pas pu ouvrir de port sur ce réseau.")
+            return
+        place = self.selection.name if self.selection else ('Portfolio' if self.viewing_portfolio() else project_label(self.project_path))
+        share = self.phone_portal.add_share(place, [photo.path for photo in photos])
+        PhoneDialog(self, share).exec()
 
     def selection_entry(self, photo):
         """A photo as a selection holds it: where it is, the project it comes from, and its path inside that project."""
@@ -3298,6 +3410,7 @@ class Window(QMainWindow):
         self.closing = True
         self.stop_export()
         self.custom.shutdown()
+        self.phone_portal.stop()
         if self.update_job:
             self.update_job.cancelled.set()
         if self.link_search:

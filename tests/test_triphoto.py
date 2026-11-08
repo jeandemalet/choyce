@@ -1042,6 +1042,85 @@ def test_add_to_by_right_click(base):
     clear_settings()
 
 
+def test_phone_portal(base):
+    """A phone joins once by the QR code, then keeps its page, across a restart of the program."""
+    import urllib.request, urllib.error, io
+    import triphoto_share
+    root = make_project(base/'telephone', 3)
+    Image.new('RGB', (800, 500), (10, 20, 30)).save(root/'scan.tif')
+    folder = base/'donnees telephone'
+    portal = triphoto_share.Portal(folder)
+    assert portal.start()
+    port = portal.data['port']
+    local = f'http://127.0.0.1:{port}'
+    paths = sorted(root.glob('*.jpg'))[:2]+[root/'scan.tif']
+    share = portal.add_share('Mariage test', paths)
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args):
+            return None
+    opener = urllib.request.build_opener(NoRedirect)
+    request = urllib.request.Request(f"{local}/a/{portal.data['pair']}", headers={'User-Agent': 'Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/AP1A) Chrome/120'})
+    try:
+        opener.open(request)
+        raise AssertionError('no redirect')
+    except urllib.error.HTTPError as answer:
+        assert answer.code == 302
+        page = answer.headers['Location']
+    key = page.split('/')[2]
+    assert portal.devices[key]['name'] == 'Pixel 8'
+    read = lambda path: urllib.request.urlopen(local+page+path, timeout=10).read()
+    text = read('').decode()
+    assert 'Mariage test' in text and f"t/{share['id']}/2" in text
+    assert Image.open(io.BytesIO(read(f"t/{share['id']}/0"))).size[0] <= triphoto_share.THUMB_SIDE
+    assert read(f"f/{share['id']}/0") == paths[0].read_bytes()
+    assert Image.open(io.BytesIO(read(f"f/{share['id']}/2"))).format == 'JPEG'
+    with zipfile.ZipFile(io.BytesIO(read(f"zip/{share['id']}"))) as archive:
+        assert sorted(archive.namelist()) == sorted([paths[0].name, paths[1].name, 'scan.jpg'])
+    assert json.loads(read('etat'))['latest'] == share['id']
+    # Another sending comes first; the page of the phone says so.
+    second = portal.add_share('Portfolio', paths[:1])
+    assert json.loads(read('etat'))['latest'] == second['id']
+    # A wrong code or an unknown phone gets nothing.
+    for path in ('/a/faux', '/p/inconnu/', f"/p/inconnu/f/{share['id']}/0"):
+        try:
+            urllib.request.urlopen(local+path, timeout=10)
+            raise AssertionError(path)
+        except urllib.error.HTTPError as answer:
+            assert answer.code == 403, (path, answer.code)
+    portal.stop()
+    # After a restart, or an update that replaces the program, the same port, the same phone, the same sendings.
+    again = triphoto_share.Portal(folder)
+    assert again.data['port'] == port and key in again.devices and again.data['shares'][0]['id'] == second['id']
+    assert again.start()
+    assert 'Mariage test' in urllib.request.urlopen(local+page, timeout=10).read().decode()
+    again.forget(key)
+    try:
+        urllib.request.urlopen(local+page, timeout=10)
+        raise AssertionError('forgotten phone still served')
+    except urllib.error.HTTPError as answer:
+        assert answer.code == 403
+    again.stop()
+    # In the window: the right click opens the QR code, without anything else to set.
+    clear_settings()
+    window = open_window(root)
+    window.show()
+    seen = []
+    def look():
+        dialog = QApplication.activeModalWidget()
+        seen.append(dialog)
+        dialog.accept()
+    QTimer.singleShot(200, look)
+    window.set_view('classic')
+    window.select_photos(window.session.photos[:2])
+    right_click(window.list.viewport(), window.list.visualItemRect(window.list.item(0)).center(), 'Envoyer sur un téléphone…')
+    wait(400)
+    assert isinstance(seen[0], triphoto_qt.PhoneDialog) and window.phone_portal.running
+    assert len(window.phone_portal.data['shares'][0]['photos']) == 2
+    window.close()
+    assert not window.phone_portal.running
+    clear_settings()
+
+
 def test_export_by_its_button(base):
     # The usual case: a gallery's Output folder, the button, the dialog, nothing copied before the click.
     clear_settings()
@@ -3292,7 +3371,7 @@ def main():
     app.setStyleSheet(triphoto_qt.STYLE)
     base = Path(tempfile.mkdtemp(prefix='triphoto-tests-'))
     tests = [test_legacy_session, test_nested_session_ignored, test_dominant_color, test_recents, test_shortcuts,
-             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_quick_export, test_add_to_by_right_click, test_export_by_its_button, test_themed_dialog, test_update, test_keys_undo_and_ribbon, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_repair_links, test_buckets_in_a_project, test_same_words_everywhere, test_search_links, test_selection_review_and_health, test_defaults_and_viewer_room, test_user_journey]
+             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_quick_export, test_add_to_by_right_click, test_phone_portal, test_export_by_its_button, test_themed_dialog, test_update, test_keys_undo_and_ribbon, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_repair_links, test_buckets_in_a_project, test_same_words_everywhere, test_search_links, test_selection_review_and_health, test_defaults_and_viewer_room, test_user_journey]
     failures = 0
     try:
         for test in tests:
