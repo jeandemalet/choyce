@@ -1034,6 +1034,70 @@ class ExportDialog(QDialog):
         self.go.setEnabled(bool(count and name))
 
 
+class AddToDialog(QDialog):
+    """Where photos picked by a right click go: the portfolio, a selection, or a new one named here."""
+
+    def __init__(self, window, photos):
+        super().__init__(window)
+        self.owner, self.photos = window, photos
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        frame = QFrame(objectName='dialog')
+        outer.addWidget(frame)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(24, 22, 24, 18)
+        layout.setSpacing(8)
+        count = len(photos)
+        layout.addWidget(QLabel('Ajouter cette photo à' if count == 1 else f'Ajouter les {count} photos à', objectName='dialogTitle'))
+        layout.addSpacing(4)
+        self.targets = []
+        if not window.viewing_portfolio():
+            self.target(layout, 'Portfolio', 'portfolio')
+        current = window.selection.path if window.selection else None
+        sessions = [session for session in window.custom.store.sessions() if session.path != current]
+        if sessions:
+            layout.addWidget(QLabel('Sélections', objectName='muted'))
+            for session in sessions:
+                self.target(layout, f"{session.name}   ·   {len(session.photos)} photo{'s' if len(session.photos) > 1 else ''}", session)
+        layout.addWidget(QLabel('Nouvelle sélection', objectName='muted'))
+        row = QHBoxLayout()
+        self.name = QLineEdit()
+        self.name.setMaxLength(80)
+        self.name.setPlaceholderText('Nom de la sélection')
+        self.name.textChanged.connect(lambda text: self.create.setEnabled(bool(text.strip())))
+        self.name.returnPressed.connect(lambda: self.create.isEnabled() and self.choose('new'))
+        row.addWidget(self.name, 1)
+        self.create = QPushButton('Créer', objectName='primary')
+        self.create.setEnabled(False)
+        self.create.clicked.connect(lambda: self.choose('new'))
+        row.addWidget(self.create)
+        layout.addLayout(row)
+        layout.addSpacing(6)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton('Annuler', objectName='ghost')
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        layout.addLayout(buttons)
+        self.setMinimumWidth(380)
+        self.chosen = None
+
+    def target(self, layout, text, value):
+        button = QPushButton(text, objectName='ghost')
+        button.setStyleSheet('text-align: left; padding: 8px 12px;')
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        button.clicked.connect(lambda checked=False: self.choose(value))
+        layout.addWidget(button)
+        self.targets.append((button, value))
+        return button
+
+    def choose(self, value):
+        self.chosen = value
+        self.accept()
+
+
 class ActivityBar(QFrame):
     """What is working in the background, at the bottom of the window. Short tasks stay silent: a flash at every photo would only distract."""
     DELAY = .7
@@ -1652,9 +1716,12 @@ class Window(QMainWindow):
         self.custom.setup.start_from(source)
 
     def add_filtered_to_portfolio(self):
-        if not self.photos or not self.ready_for_portfolio():
+        self.add_photos_to_portfolio(self.photos)
+
+    def add_photos_to_portfolio(self, photos):
+        if not photos or not self.ready_for_portfolio():
             return
-        photos = [photo for photo in self.photos if not self.portfolio.contains(photo.path)]
+        photos = [photo for photo in photos if not self.portfolio.contains(photo.path)]
         if not photos:
             self.toast('Ces photos sont déjà dans le portfolio.')
             return
@@ -3053,10 +3120,50 @@ class Window(QMainWindow):
         action = QAction('Exporter cette photo' if len(photos) == 1 else f'Exporter les {len(photos)} photos sélectionnées', menu)
         action.setEnabled(not (self.export_job or self.relocating or self.update_job))
         action.triggered.connect(lambda checked=False: self.quick_export(photos))
+        adding = QAction('Ajouter à…', menu)
+        adding.setEnabled(not self.relocating)
+        adding.triggered.connect(lambda checked=False: self.add_photos_to(photos))
         first = menu.actions()[0] if menu.actions() else None
         menu.insertAction(first, action)
+        menu.insertAction(first, adding)
         if first:
             menu.insertSeparator(first)
+
+    def add_photos_to(self, photos, choice=None):
+        """The portfolio, a saved selection or a new one, from the photos of a right click."""
+        if choice is None:
+            dialog = AddToDialog(self, photos)
+            if dialog.exec() != QDialog.DialogCode.Accepted or dialog.chosen is None:
+                return
+            choice = dialog.chosen
+            if choice == 'new':
+                choice = dialog.name.text().strip()
+        if choice == 'portfolio':
+            self.add_photos_to_portfolio(photos)
+            return
+        if isinstance(choice, str):
+            target = self.custom.store.create(choice)
+        else:
+            target = choice
+        count = target.add_photos([self.selection_entry(photo) for photo in photos])
+        target.save()
+        name = target.name
+        if not count:
+            self.toast(f'Déjà dans « {name} ».' if len(photos) == 1 else f'Ces photos sont déjà dans « {name} ».')
+        else:
+            self.toast(f"{count} photo{'s' if count > 1 else ''} ajoutée{'s' if count > 1 else ''} à « {name} »")
+
+    def selection_entry(self, photo):
+        """A photo as a selection holds it: where it is, the project it comes from, and its path inside that project."""
+        if self.selection:
+            held = next((item for item in self.selection.photos if item['path'] == photo.relative_path), None)
+            if held:
+                return {'path': held['path'], 'gallery': held.get('gallery', ''), 'relative': held.get('relative', photo.path.name)}
+        if self.viewing_portfolio():
+            origin = self.portfolio.items.get(photo.relative_path, {}).get('source')
+            entry = {'path': str(photo.path), 'gallery': self.photo_project(photo) or 'Portfolio', 'relative': photo.relative_path}
+            return {**entry, 'origin': origin} if origin else entry
+        return {'path': str(photo.path), 'gallery': project_label(self.project_path), 'relative': photo.relative_path}
 
     def quick_export(self, photos):
         """A folder of its own, named after the moment: nothing to choose and nothing replaced. A rejected photo goes too, since it was asked for."""

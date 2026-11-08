@@ -981,6 +981,67 @@ def test_quick_export(base):
     clear_settings()
 
 
+def test_add_to_by_right_click(base):
+    """A right click on photos of the ribbon sends them to the portfolio, a saved selection or a new one."""
+    clear_settings()
+    root = make_project(base/'ajouter a', 6)
+    other = make_project(base/'ajouter autre', 3)
+    window = open_window(root)
+    window.show()
+    photos = window.session.photos
+    store = window.custom.store
+    contest = store.create('Concours')
+    contest.set_photos([{'path': str(path), 'gallery': 'ajouter autre', 'relative': path.name} for path in sorted(other.glob('*.jpg'))])
+    contest.data['sources'] = [{'key': str(other)}]
+    contest.save()
+    def pick(choose):
+        def run():
+            dialog = QApplication.activeModalWidget()
+            assert isinstance(dialog, triphoto_qt.AddToDialog), dialog
+            choose(dialog)
+        QTimer.singleShot(150, run)
+    window.set_view('classic')
+    window.select_photos(photos[:3])
+    place = window.list.visualItemRect(window.list.item(1)).center()
+    # To a saved selection: its row in the dialog.
+    pick(lambda dialog: next(button for button, value in dialog.targets if getattr(value, 'name', '') == 'Concours').click())
+    labels = right_click(window.list.viewport(), place, 'Ajouter à…')
+    assert 'Ajouter à…' in labels, labels
+    wait(300)
+    saved = triphoto_custom.Sorting.load(contest.path)
+    assert len(saved.photos) == 6 and {p['path'] for p in saved.photos} >= {str(p.path) for p in photos[:3]}
+    assert {p['gallery'] for p in saved.photos[3:]} == {'ajouter a'}
+    # Twice: nothing doubles.
+    window.add_photos_to(photos[:3], saved)
+    assert len(triphoto_custom.Sorting.load(contest.path).photos) == 6
+    # A new choice of projects keeps the photos added by hand.
+    saved = triphoto_custom.Sorting.load(contest.path)
+    saved.set_photos([{'path': str(path), 'gallery': 'ajouter autre', 'relative': path.name} for path in sorted(other.glob('*.jpg'))][:1])
+    assert len(saved.photos) == 4
+    # A selection removed by hand, added again by hand, comes back.
+    saved.remove_photos([str(photos[0].path)])
+    assert saved.add_photos([window.selection_entry(photos[0])]) == 1 and str(photos[0].path) not in saved.data['removed']
+    # A new selection, named in the dialog.
+    def new(dialog):
+        dialog.name.setText('Instagram mai')
+        dialog.create.click()
+    pick(new)
+    right_click(window.list.viewport(), place, 'Ajouter à…')
+    wait(300)
+    created = next(session for session in store.sessions() if session.name == 'Instagram mai')
+    assert len(created.photos) == 3
+    # The portfolio.
+    portfolio_root = base/'portfolio ajouter'
+    portfolio_root.mkdir()
+    window.portfolio.set_folder(portfolio_root)
+    pick(lambda dialog: next(button for button, value in dialog.targets if value == 'portfolio').click())
+    right_click(window.list.viewport(), place, 'Ajouter à…')
+    wait(300)
+    assert all(window.portfolio.contains(p.path) for p in photos[:3])
+    window.close()
+    clear_settings()
+
+
 def test_export_by_its_button(base):
     # The usual case: a gallery's Output folder, the button, the dialog, nothing copied before the click.
     clear_settings()
@@ -3213,7 +3274,7 @@ def main():
     app.setStyleSheet(triphoto_qt.STYLE)
     base = Path(tempfile.mkdtemp(prefix='triphoto-tests-'))
     tests = [test_legacy_session, test_nested_session_ignored, test_dominant_color, test_recents, test_shortcuts,
-             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_quick_export, test_export_by_its_button, test_themed_dialog, test_update, test_keys_undo_and_ribbon, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_repair_links, test_buckets_in_a_project, test_same_words_everywhere, test_search_links, test_selection_review_and_health, test_defaults_and_viewer_room, test_user_journey]
+             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_quick_export, test_add_to_by_right_click, test_export_by_its_button, test_themed_dialog, test_update, test_keys_undo_and_ribbon, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_repair_links, test_buckets_in_a_project, test_same_words_everywhere, test_search_links, test_selection_review_and_health, test_defaults_and_viewer_room, test_user_journey]
     failures = 0
     try:
         for test in tests:

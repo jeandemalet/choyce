@@ -89,6 +89,8 @@ class Sorting:
         self.data['photos'] = [photo for photo in self.photos if photo['path'] not in paths]
         self.data['assigned'] = {path: keys for path, keys in self.data['assigned'].items() if path not in paths}
         self.data['removed'] = sorted(set(self.data.get('removed', []))|paths)
+        if self.data.get('added'):
+            self.data['added'] = [path for path in self.data['added'] if path not in paths]
         self.undo_stack.clear()
         self.redo_stack.clear()
 
@@ -153,8 +155,32 @@ class Sorting:
     def set_photos(self, photos):
         """A new choice of galleries. A photo already sorted stays: the work done is never lost to a filter."""
         chosen = {source_key(photo['path']) for photo in photos}
-        sorted_before = [photo for photo in self.photos if self.buckets_of(photo['path']) and source_key(photo['path']) not in chosen]
+        added = set(self.data.get('added', []))
+        sorted_before = [photo for photo in self.photos if (self.buckets_of(photo['path']) or photo['path'] in added) and source_key(photo['path']) not in chosen]
         self.data['photos'] = photos+sorted_before
+
+    def add_photos(self, photos):
+        """Photos added by hand, from a right click: they stay when the choice of projects changes. How many were not there yet.
+
+        An entry may carry an 'origin', the original of a copy of the portfolio, which is the same photo."""
+        held = {source_key(photo['path']) for photo in self.photos}
+        added = self.data.setdefault('added', [])
+        removed = set(self.data.get('removed', []))
+        count = 0
+        for photo in photos:
+            photo = dict(photo)
+            key = source_key(photo.pop('origin', None) or photo['path'])
+            if key in held:
+                continue
+            held.add(key)
+            self.data['photos'].append(photo)
+            if photo['path'] not in added:
+                added.append(photo['path'])
+            removed.discard(photo['path'])
+            count += 1
+        if 'removed' in self.data:
+            self.data['removed'] = sorted(removed)
+        return count
 
     def repoint(self, moves):
         """New places of photos, as a function from an old path to a new one or None. Nothing sorted is lost, and a photo found again where the selection already holds it becomes one."""
@@ -179,6 +205,8 @@ class Sorting:
                 moved_sources += 1
         if self.data.get('removed'):
             self.data['removed'] = [moves(path) or path for path in self.data['removed']]
+        if self.data.get('added'):
+            self.data['added'] = [moves(path) or path for path in self.data['added']]
         if not changed:
             if moved_sources:
                 self.save()
