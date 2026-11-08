@@ -14,7 +14,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
-REPOSITORY = 'jeandemalet/vision-board'
+REPOSITORY = 'jeandemalet/choyce'
 LATEST_URL = f'https://api.github.com/repos/{REPOSITORY}/releases/latest'
 # Each release carries two archives: the program installed before the name Choyce
 # keeps receiving its own, with its own executable, so that its shortcuts still work.

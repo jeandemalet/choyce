@@ -12,7 +12,7 @@ Choyce sert à trier et à revoir les photos d'un reportage, sans jamais toucher
 
 ## Installation
 
-Sous Windows, le plus simple est de télécharger `Choyce-Windows.zip` depuis la [dernière version](https://github.com/jeandemalet/vision-board/releases/latest), de le décompresser et d'ouvrir `Choyce.exe`. Le programme n'étant pas signé, Windows peut afficher un avertissement au premier lancement : « Informations complémentaires », puis « Exécuter quand même ».
+Sous Windows, le plus simple est de télécharger `Choyce-Windows.zip` depuis la [dernière version](https://github.com/jeandemalet/choyce/releases/latest), de le décompresser et d'ouvrir `Choyce.exe`. Le programme n'étant pas signé, Windows peut afficher un avertissement au premier lancement : « Informations complémentaires », puis « Exécuter quand même ».
 
 Pour le lancer depuis les sources, il faut Python 3.10 ou plus récent. Dans le dossier de Choyce :
 
