@@ -1510,7 +1510,7 @@ class Window(QMainWindow):
 
     def set_view(self, key):
         if key == 'classic':
-            self.show_buckets() if self.bucket_mode else self.set_review(False)
+            self.set_review(False)
         else:
             self.open_review_mode(key)
 
@@ -1557,7 +1557,8 @@ class Window(QMainWindow):
         self.selection_section = QWidget()
         selection_lines = QVBoxLayout(self.selection_section)
         selection_lines.setContentsMargins(0, 0, 0, 0)
-        self.button(selection_lines, 'Modifier la sélection', self.edit_selection, 'seg')
+        add_more = self.button(selection_lines, "Ajouter des photos d'autres projets…", self.edit_selection, 'seg')
+        add_more.setToolTip('Cocher d’autres projets ou le portfolio, avec leurs filtres. Les buckets déjà remplis restent.')
         lines.addWidget(self.selection_section)
         # Black and white, background and zoom of the views.
         lines.addWidget(self.review.tools)
@@ -1637,7 +1638,8 @@ class Window(QMainWindow):
             return
         self.set_folder(session.path.with_suffix(''), SelectionSession(session))
         if self.selection is session:
-            self.custom_active = self.bucket_mode
+            # Classique keeps its ribbon and the filter beside the buckets. Only an empty selection says how to fill it.
+            self.custom_active = not self.session.photos
             self.custom.open_session(session)
             self.update_project_state()
 
@@ -1682,7 +1684,7 @@ class Window(QMainWindow):
         self.buckets.data['strip'] = not self.bucket_mode
         self.custom.save_timer.start()
         if not self.review_active:
-            self.show_buckets() if self.bucket_mode else self.set_review(False)
+            self.set_review(False)
         self.review.sync_swipe_bucket()
         self.review.place_overlays()
         self.review.view().update()
@@ -1709,16 +1711,21 @@ class Window(QMainWindow):
         return self.custom_active and self.custom.currentWidget() is self.custom.setup
 
     def edit_selection(self):
-        self.show_buckets()
-        self.custom.edit_selection()
-
-    def show_buckets(self):
-        current = self.current_photo()
         self.set_review(False)
         self.custom_active = True
+        self.custom.edit_selection()
         self.update_project_state()
-        if current:
-            self.custom.show_path(current.relative_path)
+
+    def close_setup(self):
+        """Back from the choice of projects to the photos, in Classique with its ribbon, or on the empty selection."""
+        self.custom_active = not (self.session and self.session.photos)
+        self.update_project_state()
+        if self.custom_active:
+            self.custom.show_photo()
+
+    def show_buckets(self):
+        """Classique, with the strip of the buckets under it."""
+        self.set_review(False)
 
     def selection_changed(self):
         """Other photos or other buckets: what shows them follows."""
@@ -1784,7 +1791,12 @@ class Window(QMainWindow):
                 self.buckets.clear(photo.relative_path)
             self.buckets_done(before)
         elif value <= len(self.buckets.buckets):
-            self.toggle_bucket(self.buckets.buckets[value-1]['id'])
+            key = self.buckets.buckets[value-1]['id']
+            photos = self.target_photos()
+            self.toggle_bucket(key)
+            # In Classique, one photo put in a bucket: on to the next one.
+            if not self.review_active and len(photos) == 1 and key in self.buckets.buckets_of(photos[0].relative_path):
+                self.navigate(1)
 
     def toggle_bucket(self, key):
         """In the bucket or out of it, on the photo shown and those picked with it."""
@@ -1985,7 +1997,11 @@ class Window(QMainWindow):
     def fill_project_menu(self):
         menu = self.project_menu
         menu.clear()
-        menu.addAction('Ajouter des photos…', self.open_folder)
+        if self.selection:
+            menu.addAction("Ajouter des photos d'autres projets…", self.edit_selection)
+            menu.addAction('Ouvrir un autre dossier…', self.open_folder)
+        else:
+            menu.addAction('Ajouter des photos…', self.open_folder)
         recent_menu = menu.addMenu('Projets')
         entries = self.recents.entries()
         for entry in entries[:15]:
@@ -2002,7 +2018,6 @@ class Window(QMainWindow):
         menu.addAction('Portfolio', self.open_portfolio)
         menu.addSeparator()
         if self.selection:
-            menu.addAction('Modifier la sélection…', self.edit_selection)
             menu.addAction('Vérifier les photos de la sélection…', self.custom.check_photos)
         absent = len(getattr(self.session, 'absent', ()))
         if absent:

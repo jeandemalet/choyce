@@ -896,6 +896,10 @@ class SetupPage(QWidget):
         layout.setSpacing(12)
         self.title = QLabel(objectName='dialogTitle')
         layout.addWidget(self.title)
+        self.hint = QLabel("Cochez d'autres projets, ou le portfolio, et réglez leurs filtres : leurs photos rejoignent la sélection. "
+                           'Les photos déjà rangées gardent leurs buckets.', objectName='muted')
+        self.hint.setWordWrap(True)
+        layout.addWidget(self.hint)
         self.name = QLineEdit()
         self.name.setMaxLength(80)
         self.name.setPlaceholderText('Nom de la sélection, par exemple Concours 2027')
@@ -955,8 +959,9 @@ class SetupPage(QWidget):
             self.list.removeWidget(row)
             row.deleteLater()
         self.rows = {}
-        self.title.setText('Nouvelle sélection' if session is None else 'Modifier la sélection')
-        self.go.setText('Créer la sélection' if session is None else 'Enregistrer')
+        self.title.setText('Nouvelle sélection' if session is None else f'Ajouter des photos à « {session.name} »')
+        self.hint.setVisible(session is not None)
+        self.go.setText('Créer la sélection' if session is None else 'Enregistrer les projets')
         self.name.setText('' if session is None else session.name)
         portfolio = self.window.portfolio
         if portfolio.available():
@@ -1656,13 +1661,14 @@ class CustomPage(QStackedWidget):
 
     def show_after_setup(self, session):
         if session is not None and session is self.session:
-            self.window.selection_changed()
             self.setCurrentWidget(self.work)
-            self.show_photo()
+            self.window.selection_changed()
+            self.window.close_setup()
         elif session is not None:
             self.window.open_custom(session)
         elif self.session is not None:
             self.setCurrentWidget(self.work)
+            self.window.close_setup()
         else:
             self.window.leave_custom()
 
@@ -1777,7 +1783,7 @@ class CustomPage(QStackedWidget):
 
     def empty_text(self):
         if not self.session.photos:
-            return 'Aucune photo : « Modifier la sélection » choisit les projets et les filtres.'
+            return "Aucune photo : « Ajouter des photos d'autres projets » choisit les projets et leurs filtres."
         return 'Aucune photo pour ces filtres.'
 
     def bucket_number(self, key):

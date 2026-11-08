@@ -2304,6 +2304,15 @@ def test_custom_view(base):
     assert custom.currentWidget() is custom.work and custom.session.name == 'Concours 2027'
     session = custom.session
     assert session.path.exists() and len(session.photos) == 3
+    # Classique, with its ribbon and the filter beside the buckets.
+    assert not window.custom_active and window.pages.currentIndex() == 1 and window.list.isVisible() and window.bucket_strip.isVisible()
+    window.filter_chip.click()
+    assert window.filter_panel.isVisible() and window.list.isVisible() and window.bucket_strip.isVisible()
+    window.filter_chip.click()
+    # The large stage, still there for an empty selection.
+    window.custom_active = True
+    window.update_project_state()
+    custom.show_photo()
     settle(window, lambda: custom.current_image() is not None, 10000)
     wait(50)
     # Buckets: a title, a description, and the same name only once.
@@ -2520,9 +2529,9 @@ def test_selection_views(base):
     sorting.save()
     # It opens on its buckets, and the other views are there, with the way back.
     window.open_custom(sorting)
-    assert window.custom_active and window.pages.currentIndex() == 3 and window.home_button.isVisible()
+    assert not window.custom_active and window.pages.currentIndex() == 1 and window.home_button.isVisible()
     assert window.view_buttons['classic'].isChecked() and window.bucket_button.isChecked()
-    assert not window.bucket_strip.isVisible() and len(window.session.photos) == 6
+    assert window.bucket_strip.isVisible() and window.list.isVisible() and len(window.session.photos) == 6
     window.set_view('wall')
     review = window.review
     assert window.review_active and not window.custom_active and window.bucket_strip.isVisible()
@@ -2694,7 +2703,7 @@ def test_selection_views(base):
     # Back on the buckets, on the photo left in the other view.
     current = window.current_photo()
     window.set_view('classic')
-    assert window.custom_active and custom.current()['path'] == current.relative_path
+    assert not window.custom_active and window.current_photo() is current and window.list.isVisible()
     # The way back, from every mode, and the project list knows nothing of it.
     window.home_button.click()
     assert window.pages.currentIndex() == 0 and window.selection is None and not window.home_button.isVisible()
@@ -2796,16 +2805,15 @@ def test_buckets_in_a_project(base):
     assert not (window.session.session_dir/triphoto_custom.BUCKETS_FILE).exists()
     # In bucket mode Classique holds the photo in large, and the keys fill the buckets.
     window.bucket_button.click()
-    assert window.bucket_mode and window.custom_active and window.view_buttons['classic'].isChecked() and window.view_panel.isVisible()
+    assert window.bucket_mode and not window.custom_active and window.view_buttons['classic'].isChecked() and window.view_panel.isVisible()
+    assert window.pages.currentIndex() == 1 and window.bucket_strip.isVisible()
     assert None in custom.cards and not window.bucket_section.isHidden()
     window.buckets.buckets.append({'id': 'a', 'title': 'Livre', 'subtitle': '', 'color': triphoto_custom.BUCKET_COLORS[0]})
     custom.buckets_changed()
     assert 'a' in custom.cards and None in custom.cards
-    settle(window, lambda: custom.current_image() is not None, 8000)
-    first = custom.current()['path']
-    assert first == window.current_photo().relative_path
+    first = window.current_photo().relative_path
     window.rate_key(1)
-    assert window.buckets.buckets_of(first) == ['a'] and custom.current()['path'] != first, 'put in the bucket, and on to the next one'
+    assert window.buckets.buckets_of(first) == ['a'] and window.current_photo().relative_path != first, 'put in the bucket, and on to the next one'
     assert window.photos[0].stars == 4, 'its note stays'
     # The strip, in the other views, and the same keys.
     window.set_view('wall')
@@ -3180,7 +3188,7 @@ def test_user_journey(base):
     assert window.pages.y() < window.bucket_strip.y()
     window.fill_project_menu()
     labels = [action.text() for action in window.project_menu.actions()]
-    assert 'Modifier la sélection…' in labels and 'Sélections' in labels and 'Portfolio' in labels
+    assert "Ajouter des photos d'autres projets…" in labels and 'Sélections' in labels and 'Portfolio' in labels
     window.edit_selection()
     assert window.choosing_photos() and window.pages.currentIndex() == 3
     window.custom.show_after_setup(None)
