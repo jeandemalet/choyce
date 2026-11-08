@@ -27,7 +27,7 @@ from triphoto_custom import ProjectBuckets, BucketFilter, BucketStrip, CustomPag
 from triphoto_portfolio import MANIFEST_FILE, Portfolio, PortfolioSession, RelocateJob, UNSORTED
 from triphoto_prefs import (ALIASES, LinkSearchJob, MARK_TIPS, PreferencesDialog, Recents, age_label, ask, inform, known_links, locate_photos, locate_project, moved_path, path_key, shortcut_map)
 from triphoto_review import MODES, BackgroundPicker, ChoiceFilter, MarkerFilter, NoteFilter, RatingBar, ReviewPage
-from triphoto_share import Portal
+from triphoto_blip import BLIP_STORES, blip_executable, send_with_blip
 from triphoto_update import UpdateCheck, UpdateDownload, can_install, launch_installer, write_installer
 from triphoto_theme import (ACCENT, ASSETS, BACKGROUNDS, FAINT, INK, RAISED, REJECT, SELECT, STYLE, TEXT,
     contrast_on, draw_bookmark, draw_bucket_chips, draw_check, draw_clear_star, draw_cross, draw_flag, draw_heart, draw_send, draw_stars)
@@ -1099,12 +1099,11 @@ class AddToDialog(QDialog):
         self.accept()
 
 
-class PhoneDialog(QDialog):
-    """A QR code that a new phone scans once, and the phones that already have their page."""
+class BlipDialog(QDialog):
+    """Two QR codes, for an iPhone and for an Android phone, that open the store page of Blip."""
 
-    def __init__(self, window, share):
+    def __init__(self, window, missing_on_computer=False):
         super().__init__(window)
-        self.owner, self.portal = window, window.phone_portal
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         outer = QVBoxLayout(self)
@@ -1114,62 +1113,37 @@ class PhoneDialog(QDialog):
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(24, 22, 24, 18)
         layout.setSpacing(8)
-        layout.addWidget(QLabel('Envoyer sur un téléphone', objectName='dialogTitle'))
-        count = len(share['photos'])
-        layout.addWidget(QLabel(f"{share['title']} · {count} photo{'s' if count > 1 else ''}", objectName='muted'))
-        layout.addSpacing(6)
-        self.devices_box = QVBoxLayout()
-        self.devices_box.setSpacing(2)
-        layout.addLayout(self.devices_box)
-        self.qr = QLabel(alignment=Qt.AlignmentFlag.AlignHCenter)
-        layout.addWidget(self.qr)
-        self.how = QLabel(objectName='faint')
-        self.how.setWordWrap(True)
-        self.how.setFixedWidth(360)
-        layout.addWidget(self.how)
+        layout.addWidget(QLabel('Installer Blip sur le téléphone', objectName='dialogTitle'))
+        text = QLabel("Scannez le code de votre téléphone avec son appareil photo : il ouvre Blip dans l'App Store ou sur Google Play. "
+                      "Connectez-vous ensuite avec le même compte que sur l'ordinateur.", objectName='muted')
+        text.setWordWrap(True)
+        text.setFixedWidth(440)
+        layout.addWidget(text)
+        layout.addSpacing(8)
+        codes = QHBoxLayout()
+        codes.setSpacing(24)
+        for name, url in BLIP_STORES:
+            column = QVBoxLayout()
+            code = QLabel(alignment=Qt.AlignmentFlag.AlignHCenter)
+            code.setPixmap(qr_pixmap(url, 190))
+            column.addWidget(code)
+            column.addWidget(QLabel(name, alignment=Qt.AlignmentFlag.AlignHCenter))
+            codes.addLayout(column)
+        layout.addLayout(codes)
+        if missing_on_computer:
+            note = QLabel('Blip manque aussi sur cet ordinateur.', objectName='faint')
+            layout.addWidget(note)
         layout.addSpacing(6)
         buttons = QHBoxLayout()
         buttons.addStretch(1)
+        if missing_on_computer:
+            get = QPushButton("Installer Blip sur l'ordinateur", objectName='ghost')
+            get.clicked.connect(lambda: QDesktopServices.openUrl(QUrl('https://blip.net/download/windows')))
+            buttons.addWidget(get)
         done = QPushButton('Fermer', objectName='primary')
         done.clicked.connect(self.accept)
         buttons.addWidget(done)
         layout.addLayout(buttons)
-        self.qr.setPixmap(qr_pixmap(self.portal.pair_url(), 240))
-        self.refresh()
-
-    def refresh(self):
-        while self.devices_box.count():
-            item = self.devices_box.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-            elif item.layout():
-                while item.layout().count():
-                    child = item.layout().takeAt(0)
-                    if child.widget():
-                        child.widget().deleteLater()
-        devices = sorted(self.portal.devices.items(), key=lambda item: -item[1].get('seen', 0))
-        if devices:
-            self.devices_box.addWidget(QLabel('Téléphones enregistrés', objectName='muted'))
-            for key, device in devices:
-                row = QHBoxLayout()
-                row.addWidget(QLabel(f"{device.get('name', 'Téléphone')}  ·  vu {age_label(device.get('seen'))}"), 1)
-                forget = QPushButton('Retirer', objectName='ghost')
-                forget.clicked.connect(lambda checked=False, key=key: self.forget(key))
-                row.addWidget(forget)
-                self.devices_box.addLayout(row)
-            self.devices_box.addSpacing(8)
-        address = self.portal.address()
-        if devices:
-            text = ("Sur un téléphone enregistré, ouvrez Choyce depuis son écran d'accueil : cet envoi est en haut. "
-                    f"Pour un autre téléphone, scannez le QR code avec son appareil photo. Même Wi-Fi que l'ordinateur ({address}).")
-        else:
-            text = (f"Scannez le QR code avec l'appareil photo du téléphone, sur le même Wi-Fi que l'ordinateur ({address}). "
-                    "Rien à installer. Ajoutée à l'écran d'accueil, la page reste valable pour les prochains envois, même après une mise à jour de Choyce.")
-        self.how.setText(text)
-
-    def forget(self, key):
-        self.portal.forget(key)
-        self.refresh()
 
 
 def qr_pixmap(text, side):
@@ -1415,10 +1389,6 @@ class Window(QMainWindow):
         self.pages.addWidget(splitter)
         self.pages.addWidget(self.review)
         self.custom = CustomPage(self, SETTINGS_SCOPE, project_label)
-        # The phones that joined find their page whenever Choyce is open.
-        self.phone_portal = Portal(self.custom.store.folder.parent)
-        if self.phone_portal.devices:
-            self.phone_portal.start()
         self.custom_active = False
         self.pages.addWidget(self.custom)
         self.bucket_strip = BucketStrip(self)
@@ -3222,11 +3192,14 @@ class Window(QMainWindow):
         adding.setEnabled(not self.relocating)
         adding.triggered.connect(lambda checked=False: self.add_photos_to(photos))
         first = menu.actions()[0] if menu.actions() else None
-        phone = QAction('Envoyer sur un téléphone…', menu)
-        phone.triggered.connect(lambda checked=False: self.send_to_phone(photos))
+        blip = QAction('Envoyer avec Blip', menu)
+        blip.triggered.connect(lambda checked=False: self.send_with_blip(photos))
+        install = QAction('Installer Blip sur un téléphone…', menu)
+        install.triggered.connect(lambda checked=False: BlipDialog(self, blip_executable() is None).exec())
         menu.insertAction(first, action)
         menu.insertAction(first, adding)
-        menu.insertAction(first, phone)
+        menu.insertAction(first, blip)
+        menu.insertAction(first, install)
         if first:
             menu.insertSeparator(first)
 
@@ -3254,16 +3227,19 @@ class Window(QMainWindow):
         else:
             self.toast(f"{count} photo{'s' if count > 1 else ''} ajoutée{'s' if count > 1 else ''} à « {name} »")
 
-    def send_to_phone(self, photos):
-        """A new sending at the top of the phones' page, and the way for a new phone to join."""
+    def send_with_blip(self, photos):
+        """Blip opens on a new sending of these photos; the phone is chosen there."""
         if not photos:
             return
-        if not self.phone_portal.start():
-            inform(self, 'Envoi impossible', "Choyce n'a pas pu ouvrir de port sur ce réseau.")
+        if blip_executable() is None:
+            BlipDialog(self, True).exec()
             return
-        place = self.selection.name if self.selection else ('Portfolio' if self.viewing_portfolio() else project_label(self.project_path))
-        share = self.phone_portal.add_share(place, [photo.path for photo in photos])
-        PhoneDialog(self, share).exec()
+        error = send_with_blip([photo.path for photo in photos])
+        if error:
+            inform(self, 'Envoi impossible', error)
+        else:
+            count = len(photos)
+            self.toast(f"{count} photo{'s' if count > 1 else ''} dans Blip : choisissez le téléphone.")
 
     def selection_entry(self, photo):
         """A photo as a selection holds it: where it is, the project it comes from, and its path inside that project."""
@@ -3410,7 +3386,6 @@ class Window(QMainWindow):
         self.closing = True
         self.stop_export()
         self.custom.shutdown()
-        self.phone_portal.stop()
         if self.update_job:
             self.update_job.cancelled.set()
         if self.link_search:
