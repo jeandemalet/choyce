@@ -206,7 +206,7 @@ def moved_path(path, old, new):
 
 
 def photos_below(folder):
-    """The photos of a folder as {lowercase name: [paths]}, without what Vision Board keeps there."""
+    """The photos of a folder as {lowercase name: [paths]}, without what Choyce keeps there."""
     found = {}
     for current, directories, files in os.walk(folder):
         directories[:] = [d for d in directories if d != SESSION_DIR_NAME and d.lower() not in SCAN_SKIPPED and not d.startswith('.')]
@@ -253,7 +253,7 @@ def locate_photos(missing, chosen):
 
 
 def known_links(portfolio, sessions, recents):
-    """Every place Vision Board refers to, as (photos, {project folder: name of its cover}). Touches no disk."""
+    """Every place Choyce refers to, as (photos, {project folder: name of its cover}). Touches no disk."""
     photos, folders = set(), {}
     for item in portfolio.items.values():
         if item.get('linked') and item.get('source'):

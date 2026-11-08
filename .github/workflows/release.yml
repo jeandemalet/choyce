@@ -29,11 +29,16 @@ jobs:
         run: python tests/test_triphoto.py
       - name: Construire
         run: >
-          pyinstaller triphoto_qt.py --name VisionBoard --windowed --noconfirm
+          pyinstaller triphoto_qt.py --name Choyce --windowed --noconfirm
           --icon assets/triphoto.ico --add-data "assets;assets"
+      # Le même programme sous son ancien nom : les copies installées avant Choyce se mettent à jour avec lui.
       - name: Empaqueter
-        run: Compress-Archive -Path dist/VisionBoard -DestinationPath VisionBoard-Windows.zip
+        run: |
+          Compress-Archive -Path dist/Choyce -DestinationPath Choyce-Windows.zip
+          Copy-Item dist/Choyce dist/VisionBoard -Recurse
+          Rename-Item dist/VisionBoard/Choyce.exe VisionBoard.exe
+          Compress-Archive -Path dist/VisionBoard -DestinationPath VisionBoard-Windows.zip
       - name: Publier
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create $env:GITHUB_REF_NAME VisionBoard-Windows.zip --title "Vision Board $env:GITHUB_REF_NAME" --generate-notes
+        run: gh release create $env:GITHUB_REF_NAME Choyce-Windows.zip VisionBoard-Windows.zip --title "Choyce $env:GITHUB_REF_NAME" --generate-notes

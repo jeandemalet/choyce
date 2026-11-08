@@ -3330,7 +3330,7 @@ def main():
     app.setStyleSheet(STYLE)
     if sys.platform == 'win32':
         # Otherwise the taskbar shows the icon of Python.
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('VisionBoard')
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Choyce')
     app.setWindowIcon(QIcon(str(ASSETS/'triphoto.ico')))
     window = Window(args.folder)
     window.showMaximized()

@@ -1116,13 +1116,31 @@ def test_update(base):
     url = pack.as_uri()
     digest = 'sha256:'+hashlib.sha256(pack.read_bytes()).hexdigest()
     results = []
-    job = triphoto_update.UpdateDownload(url, digest)
+    # A program installed before the name Choyce takes its own archive, with its own executable.
+    job = triphoto_update.UpdateDownload(url, digest, 'VisionBoard.exe')
     job.signals.ready.connect(lambda source, error: results.append((source, error)))
     job.run()
     QApplication.processEvents()
     source, error = results[-1]
     assert not error and Path(source, 'VisionBoard.exe').read_text() == 'nouveau'
-    job = triphoto_update.UpdateDownload(url, 'sha256:'+'0'*64)
+    pack = folder/'choyce.zip'
+    with zipfile.ZipFile(pack, 'w') as content:
+        content.writestr('Choyce/Choyce.exe', 'nouveau')
+        content.writestr('Choyce/_internal/lib.pyd', 'nouveau')
+    job = triphoto_update.UpdateDownload(pack.as_uri(), 'sha256:'+hashlib.sha256(pack.read_bytes()).hexdigest(), 'Choyce.exe')
+    job.signals.ready.connect(lambda source, error: results.append((source, error)))
+    job.run()
+    QApplication.processEvents()
+    source, error = results[-1]
+    assert not error and Path(source, 'Choyce.exe').read_text() == 'nouveau'
+    # The wrong archive for the program that runs is refused rather than half installed.
+    job = triphoto_update.UpdateDownload(pack.as_uri(), '', 'VisionBoard.exe')
+    job.signals.ready.connect(lambda source, error: results.append((source, error)))
+    job.run()
+    QApplication.processEvents()
+    assert results[-1][0] == '' and results[-1][1]
+    assert triphoto_update.PACKAGES['VisionBoard.exe'][0] == 'VisionBoard-Windows.zip' and triphoto_update.running_executable() == 'Choyce.exe'
+    job = triphoto_update.UpdateDownload(url, 'sha256:'+'0'*64, 'VisionBoard.exe')
     job.signals.ready.connect(lambda source, error: results.append((source, error)))
     job.run()
     QApplication.processEvents()
@@ -1137,7 +1155,7 @@ def test_update(base):
     (target/'VisionBoard.exe').write_text('ancien')
     (target/'_internal'/'ancienne.pyd').write_text('ancien')
     (target/'mes notes.txt').write_text('garder')
-    script = triphoto_update.write_installer(work/'contenu'/'VisionBoard', target, 999999)
+    script = triphoto_update.write_installer(work/'contenu'/'VisionBoard', target, 999999, 'VisionBoard.exe')
     text = script.read_text(encoding='utf-8').replace('start "" ', 'rem ')
     script.write_text(text, encoding='utf-8')
     subprocess.run(['cmd', '/c', str(script)], timeout=60, capture_output=True)
@@ -1155,7 +1173,7 @@ def test_update(base):
         window.update_found({'version': '9.9.9', 'page': 'https://example.invalid', 'url': 'x', 'digest': ''})
     finally:
         triphoto_qt.ask = real_ask
-    assert calls == [('Vision Board 9.9.9 est disponible', ['later', 'page'])] and window.update_job is None
+    assert calls == [('Choyce 9.9.9 est disponible', ['later', 'page'])] and window.update_job is None
     window.close()
     clear_settings()
 

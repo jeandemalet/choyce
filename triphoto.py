@@ -22,8 +22,8 @@ from PIL import Image, ImageCms, ImageOps, ImageTk
 
 
 # The folder keeps its name: every existing project, export and note refers to it.
-APP_NAME = "Vision Board"
-APP_VERSION = "0.22.0"
+APP_NAME = "Choyce"
+APP_VERSION = "0.23.0"
 SESSION_DIR_NAME = "TriPhoto_Session"
 SESSION_FILE_NAME = "session.json"
 SESSION_VERSION = 2

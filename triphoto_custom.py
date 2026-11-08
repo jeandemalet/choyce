@@ -696,6 +696,7 @@ class Store:
 
     def __init__(self, scope):
         base = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.GenericDataLocation) or Path.home())
+        # The folder keeps its former name: the selections already made are there.
         self.folder = base/'Vision Board'/scope/'custom'
 
     def sessions(self):

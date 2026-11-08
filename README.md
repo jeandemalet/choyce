@@ -1,6 +1,6 @@
-# Vision Board
+# Choyce
 
-Vision Board sert à trier et à revoir les photos d'un reportage, sans jamais toucher aux originaux. Il gère les profils ICC et l'écran sur lequel il s'affiche, charge vite de très grandes galeries et se pilote entièrement au clavier.
+Choyce sert à trier et à revoir les photos d'un reportage, sans jamais toucher aux originaux. Il gère les profils ICC et l'écran sur lequel il s'affiche, charge vite de très grandes galeries et se pilote entièrement au clavier.
 
 ## Le parcours
 
@@ -12,15 +12,15 @@ Vision Board sert à trier et à revoir les photos d'un reportage, sans jamais t
 
 ## Installation
 
-Sous Windows, le plus simple est de télécharger `VisionBoard-Windows.zip` depuis la [dernière version](https://github.com/jeandemalet/vision-board/releases/latest), de le décompresser et d'ouvrir `VisionBoard.exe`. Le programme n'étant pas signé, Windows peut afficher un avertissement au premier lancement : « Informations complémentaires », puis « Exécuter quand même ».
+Sous Windows, le plus simple est de télécharger `Choyce-Windows.zip` depuis la [dernière version](https://github.com/jeandemalet/vision-board/releases/latest), de le décompresser et d'ouvrir `Choyce.exe`. Le programme n'étant pas signé, Windows peut afficher un avertissement au premier lancement : « Informations complémentaires », puis « Exécuter quand même ».
 
-Pour le lancer depuis les sources, il faut Python 3.10 ou plus récent. Dans le dossier de Vision Board :
+Pour le lancer depuis les sources, il faut Python 3.10 ou plus récent. Dans le dossier de Choyce :
 
 ```bash
 py -3 -m pip install -r requirements.txt
 ```
 
-Sous Windows, double-cliquez ensuite sur `Lancer Vision Board.bat`. Ailleurs, lancez `python3 triphoto_qt.py`. La gestion du profil de l'écran n'est active que sous Windows : sur les autres systèmes, l'affichage part du principe que l'écran est en sRGB.
+Sous Windows, double-cliquez ensuite sur `Lancer Choyce.bat`. Ailleurs, lancez `python3 triphoto_qt.py`. La gestion du profil de l'écran n'est active que sous Windows : sur les autres systèmes, l'affichage part du principe que l'écran est en sRGB.
 
 ## Mises à jour
 
@@ -50,13 +50,13 @@ Le tri, « Trier par », se trouve dans le panneau de gauche de chaque vue, sauf
 
 Le menu en haut à gauche porte le nom du projet, du portfolio ou de la sélection ouverte. Il ajoute des photos, passe à un autre projet, à une autre sélection ou au portfolio, cherche sur un disque et revient à l'accueil. Un projet dont le disque est débranché reste dans la liste.
 
-Si un projet a été déplacé ou renommé, un clic sur sa carte, ou « Retrouver le dossier… » d'un clic droit, demande où il se trouve. Il suffit d'indiquer un dossier qui le contient : Vision Board cherche le projet à l'intérieur, et prévient s'il y en a plusieurs, ou s'il ne trouve que des photos sans leurs notes. Le portfolio et les sélections qui pointent vers ce projet suivent. Pour des photos isolées du portfolio ou d'une sélection, « Retrouver les photos manquantes… » du même menu, présent quand il en manque, les cherche par leur nom dans le dossier choisi.
+Si un projet a été déplacé ou renommé, un clic sur sa carte, ou « Retrouver le dossier… » d'un clic droit, demande où il se trouve. Il suffit d'indiquer un dossier qui le contient : Choyce cherche le projet à l'intérieur, et prévient s'il y en a plusieurs, ou s'il ne trouve que des photos sans leurs notes. Le portfolio et les sélections qui pointent vers ce projet suivent. Pour des photos isolées du portfolio ou d'une sélection, « Retrouver les photos manquantes… » du même menu, présent quand il en manque, les cherche par leur nom dans le dossier choisi.
 
-Après le déplacement de plusieurs dossiers, ou pour retrouver d'anciens projets, « Rechercher sur un disque… », sur l'accueil et dans le même menu, évite de les reprendre un par un : indiquez un disque ou un dossier. Vision Board y cherche ce qui est perdu, projets, portfolio et sélections, relie ce qu'il trouve, ajoute à l'accueil les projets qui n'y sont pas encore et dit ce qui manque.
+Après le déplacement de plusieurs dossiers, ou pour retrouver d'anciens projets, « Rechercher sur un disque… », sur l'accueil et dans le même menu, évite de les reprendre un par un : indiquez un disque ou un dossier. Choyce y cherche ce qui est perdu, projets, portfolio et sélections, relie ce qu'il trouve, ajoute à l'accueil les projets qui n'y sont pas encore et dit ce qui manque.
 
 ## La vue Classique
 
-Une photo en grand et le ruban de toutes les photos à droite, que l'on élargit en tirant sa bordure : les vignettes grandissent avec lui. Ajustée, la photo s'arrête au-dessus de la petite barre qui apparaît au mouvement de la souris et donne accès aux étoiles, au marqueur, au portfolio, à « à publier » et à la couleur du fond : cinq gris ou n'importe quelle autre couleur avec le bouton +. Le clic droit et la touche `B` changent aussi le fond. La molette zoome depuis le centre de la vue, et on attrape l'image à la souris pour la déplacer, quel que soit le zoom. Le zoom et le déplacement restent d'une photo à l'autre, et `0` recentre et revient à l'ajustement. En arrière-plan, Vision Board prépare les images nettes des dix photos suivantes, dans le sens où vous avancez, et de deux photos derrière.
+Une photo en grand et le ruban de toutes les photos à droite, que l'on élargit en tirant sa bordure : les vignettes grandissent avec lui. Ajustée, la photo s'arrête au-dessus de la petite barre qui apparaît au mouvement de la souris et donne accès aux étoiles, au marqueur, au portfolio, à « à publier » et à la couleur du fond : cinq gris ou n'importe quelle autre couleur avec le bouton +. Le clic droit et la touche `B` changent aussi le fond. La molette zoome depuis le centre de la vue, et on attrape l'image à la souris pour la déplacer, quel que soit le zoom. Le zoom et le déplacement restent d'une photo à l'autre, et `0` recentre et revient à l'ajustement. En arrière-plan, Choyce prépare les images nettes des dix photos suivantes, dans le sens où vous avancez, et de deux photos derrière.
 
 ## Les autres vues
 
@@ -100,7 +100,7 @@ Pour relire un bucket, la ligne **Afficher**, toujours en haut sous le bandeau, 
 
 Rien ne bouge non plus avant **Exporter…**, le même bouton que pour un projet : on choisit un dossier, qui reçoit un dossier au nom de la sélection, avec un sous-dossier par bucket portant son titre. Ce sont des copies exactes des originaux. Un export précédent n'est jamais remplacé : le nouveau prend un nom daté.
 
-Les sélections sont des fichiers du dossier de données du programme, `%LOCALAPPDATA%\Vision Board` sous Windows.
+Les sélections sont des fichiers du dossier de données du programme, `%LOCALAPPDATA%\Vision Board` sous Windows, nom gardé de l'ancienne appellation du programme.
 
 ## Vides et retraits
 
@@ -116,9 +116,9 @@ Un petit cœur en haut à droite de chaque photo se remplit d'un clic ou avec la
 
 ## Portfolio
 
-Le portfolio rassemble vos meilleures photos, tous projets confondus. Le signet de la barre flottante, celui de chaque vignette du ruban de la vue Classique ou la touche `K` y ajoute la photo, et un second appui l'en retire ; `Ctrl+Z` annule. Au premier ajout, Vision Board demande où placer son dossier, qui reçoit sa liste, ses notes et ses exports. L'emplacement se change ensuite dans les Préférences ou d'un clic droit sur la carte du portfolio : le portfolio y est reporté et l'ancien dossier reste en place.
+Le portfolio rassemble vos meilleures photos, tous projets confondus. Le signet de la barre flottante, celui de chaque vignette du ruban de la vue Classique ou la touche `K` y ajoute la photo, et un second appui l'en retire ; `Ctrl+Z` annule. Au premier ajout, Choyce demande où placer son dossier, qui reçoit sa liste, ses notes et ses exports. L'emplacement se change ensuite dans les Préférences ou d'un clic droit sur la carte du portfolio : le portfolio y est reporté et l'ancien dossier reste en place.
 
-Ajouter une photo ne copie rien : le portfolio retient seulement où elle se trouve, et aucun fichier n'est écrit avant un export. L'original n'est jamais touché, et retirer une photo l'enlève simplement de la liste. Le bouton **Exporter…** du portfolio copie ses photos, toutes par défaut ou selon les réglages choisis, dans un sous-dossier par projet. Le portfolio s'ouvre depuis sa carte, en tête de l'accueil, comme un projet à part : on y retrouve toutes les vues et les filtres, plus un choix du projet d'origine dans **Filtre**. Une photo y arrive avec ses notes, puis on la note librement sans que cela change le projet d'origine. Si un original est introuvable, par exemple sur un disque débranché, la photo disparaît de la vue et Vision Board le signale, mais elle reste dans le portfolio avec ses notes, et revient quand le fichier est de nouveau là.
+Ajouter une photo ne copie rien : le portfolio retient seulement où elle se trouve, et aucun fichier n'est écrit avant un export. L'original n'est jamais touché, et retirer une photo l'enlève simplement de la liste. Le bouton **Exporter…** du portfolio copie ses photos, toutes par défaut ou selon les réglages choisis, dans un sous-dossier par projet. Le portfolio s'ouvre depuis sa carte, en tête de l'accueil, comme un projet à part : on y retrouve toutes les vues et les filtres, plus un choix du projet d'origine dans **Filtre**. Une photo y arrive avec ses notes, puis on la note librement sans que cela change le projet d'origine. Si un original est introuvable, par exemple sur un disque débranché, la photo disparaît de la vue et Choyce le signale, mais elle reste dans le portfolio avec ses notes, et revient quand le fichier est de nouveau là.
 
 Les copies faites par les versions précédentes restent dans le dossier et servent toujours d'images : une copie retirée part à la corbeille, et une copie supprimée à la main sort du portfolio à la prochaine ouverture d'un projet. Une photo déposée à la main dans le dossier y compte comme une photo ordinaire.
 
@@ -130,7 +130,7 @@ L'avion de la barre flottante ou la touche `I` marque une photo à publier. C'es
 
 **Exporter…** demande quelles photos du projet copier : notes, marqueur, portfolio, à publier, j'aime et, dans le portfolio, projet d'origine. Ces réglages se combinent, par exemple J'aime avec « 3 étoiles et plus ». Le dialogue part des filtres en cours, ou des 5 étoiles s'il n'y en a aucun, et compte les photos concernées. Il prend tout le projet, pas seulement ce qui est à l'écran, et une photo rejetée n'en sort que si on demande les rejetées.
 
-Les copies vont dans `Exportation`, dans un sous-dossier au nom des réglages, par exemple `5 étoiles` ou `4 étoiles et plus, À publier`, ou `Instagram` depuis cette vue. Ce nom se change librement. Une barre de progression suit l'export, et Annuler l'interrompt sans rien laisser. Si ce sous-dossier contient déjà un export, Vision Board demande s'il faut le remplacer ou ranger le nouveau dans un sous-dossier daté, qu'un remplacement ultérieur ne touche pas. Les copies passent par un dossier de travail : un export interrompu laisse le précédent intact.
+Les copies vont dans `Exportation`, dans un sous-dossier au nom des réglages, par exemple `5 étoiles` ou `4 étoiles et plus, À publier`, ou `Instagram` depuis cette vue. Ce nom se change librement. Une barre de progression suit l'export, et Annuler l'interrompt sans rien laisser. Si ce sous-dossier contient déjà un export, Choyce demande s'il faut le remplacer ou ranger le nouveau dans un sous-dossier daté, qu'un remplacement ultérieur ne touche pas. Les copies passent par un dossier de travail : un export interrompu laisse le précédent intact.
 
 Le clic droit sur une photo l'exporte aussitôt, sans dialogue, ainsi que toutes les photos sélectionnées si elle en fait partie ; dans le vide, il exporte la sélection en cours. Cela vaut pour toutes les vues et le ruban. Les copies vont dans `Exportation`, dans un sous-dossier `Sélection` daté qui ne remplace rien. Dans une sélection, elles vont à côté de ses exports, sans sous-dossier par bucket, et son dossier d'export n'est demandé que la première fois.
 
