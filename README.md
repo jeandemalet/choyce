@@ -34,19 +34,19 @@ Dès qu'un travail dure, une petite barre en bas à gauche de la fenêtre indiqu
 
 ## Les vues
 
-L'écran se lit en trois panneaux, chacun avec son rôle. En haut, **comment regarder** : les vues. À gauche, **les réglages de la vue affichée** : tri, affichage, disposition, actions. À droite, **quelles photos** : le filtre. La note et les marques de la photo restent en bas, sous la photo.
+L'écran se lit en trois panneaux, chacun avec son rôle. En haut, **comment regarder** : les vues. À gauche, **les réglages de la vue affichée**, toujours dans le même ordre : Trier par, Affichage, puis ce qui est propre à la vue. À droite, **quelles photos** : le filtre. La note et les marques de la photo restent en bas, sous la photo.
 
 Le bouton **Buckets**, à côté du filtre, ou `Ctrl+B`, passe en mode buckets, dans un projet, le portfolio ou une sélection. Les buckets s'affichent en bas de toutes les vues, le bouton + en crée un, et les touches `1` à `5` les remplissent au lieu de noter. La vue Classique montre alors la photo en grand, à glisser sur un bucket. Hors de ce mode, les buckets restent visibles sur les photos et dans le filtre. Les buckets d'un projet sont enregistrés avec ses notes et, s'il en a de remplis, l'export propose un dossier par bucket.
 
-Le bandeau du haut porte, au centre, les vues : **Classique**, Grille, Pêle-mêle, Tindr et Instagram. La touche `G` bascule entre Classique et la dernière autre vue, et `Ctrl+0`, `Ctrl+1`, `Ctrl+2`, `Ctrl+4` et `Ctrl+5` ouvrent chacune d'elles, `Ctrl+3` la Grille triée par couleur. Dans les vues, la section Affichage du panneau de gauche donne le noir et blanc, la couleur du fond et le zoom.
+Le bandeau du haut porte, au centre, les vues : **Classique**, Grille, Pêle-mêle, Tindr et Instagram. La touche `G` bascule entre Classique et la dernière autre vue, et `Ctrl+0`, `Ctrl+1`, `Ctrl+2`, `Ctrl+4` et `Ctrl+5` ouvrent chacune d'elles, `Ctrl+3` la Grille triée par couleur. Dans toutes les vues, Classique comprise, la section Affichage du panneau de gauche donne le noir et blanc, le zoom et le bouton **Fond**, qui nomme le fond actuel et ouvre les gris prédéfinis et « Autre couleur… ». Instagram, qui a son propre écran, y remplace le fond par Mode clair ou Mode sombre.
 
 **‹ Accueil**, en haut à gauche, revient à l'écran d'accueil depuis n'importe quelle vue. **↶ Annuler**, juste à côté du menu du projet, reprend la dernière action comme `Ctrl+Z` : note, marqueur, portfolio, rangement dans un bucket, sortie de grille, photo déplacée dans Pêle-mêle ou mélange. **↷ Rétablir**, ou `Ctrl+Y`, refait ce qui vient d'être annulé, tant qu'aucune nouvelle action n'a eu lieu.
 
-Le panneau du filtre reste ouvert à droite de la fenêtre, à côté des photos qui lui répondent. **Filtre**, à côté des vues, rappelle le filtre actif et ouvre ou ferme ce panneau ; le choix est retenu. La vue Classique, qui a son ruban à droite, le laisse fermé tant qu'on ne le demande pas. « Tout effacer » retire tous les filtres. Il donne le filtre par note (par exemple « 5 ★ », ou « 3 ★ » et « et + », chaque note indiquant en tout petit son nombre de photos), le filtre par marqueur ou par drapeau, et « Seulement » : Portfolio, À publier et J'aime, qui s'ajoutent aux autres, dans un projet comme dans une sélection.
+Le panneau du filtre reste ouvert à droite de la fenêtre, à côté des photos qui lui répondent. **Filtre**, à côté des vues, rappelle le filtre actif et ouvre ou ferme ce panneau ; le choix est retenu et vaut pour toutes les vues, pour que le panneau n'apparaisse ni ne disparaisse en changeant de vue. « Tout effacer » retire tous les filtres. Il donne le filtre par note (par exemple « 5 ★ », ou « 3 ★ » et « et + », chaque note indiquant en tout petit son nombre de photos), le filtre par marqueur ou par drapeau, en boutons comme les notes, et « Seulement » : Portfolio, À publier et J'aime, qui s'ajoutent aux autres, dans un projet comme dans une sélection.
 
 « Avec ces photos », dans le même panneau, part de ce que les filtres ont gardé. « Ajouter au portfolio » les y met en une fois, et `Ctrl+Z` annule. « Créer une sélection… » ouvre une nouvelle sélection avec ce projet déjà coché et ses filtres repris : il ne reste qu'à lui donner un nom. « Annuler » ramène à la vue qu'on quittait.
 
-Le tri, « Trier par », se trouve dans le panneau de gauche de chaque vue, sauf Pêle-mêle, qui pose les photos au hasard.
+Le tri, « Trier par », se trouve en tête du panneau de gauche de chaque vue, sauf Pêle-mêle, qui pose les photos au hasard. C'est un seul ordre pour toutes les vues : nom, date, couleur, luminosité, contraste, saturation ou mélangé, et le bouton dessous en change le sens ou, mélangé, tire un autre ordre. Choisi dans Classique, il vaut dans la Grille, Tindr et Instagram, et inversement. La touche `R` remélange, et redistribue la table dans Pêle-mêle ; `Ctrl+Z` revient à l'ordre précédent.
 
 Le menu en haut à gauche porte le nom du projet, du portfolio ou de la sélection ouverte. Il ajoute des photos, passe à un autre projet, à une autre sélection ou au portfolio, cherche sur un disque et revient à l'accueil. Un projet dont le disque est débranché reste dans la liste.
 
@@ -56,7 +56,7 @@ Après le déplacement de plusieurs dossiers, ou pour retrouver d'anciens projet
 
 ## La vue Classique
 
-Une photo en grand et le ruban de toutes les photos à droite, que l'on élargit en tirant sa bordure : les vignettes grandissent avec lui. Ajustée, la photo s'arrête au-dessus de la petite barre qui apparaît au mouvement de la souris et donne accès aux étoiles, au marqueur, au portfolio, à « à publier » et à la couleur du fond : cinq gris ou n'importe quelle autre couleur avec le bouton +. Le clic droit et la touche `B` changent aussi le fond. La molette zoome depuis le centre de la vue, et on attrape l'image à la souris pour la déplacer, quel que soit le zoom. Le zoom et le déplacement restent d'une photo à l'autre, et `0` recentre et revient à l'ajustement. En arrière-plan, Choyce prépare les images nettes des dix photos suivantes, dans le sens où vous avancez, et de deux photos derrière.
+Une photo en grand et le ruban de toutes les photos à droite, que l'on élargit en tirant sa bordure : les vignettes grandissent avec lui. Ajustée, la photo s'arrête au-dessus de la barre de notation, la même que dans Tindr et Instagram : toujours présente, elle nomme la photo et donne accès aux étoiles, au marqueur, au portfolio et à « à publier ». Le fond se change comme dans les autres vues : bouton Fond du panneau de gauche, clic droit ou touche `B`. La molette zoome depuis le centre de la vue, et on attrape l'image à la souris pour la déplacer, quel que soit le zoom. Le zoom et le déplacement restent d'une photo à l'autre, et `0` recentre et revient à l'ajustement. En arrière-plan, Choyce prépare les images nettes des dix photos suivantes, dans le sens où vous avancez, et de deux photos derrière.
 
 ## Les autres vues
 
@@ -68,9 +68,9 @@ La barre du bas porte, dès qu'une photo est sélectionnée, sa note ; un clic d
 
 | Vue | Principe | Réglages à gauche |
 | --- | --- | --- |
-| **Grille** | Une grille décalée, comme une galerie éditoriale, ou des rangées. En décalé, les étoiles se placent sous la photo ; en rangées, sur la photo. Formats égaux cale les rangées sur l'orientation majoritaire, Horizontales en avant sur la hauteur des horizontales, Verticales en avant sur celle des verticales, sans changer l'ordre des photos. Tirez une photo hors de la grille, sur un côté ou en bas, pour la sortir de la sélection. `Ctrl` + molette change la taille. | Disposition, formats mis en avant (rangées seulement), largeur du panneau central, mélange, action de sortie |
-| **Pêle-mêle** | Toutes les photos du filtre posées sur une table, les mieux notées plus grandes. Elles sont posées sur un quadrillage invisible, aussi large que la plus large d'entre elles, et chaque rangée est aussi haute que sa photo la plus haute. La table tient en largeur et continue vers le bas ; on glisse le fond pour s'y promener. On déplace les photos à la souris, la molette monte et descend, et le zoom se règle en haut ou avec `Ctrl` + molette. | Mélanger (touche `R`), photos droites par défaut ou penchées, curseur de 2 à 16 photos en largeur |
-| **Grille triée** | « Trier par », dans les réglages de la Grille, donne le nom, la date, la couleur, la luminosité, le contraste ou la saturation, en croissant ou décroissant. Hors du nom, c'est un mur de photos rangées selon leur couleur dominante, les images neutres et le noir et blanc à la fin. Les blocs de couleur séparent les rouges, oranges, jaunes, etc., chacun sous son titre. Le curseur de défilement suit uniquement ce qui est trié : la teinte seule, à saturation et luminosité fixes, en tri par couleur ; du noir au blanc en luminosité et en contraste, celui-ci rapporté à ce que permet la luminosité de la photo, pour que les photos de nuit ne passent pas toutes pour les moins contrastées ; du gris au vif en saturation. | Disposition décalée ou en rangées, blocs de couleur (tri par couleur seulement), tri par couleur, luminosité, contraste ou saturation, et son sens |
+| **Grille** | Une grille décalée, comme une galerie éditoriale, ou des rangées. En décalé, les étoiles se placent sous la photo ; en rangées, sur la photo. Formats égaux cale les rangées sur l'orientation majoritaire, Horizontales en avant sur la hauteur des horizontales, Verticales en avant sur celle des verticales, sans changer l'ordre des photos. Tirez une photo hors de la grille, sur un côté ou en bas, pour la sortir de la sélection. `Ctrl` + molette change la taille. | Disposition, formats mis en avant (rangées seulement), largeur du panneau central, action de sortie |
+| **Pêle-mêle** | Toutes les photos du filtre posées sur une table, les mieux notées plus grandes. Elles sont posées sur un quadrillage invisible, aussi large que la plus large d'entre elles, et chaque rangée est aussi haute que sa photo la plus haute. La table tient en largeur et continue vers le bas ; on glisse le fond pour s'y promener. On déplace les photos à la souris, la molette monte et descend, et le zoom se règle en haut ou avec `Ctrl` + molette. | Mélanger (touche `R`), photos droites ou penchées, curseur de 2 à 16 photos en largeur |
+| **Grille triée** | C'est la même Grille, avec la même disposition, la même largeur et la même action de sortie : seul l'ordre change. « Trier par », commun à toutes les vues, donne le nom, la date, la couleur, la luminosité, le contraste ou la saturation, en croissant ou décroissant. Hors du nom, c'est un mur de photos rangées selon leur couleur dominante, les images neutres et le noir et blanc à la fin. Les blocs de couleur séparent les rouges, oranges, jaunes, etc., chacun sous son titre. Le curseur de défilement suit uniquement ce qui est trié : la teinte seule, à saturation et luminosité fixes, en tri par couleur ; du noir au blanc en luminosité et en contraste, celui-ci rapporté à ce que permet la luminosité de la photo, pour que les photos de nuit ne passent pas toutes pour les moins contrastées ; du gris au vif en saturation. | Disposition décalée ou en rangées, blocs de couleur (tri par couleur seulement) |
 | **Tindr** | Une photo à la fois : glissez-la à droite ou à gauche, ou utilisez les touches précédente et suivante. Espace passe sans décider, Retour arrière revient en arrière. La molette zoome et le zoom se conserve d'une photo à l'autre, comme dans la vue Classique. Zoomé au-delà de 100 %, glisser déplace la photo et ce sont les touches qui décident. | Action à gauche, action à droite |
 | **Instagram** | Dans le panneau de gauche, le choix Mode clair ou Mode sombre vaut indépendamment du fond des autres vues : poste clair sur écran noir, ou l'inverse. Les photos comme dans un carrousel : un cadre unique, où une verticale occupe presque toute la hauteur et où une horizontale, de même largeur, sort plus petite, avec le compte au-dessus, les boutons en dessous, le compteur et les points. Flèches, touches ou glisser pour avancer. La molette zoome dans le cadre et dézoome le carrousel entier. Le cœur est le j'aime, l'avion « à publier » et le signet le portfolio. | Nom du compte affiché |
 
@@ -154,8 +154,13 @@ Tous les raccourcis se changent dans **Préférences** (`Ctrl+,`). Les touches e
 | `Ctrl+0` à `Ctrl+5` | Vues |
 | `Ctrl+6` | Accueil |
 | `B` | Couleur de fond suivante |
+| `R` | Remélanger, ou redistribuer dans Pêle-mêle |
 | `0`, `+`, `-` | Ajuster, zoomer, dézoomer |
 | `F5`, `Ctrl+O`, `Ctrl+W` | Actualiser, ouvrir, fermer le projet |
+
+## Entretien des aperçus
+
+Les aperçus ne sont que des copies faites pour l'écran. Une fois par jour, en arrière-plan et sans rien demander, Choyce supprime ceux qui n'ont pas servi depuis deux mois : projet qui n'a pas été rouvert, ancien écran, photo retouchée depuis, aperçus de l'ancienne interface, fichiers temporaires laissés par une écriture interrompue. Il les refait de lui-même la prochaine fois qu'il en a besoin. Un disque débranché est simplement laissé de côté et rattrapé une autre fois. Seuls les fichiers d'aperçu que Choyce nomme lui-même, dans un dossier `Previews`, sont concernés : jamais un original, une note ou un export. Le cache partagé des sélections est en plus limité à 4 Gio, en retirant d'abord les plus anciens, et une sélection supprimée part à la corbeille avec sa copie de sauvegarde.
 
 ## Ce qui est écrit sur le disque
 
@@ -165,7 +170,7 @@ Les originaux ne sont jamais réécrits, renommés, déplacés ni supprimés. To
 - `session.v1.bak.json` est la copie de l'ancienne session, faite une seule fois à sa première ouverture ;
 - `review_state.json` garde les filtres, les photos sorties de la grille, la dernière vue et la dernière photo, retrouvés à la réouverture du projet ;
 - `colors.json` garde les formats, les couleurs dominantes, le contraste et la saturation, calculés une seule fois en arrière-plan ;
-- `Previews` contient les aperçus, limités selon la taille du projet, entre 512 Mio et 4 Gio ;
+- `Previews` contient les aperçus, limités selon la taille du projet, entre 512 Mio et 4 Gio, et entretenus comme décrit plus haut ;
 - `Exportation` reçoit des copies exactes des originaux, un sous-dossier par export ;
 - `Export_5_Etoiles` et `Export_Retenues`, s'ils existent, sont les exports des versions précédentes, laissés à leur place.
 
@@ -190,6 +195,7 @@ Le clic droit sur une photo, ou sur toutes celles sélectionnées, propose aussi
 - `triphoto_prefs.py` : projets récents, raccourcis et préférences ;
 - `triphoto_update.py` : détection et installation des nouvelles versions ;
 - `triphoto_blip.py` : envoi des photos avec Blip ;
+- `triphoto_cache.py` : entretien automatique des aperçus ;
 - `triphoto_theme.py` : palette, feuille de style et icônes vectorielles.
 
 Les tests travaillent sur des images de synthèse, avec des réglages séparés des vôtres :

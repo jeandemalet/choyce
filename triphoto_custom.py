@@ -1719,6 +1719,10 @@ class CustomPage(QStackedWidget):
         if ask(self.window, 'Supprimer la sélection', f'« {session.name} » ira à la corbeille, avec ses buckets. Les photos ne bougent pas.',
                [('cancel', 'Annuler', False), ('delete', 'Supprimer', True)]) == 'delete':
             move_to_trash(session.path)
+            # Its backup copy too: nothing of it is left behind in the data folder.
+            backup = Path(str(session.path)+'.bak')
+            if backup.exists():
+                move_to_trash(backup)
             if session.path.with_suffix('').exists():
                 move_to_trash(session.path.with_suffix(''))
             self.window.home.refresh()

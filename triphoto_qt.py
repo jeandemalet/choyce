@@ -25,10 +25,11 @@ from PySide6.QtWidgets import (QToolTip, QApplication, QMainWindow, QWidget, QVB
 from PIL import Image, ImageCms, ImageWin
 from triphoto import (export_folder_name, APP_NAME, APP_VERSION, PhotoSession, sort_photos, SORT_OPTIONS, load_screen_preview, original_inventory,
     export_original_copy, EXPORT_DIR_NAME, PICK_NEUTRAL, PICK_REJECT, PICK_SELECT, SESSION_DIR_NAME)
-from triphoto_custom import ProjectBuckets, BucketFilter, BucketStrip, CustomPage, PopupMenu, SelectionSession
-from triphoto_portfolio import MANIFEST_FILE, Portfolio, PortfolioSession, RelocateJob, UNSORTED
+from triphoto_custom import ProjectBuckets, BucketFilter, BucketStrip, CustomPage, PopupMenu, SelectionSession, Store
+from triphoto_cache import DAY, SHARED_LIMIT, clean_caches
+from triphoto_portfolio import MANIFEST_FILE, Portfolio, PortfolioSession, RelocateJob, UNSORTED, move_to_trash
 from triphoto_prefs import (ALIASES, LinkSearchJob, MARK_TIPS, PreferencesDialog, Recents, age_label, ask, inform, known_links, locate_photos, locate_project, moved_path, path_key, shortcut_map)
-from triphoto_review import COLOR_ORDERS, MODES, BackgroundPicker, color_key, ChoiceFilter, MarkerFilter, NoteFilter, RatingBar, ReviewPage
+from triphoto_review import COLOR_ORDERS, MODES, color_key, swatch_icon, ChoiceFilter, MarkerFilter, NoteFilter, RatingBar, ReviewPage
 from triphoto_blip import BLIP_STORES, blip_executable, send_with_blip
 from triphoto_update import UpdateCheck, UpdateDownload, can_install, launch_installer, write_installer
 from triphoto_theme import (ACCENT, ASSETS, BACKGROUNDS, FAINT, INK, RAISED, REJECT, SELECT, STYLE, TEXT,
@@ -194,6 +195,8 @@ class Loader(QRunnable):
                         with Image.open(cache_path) as cached:
                             image = cached.convert('RGB')
                         image.thumbnail((400, 400), Image.Resampling.BILINEAR)
+                        # Seen in the ribbon is in use: the upkeep of the caches keeps it.
+                        os.utime(cache_path, None)
                     except (OSError, ValueError):
                         image = None
                 elif self.side == 1000 and cache_path.exists():
@@ -226,6 +229,24 @@ class Loader(QRunnable):
             self.signals.ready.emit(str(self.path), self.side, QImage(), str(error), self.generation)
 
 
+class CacheJob(QRunnable):
+    """The upkeep of the preview caches, in the background: see triphoto_cache."""
+
+    def __init__(self, roots, store):
+        super().__init__()
+        self.roots, self.store = roots, store
+
+    def run(self):
+        try:
+            clean_caches(self.roots, self.store/'Previews')
+            # What a deleted selection left behind: its backup copy goes to the recycle bin as well.
+            for backup in self.store.glob('*.json.bak'):
+                if not backup.with_suffix('').exists() and time.time()-backup.stat().st_mtime > DAY:
+                    move_to_trash(backup)
+        except OSError:
+            pass
+
+
 class HoverButton(QPushButton):
     entered = Signal()
 
@@ -250,6 +271,8 @@ class Viewer(QWidget):
     def __init__(self):
         super().__init__()
         self.image = QImage()
+        # Black and white, shared with the other views.
+        self.transform = lambda image: image
         self.liked = lambda: None
         self.add_export_action = lambda menu: None
         self.zoom = 1.0
@@ -269,7 +292,7 @@ class Viewer(QWidget):
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.message)
             return
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        painter.drawImage(self.image_rect(), self.image)
+        painter.drawImage(self.image_rect(), self.transform(self.image))
         liked = self.liked()
         if liked is not None:
             draw_heart(painter, self.heart_rect(), liked)
@@ -368,11 +391,13 @@ class Viewer(QWidget):
     def background_menu(self, parent):
         menu = QMenu(parent)
         for label, color in BACKGROUNDS:
-            action = menu.addAction(label)
+            action = menu.addAction(swatch_icon(color), label)
             action.setCheckable(True)
             action.setChecked(self.background == color)
             action.triggered.connect(lambda checked=False, value=color: self.set_background(value))
-        menu.addAction('Autre couleur…', self.pick_background)
+        custom = menu.addAction('Autre couleur…', self.pick_background)
+        if self.background not in [color for _, color in BACKGROUNDS]:
+            custom.setIcon(swatch_icon(self.background))
         return menu
 
     def pick_background(self):
@@ -927,15 +952,17 @@ class ExportDialog(QDialog):
         grid.addWidget(QLabel(window.marker_section.title.text(), objectName='muted'), 1, 0)
         grid.addWidget(self.marker, 1, 1)
         choices = window.choices
-        toggles = QHBoxLayout()
+        # The same capsule as in the filter panel.
+        capsule = QFrame(objectName='segments')
+        toggles = QHBoxLayout(capsule)
+        toggles.setContentsMargins(3, 3, 3, 3)
         toggles.setSpacing(2)
         self.portfolio = self.toggle(toggles, 'Portfolio', choices.portfolio.isChecked())
         self.portfolio.setVisible(not window.viewing_portfolio())
         self.publish = self.toggle(toggles, 'À publier', choices.publish.isChecked())
         self.liked = self.toggle(toggles, "J'aime", choices.liked.isChecked())
-        toggles.addStretch(1)
         grid.addWidget(QLabel('Seulement', objectName='muted'), 2, 0)
-        grid.addLayout(toggles, 2, 1)
+        grid.addWidget(capsule, 2, 1)
         self.project = None
         row = 3
         if window.viewing_portfolio():
@@ -1332,7 +1359,7 @@ class Window(QMainWindow):
             self.view_buttons[key] = button
         self.view_buttons['classic'].setChecked(True)
         self.segments = segments
-        self.filter_chip = HoverButton('Filtre', objectName='seg', checkable=True)
+        self.filter_chip = HoverButton('Filtre', objectName='toggle', checkable=True)
         self.filter_chip.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.filter_chip.clicked.connect(self.toggle_filter_panel)
         right.addSpacing(6)
@@ -1342,7 +1369,7 @@ class Window(QMainWindow):
         top.addWidget(segments)
         top.addWidget(self.filter_chip)
         top.addSpacing(6)
-        self.bucket_button = QPushButton('Buckets', objectName='seg', checkable=True)
+        self.bucket_button = QPushButton('Buckets', objectName='toggle', checkable=True)
         self.bucket_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.bucket_button.setToolTip('Mode buckets : ils s’affichent en bas et les touches 1 à 5 les remplissent, au lieu de noter.')
         self.bucket_button.clicked.connect(self.toggle_bucket_mode)
@@ -1356,6 +1383,7 @@ class Window(QMainWindow):
         self.viewer.liked = lambda: self.current_photo().liked if self.current_photo() else None
         self.viewer.add_export_action = lambda menu: self.add_export_action(menu, self.clicked_photos())
         self.viewer.heartClicked.connect(self.toggle_like)
+        self.viewer.transform = lambda image: self.review.transformed(image)
         splitter.addWidget(self.viewer)
         self.list = PhotoList()
         self.list.owner = self
@@ -1373,19 +1401,16 @@ class Window(QMainWindow):
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
         splitter.splitterMoved.connect(lambda *_: self.settings.setValue('ribbon_width', self.list.width()))
-        self.viewer_bar = RatingBar(self, self.viewer, show_name=False)
+        # The same bar as the other views, always there under the photo, with its name.
+        self.viewer_bar = RatingBar(self, self.viewer)
         self.viewer_bar.rated.connect(self.rate)
         self.viewer_bar.marked.connect(self.set_pick)
         self.viewer_bar.portfolio.connect(self.toggle_portfolio)
         self.viewer_bar.publish.connect(self.toggle_publish)
         self.viewer_bar.hide()
-        self.viewer_picker = BackgroundPicker(self)
         self.note_filter = NoteFilter(self)
         self.marker_filter = MarkerFilter(self)
         self.choices = ChoiceFilter(self)
-        self.viewer_bar_timer = QTimer(self)
-        self.viewer_bar_timer.setSingleShot(True)
-        self.viewer_bar_timer.timeout.connect(self.hide_viewer_bar)
         self.viewer.activity.connect(self.show_viewer_bar)
         self.pages = QStackedWidget()
         self.home = HomePage(self)
@@ -1400,9 +1425,8 @@ class Window(QMainWindow):
         self.bucket_ghost = QLabel(self)
         self.bucket_ghost.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.bucket_ghost.hide()
-        # On the right of the views, open or closed for good: the photos answer each filter beside it.
-        self.filter_open = {'classic': self.settings.value('filter_open_classic', False, type=bool),
-                            'views': self.settings.value('filter_open_views', True, type=bool)}
+        # On the right of every view, open or closed for good: the photos answer each filter beside it.
+        self.filter_open = self.settings.value('filter_open', self.settings.value('filter_open_views', True, type=bool), type=bool)
         self.filter_panel = QFrame(objectName='dock')
         self.filter_panel.setFixedWidth(FILTER_WIDTH)
         panel_outer = QVBoxLayout(self.filter_panel)
@@ -1446,8 +1470,8 @@ class Window(QMainWindow):
         kept_lines = QVBoxLayout(kept)
         kept_lines.setContentsMargins(0, 0, 0, 0)
         kept_lines.setSpacing(4)
-        self.kept_portfolio = self.button(kept_lines, 'Ajouter au portfolio', self.add_filtered_to_portfolio, 'seg')
-        self.kept_selection = self.button(kept_lines, 'Créer une sélection…', self.select_filtered, 'seg')
+        self.kept_portfolio = self.button(kept_lines, 'Ajouter au portfolio', self.add_filtered_to_portfolio, '')
+        self.kept_selection = self.button(kept_lines, 'Créer une sélection…', self.select_filtered, '')
         self.kept_section = section('Avec ces photos', kept)
         filter_lines.addStretch(1)
         self.build_view_panel()
@@ -1536,8 +1560,8 @@ class Window(QMainWindow):
             'select_all': self.select_all, 'deselect': self.deselect, 'undo': self.undo, 'redo': self.redo, 'fit': self.fit,
             'zoom_in': lambda: self.zoom_by(1.15), 'zoom_out': lambda: self.zoom_by(1/1.15),
             'background': self.cycle_background, 'review': lambda: self.set_view('classic') if self.review_active else self.set_review(True),
-            'shuffle': lambda: self.review.shuffle() if self.review_active else None,
-            'mono': lambda: self.review.toggle_mono() if self.review_active else None,
+            'shuffle': self.shuffle_photos,
+            'mono': self.review.toggle_mono,
             'refresh': self.refresh, 'open': self.open_folder, 'close': self.close_project, 'preferences': self.open_preferences,
             **{f'rate{value}': (lambda stars=value: self.rate_key(stars)) for value in range(6)},
             **{f'mode_{mode}': (lambda value=mode: self.set_view(value)) for mode in ('classic', 'toile', 'swipe', 'color', 'wall', 'instagram')},
@@ -1592,14 +1616,10 @@ class Window(QMainWindow):
         self.toast_frame.raise_()
         self.toast_timer.start(duration)
 
-    def filter_place(self):
-        """Classique has its ribbon on the right: there the panel only opens on demand."""
-        return 'views' if self.review_active or self.custom_active else 'classic'
-
     def toggle_filter_panel(self, *args):
-        place = self.filter_place()
-        self.filter_open[place] = not self.filter_open[place]
-        self.settings.setValue(f'filter_open_{place}', self.filter_open[place])
+        """One choice for every view: the panel does not come and go when the view changes."""
+        self.filter_open = not self.filter_open
+        self.settings.setValue('filter_open', self.filter_open)
         self.sync_filter_panel()
 
     def sync_filter_panel(self):
@@ -1607,7 +1627,7 @@ class Window(QMainWindow):
         # In a selection, the buckets filter too. Choosing its galleries is not looking at photos.
         with_filter = has_photos and not self.choosing_photos()
         self.filter_chip.setVisible(with_filter)
-        shown = with_filter and self.filter_open[self.filter_place()]
+        shown = with_filter and self.filter_open
         self.filter_chip.setChecked(shown)
         self.filter_panel.setVisible(shown)
         self.bucket_section.setVisible(bool(self.buckets and (self.buckets.buckets or self.bucket_mode)))
@@ -1648,8 +1668,13 @@ class Window(QMainWindow):
     def set_view(self, key):
         if key == 'classic':
             self.set_review(False)
-        else:
-            self.open_review_mode(key)
+            return
+        if key == 'color' and not self.color_sorted():
+            # Ctrl+3: the Grille sorted by color, from the last color order chosen.
+            self.set_classic_sort(self.review.views['color'].order)
+        if key in ('wall', 'color'):
+            key = 'color' if self.color_sorted() else 'wall'
+        self.open_review_mode(key)
 
     def build_view_panel(self):
         """The settings of the view on screen, and nothing else."""
@@ -1693,13 +1718,14 @@ class Window(QMainWindow):
         self.classic_sort.addItem('Mélangé', 'shuffled')
         self.classic_sort.currentIndexChanged.connect(lambda *_: self.set_classic_sort(self.classic_sort.currentData()))
         sort_lines.addWidget(self.classic_sort)
-        self.classic_sort_button = self.button(sort_lines, '', self.flip_classic_sort, 'ghost')
+        self.classic_sort_button = self.button(sort_lines, '', self.flip_classic_sort)
         # It still holds the name or date order the grid shares.
         sort_lines.addWidget(self.sort)
         self.sort.hide()
         self.sort_section = group('Trier par', sorting)
         self.sync_classic_sort()
-        self.background_section = group('Fond', self.viewer_picker)
+        # Black and white, zoom and background: the same section in every view.
+        lines.addWidget(self.review.tools)
         stage = QWidget()
         stage_lines = QVBoxLayout(stage)
         stage_lines.setContentsMargins(0, 0, 0, 0)
@@ -1711,16 +1737,61 @@ class Window(QMainWindow):
         self.selection_section = QWidget()
         selection_lines = QVBoxLayout(self.selection_section)
         selection_lines.setContentsMargins(0, 0, 0, 0)
-        add_more = self.button(selection_lines, "Ajouter des photos d'autres projets…", self.edit_selection, 'seg')
+        add_more = self.button(selection_lines, "Ajouter des photos d'autres projets…", self.edit_selection)
         add_more.setToolTip('Cocher d’autres projets ou le portfolio, avec leurs filtres. Les buckets déjà remplis restent.')
         lines.addWidget(self.selection_section)
-        # Black and white, background and zoom of the views.
-        lines.addWidget(self.review.tools)
+        # Then what belongs to the view on screen only.
         for pills in (*self.review.options.values(), (self.review.swipe_bucket_pill,)):
             for pill in pills:
                 if pill is not None:
                     lines.addWidget(pill)
         lines.addStretch(1)
+
+    def color_sorted(self):
+        return self.classic_order not in (None, 'shuffled')
+
+    def remember_sort(self):
+        """Ctrl+Z puts the previous order back, as for a note."""
+        order, seed, sort = self.classic_order, self.classic_seed, self.sort.currentIndex()
+
+        def restore():
+            opposite = self.remember_sort()
+            self.classic_order, self.classic_seed = order, seed
+            self.settings.setValue('classic_sort', order or '')
+            self.sort.blockSignals(True)
+            self.sort.setCurrentIndex(sort)
+            self.sort.blockSignals(False)
+            self.sort_changed()
+            return opposite
+        return restore
+
+    def shuffle_photos(self):
+        """R: Pêle-mêle deals its table again; elsewhere the photos take a new random order."""
+        if self.review_active and self.review.mode == 'toile':
+            self.review.shuffle()
+        elif self.session and self.session.photos:
+            step = self.remember_sort()
+            self.classic_order = 'shuffled'
+            self.classic_seed = random.randrange(1 << 30)
+            self.settings.setValue('classic_sort', 'shuffled')
+            self.sort_changed()
+            self.remember(('view', 'Mélange', step))
+
+    def sort_changed(self):
+        """One order for Classique, the Grille, Tindr and Instagram: the Grille takes its colored form when sorted on a color."""
+        self.sync_classic_sort()
+        wall, color = self.review.views['wall'], self.review.views['color']
+        wall.order_seed = None
+        if self.color_sorted():
+            color.order = self.classic_order
+            self.settings.setValue('color_sort', self.classic_order)
+            color.bar.setValue(0)
+        self.review.sync_color_order()
+        if self.review_active and self.review.mode in ('wall', 'color'):
+            wanted = 'color' if self.color_sorted() else 'wall'
+            if self.review.mode != wanted:
+                self.review.set_mode(wanted)
+        self.filters_changed()
 
     def set_classic_sort(self, value):
         if value in ('name', 'date'):
@@ -1735,8 +1806,7 @@ class Window(QMainWindow):
         else:
             self.classic_order = value
         self.settings.setValue('classic_sort', self.classic_order or '')
-        self.sync_classic_sort()
-        self.filters_changed()
+        self.sort_changed()
 
     def flip_classic_sort(self):
         order = self.classic_order
@@ -1751,8 +1821,7 @@ class Window(QMainWindow):
             self.sort.blockSignals(True)
             self.sort.setCurrentIndex(max(0, self.sort.findData(f"{kind}_{'asc' if way == 'desc' else 'desc'}")))
             self.sort.blockSignals(False)
-        self.sync_classic_sort()
-        self.filters_changed()
+        self.sort_changed()
 
     def sync_classic_sort(self):
         if not hasattr(self, 'classic_sort'):
@@ -1776,7 +1845,7 @@ class Window(QMainWindow):
         self.classic_sort_button.setToolTip(tip)
 
     def classic_sorted(self, photos):
-        """Classique only: the grid and the other views keep their own order."""
+        """The order of every view but Pêle-mêle, which deals at random."""
         if self.classic_order == 'shuffled':
             # Hashed, so that a photo leaving leaves the others where they are.
             return sorted(photos, key=lambda p: zlib.crc32(f'{self.classic_seed}|{p.relative_path}'.encode()))
@@ -1788,12 +1857,12 @@ class Window(QMainWindow):
         self.view_panel.setVisible(has_photos and not self.choosing_photos() or (bool(self.selection) and self.custom_active and not self.choosing_photos()))
         mode = 'wall' if self.review.mode == 'color' else self.review.mode
         self.view_title.setText(self.view_buttons[mode if self.review_active else 'classic'].text())
-        # The grid sorts from its own settings, and Pêle-mêle deals at random: never two sorts on screen.
-        self.sort_section.setVisible(not self.custom_active and not (self.review_active and mode in ('wall', 'toile')))
+        # Pêle-mêle deals at random: no order to choose there.
+        self.sort_section.setVisible(not self.custom_active and not (self.review_active and mode == 'toile'))
         self.stage_section.setVisible(self.custom_active)
         self.selection_section.setVisible(bool(self.selection))
-        self.background_section.setVisible(not self.review_active)
-        self.review.tools.setVisible(self.review_active)
+        self.review.tools.setVisible(not self.custom_active)
+        self.review.sync_toolbar()
         self.review.place_overlays()
 
     def sync_view_buttons(self):
@@ -1803,18 +1872,14 @@ class Window(QMainWindow):
         self.sync_filter_panel()
 
     def show_viewer_bar(self):
-        self.viewer_bar_timer.start(1700)
         self.place_viewer_bar()
-        if self.viewer.image.isNull():
-            return
+        # Tied to the photo, not to its preview: no blink while the next one loads.
+        self.viewer_bar.setVisible(self.current_photo() is not None)
         self.viewer_bar.update()
-        self.viewer_bar.show()
 
     def hide_viewer_bar(self):
-        if self.viewer_bar.underMouse():
-            self.viewer_bar_timer.start(1000)
-        else:
-            self.viewer_bar.hide()
+        """The bar stays, as in the other views: it only goes when there is no photo."""
+        self.show_viewer_bar()
 
     def place_viewer_bar(self):
         self.viewer_bar.move((self.viewer.width()-self.viewer_bar.width())//2, self.viewer.height()-self.viewer_bar.height()-16)
@@ -1823,7 +1888,6 @@ class Window(QMainWindow):
         self.viewer.set_background(color)
 
     def background_changed(self):
-        self.viewer_picker.sync()
         self.place_viewer_bar()
         self.review.sync_toolbar()
         self.review.update_view()
@@ -2071,9 +2135,6 @@ class Window(QMainWindow):
             active = False
         changed = active != self.review_active
         self.review_active = active
-        if changed and self.classic_order:
-            # The views take the name order; Classique gets its own back.
-            self.apply_filters()
         self.update_project_state()
         if changed and active:
             self.review.enter()
@@ -2558,7 +2619,8 @@ class Window(QMainWindow):
         if not self.selection:
             self.custom.open_session(self.buckets)
         if not self.selection and self.photos and state.get('view') in ('wall', 'toile', 'color', 'swipe', 'instagram'):
-            self.set_view(state['view'])
+            # The Grille takes the form of the order kept: no sort is forced on reopening.
+            self.set_view('wall' if state['view'] == 'color' else state['view'])
         elif not self.selection and self.photos and self.bucket_mode:
             self.show_buckets()
 
@@ -2586,7 +2648,7 @@ class Window(QMainWindow):
         self.session.photos = sort_photos(self.session.photos, self.session.sort_mode)
         stars, flag = self.stars.currentData(), self.flags.currentData()
         filtered = [p for p in self.session.photos if stars_match(p, stars) and marker_matches(p, flag) and self.choices_match(p)]
-        if self.classic_order and not self.review_active:
+        if self.classic_order:
             filtered = self.classic_sorted(filtered)
         self.sync_classic_sort()
         if len(filtered) == len(self.photos) and all(a is b for a, b in zip(filtered, self.photos)):
@@ -2632,7 +2694,7 @@ class Window(QMainWindow):
         self.custom.filters_changed()
         if self.review_active:
             self.review.photos_changed()
-        self.viewer_bar.update()
+        self.show_viewer_bar()
         self.viewer.update()
 
     def request(self, photo, side, priority=0):
@@ -2655,7 +2717,8 @@ class Window(QMainWindow):
         job.priority = priority
         # The cache on disk follows the gallery, so that every photo keeps its preview.
         count = len(self.session.photos) if self.session else 0
-        job.preview_limit = int(min(4096, max(512, count*1.2)))*1024*1024
+        # The selections share one cache: no single one of them gives it its size.
+        job.preview_limit = SHARED_LIMIT if self.selection else int(min(4096, max(512, count*1.2)))*1024*1024
         # A bound QObject slot guarantees that UI/cache changes run on the GUI thread.
         job.signals.ready.connect(self.loaded, Qt.ConnectionType.QueuedConnection)
         self.pending[key] = job
@@ -2768,6 +2831,7 @@ class Window(QMainWindow):
         if candidates:
             self.viewer.image = max(candidates, key=lambda pair: pair[0])[1]
             self.viewer.update()
+            self.show_viewer_bar()
 
     def show_current(self, *args):
         self.viewer.image = QImage()
@@ -2870,6 +2934,7 @@ class Window(QMainWindow):
 
     def zoom_changed(self, zoom):
         self.schedule_detail()
+        self.review.sync_zoom()
 
     def browse(self, delta):
         """In Swipe, moving on is a decision: a key meant to browse must not make it."""
@@ -2901,9 +2966,9 @@ class Window(QMainWindow):
                 current = None
             else:
                 self.counter.setText(f'{self.list.currentRow()+1} / {len(self.photos)}')
-            metrics = self.name_label.fontMetrics()
             # A selection has more views in the header: its ribbon and its bars name the photo.
-            self.name_label.setText(metrics.elidedText(current.path.name, Qt.TextElideMode.ElideMiddle, 150) if current and not self.selection and not self.review_active else '')
+            # The bar under the photo names it, in every view: the header only counts.
+            self.name_label.setText('')
             self.counter.setToolTip(f'{len(self.list.selectedItems())} sélectionnée(s) · {five} à 5 étoiles')
         else:
             self.counter.setText('Aucune photo')
@@ -3378,6 +3443,17 @@ class Window(QMainWindow):
         self.export_checking()
         self.export_pool.start(job)
 
+    def clean_caches(self):
+        """Once a day, without asking: previews unused for two months go, and are made again when needed."""
+        last = float(self.settings.value('cache_cleaned', 0) or 0)
+        if self.closing or time.time()-last < DAY:
+            return
+        self.settings.setValue('cache_cleaned', time.time())
+        roots = [Path(entry['path']) for entry in self.recents.entries()]
+        if self.portfolio.folder is not None:
+            roots.append(Path(self.portfolio.folder))
+        self.pool.start(CacheJob(roots, Store(SETTINGS_SCOPE).folder), -10)
+
     def check_for_update(self):
         self.update_check = UpdateCheck(APP_VERSION)
         self.update_check.signals.found.connect(self.update_found, Qt.ConnectionType.QueuedConnection)
@@ -3513,6 +3589,7 @@ def main():
     window.showMaximized()
     # A few seconds later: opening the project comes first.
     QTimer.singleShot(4000, window.check_for_update)
+    QTimer.singleShot(30000, window.clean_caches)
     return app.exec()
 
 

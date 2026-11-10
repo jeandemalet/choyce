@@ -287,7 +287,7 @@ def test_review_modes(base):
     assert toile.positions.get(key) != position
     # Background and black and white.
     window.set_background('#ffffff')
-    assert window.viewer.background == '#ffffff' and any(s.isChecked() for s in review.picker.swatches)
+    assert window.viewer.background == '#ffffff' and review.picker.text() == 'Fond : Blanc'
     review.toggle_mono()
     wait(80)
     toile.grab()
@@ -429,9 +429,9 @@ def test_grid(base):
     assert color.headings[0][1] != 'Rouges' and color.headings[-1][1] == 'Neutres'
     # The order is a criterion and a direction.
     review.flip_color_order()
-    assert color.order == 'hue' and review.order_button.text() == 'Croissant' and review.order_button.toolTip() == 'Du rouge au violet'
-    review.order_combo.setCurrentIndex(review.order_combo.findData('light'))
-    assert color.order == 'light' and review.order_button.text() == 'Décroissant'
+    assert color.order == 'hue' and window.classic_sort_button.text() == 'Croissant' and window.classic_sort_button.toolTip() == 'Du rouge au violet'
+    window.classic_sort.setCurrentIndex(window.classic_sort.findData('light'))
+    assert color.order == 'light' and window.classic_sort_button.text() == 'Décroissant'
     lights = [review.info[p.relative_path]['light'] for p in color.ordered]
     assert lights == sorted(lights, reverse=True)
     review.set_color_order('hue')
@@ -664,6 +664,57 @@ def test_preview_limit(base):
     assert job.preview_limit == int(1200*1.2)*1024*1024
     settle(window, lambda: not window.pending, 20000)
     window.session.photos = window.session.photos[:2]
+    window.close()
+    clear_settings()
+
+
+def test_cache_upkeep(base):
+    """Previews unused for two months go by themselves; nothing else is ever touched, and they come back."""
+    import triphoto_cache
+    root = make_project(base/'upkeep', 2)
+    previews = triphoto_cache.preview_dir(root)
+    previews.mkdir(parents=True)
+    now = time.time()
+    old, recent = now-90*triphoto_cache.DAY, now-5*triphoto_cache.DAY
+    stale = previews/('qt-'+'a'*64+'.png')
+    fresh = previews/('qt-'+'b'*64+'.png')
+    legacy = previews/('c'*40+'.jpg')
+    tmp = previews/('qt-'+'d'*64+'.tmp')
+    other = previews/'notes.txt'
+    for path, when in ((stale, old), (fresh, recent), (legacy, old), (tmp, now-2*triphoto_cache.DAY), (other, old)):
+        path.write_bytes(b'x'*100)
+        os.utime(path, (when, when))
+    # An original that happens to look like a preview, outside of Previews, never goes.
+    lookalike = root/('qt-'+'e'*64+'.png')
+    lookalike.write_bytes(b'x')
+    os.utime(lookalike, (old, old))
+    freed = triphoto_cache.clean_caches([root, root, base/'unplugged'], now=now)
+    assert freed == 300 and fresh.exists() and other.exists() and lookalike.exists()
+    assert not stale.exists() and not legacy.exists() and not tmp.exists()
+    assert all(p.exists() for p in root.glob('photo_*.jpg'))
+    # The shared cache of the selections keeps its size, from the oldest.
+    shared = base/'shared'
+    shared.mkdir()
+    for index in range(3):
+        path = shared/(f'qt-{index}'+'f'*63+'.png')
+        path.write_bytes(b'x'*100)
+        os.utime(path, (recent+index, recent+index))
+    assert triphoto_cache.clean_folder(shared, now, limit=200) == 100 and len(list(shared.iterdir())) == 2
+    # Done at most once a day, in the background, by the window.
+    clear_settings()
+    window = open_window(root)
+    started = []
+    real_start = window.pool.start
+    window.pool.start = lambda job, priority=0: started.append(job) if isinstance(job, triphoto_qt.CacheJob) else real_start(job, priority)
+    window.clean_caches()
+    window.clean_caches()
+    assert len(started) == 1 and any(Path(r) == root for r in started[0].roots)
+    started[0].run()
+    window.pool.start = real_start
+    # A preview gone is made again when the photo is shown.
+    shutil.rmtree(previews)
+    window.set_folder(root)
+    settle(window, lambda: any(previews.glob('qt-*.png')), 10000)
     window.close()
     clear_settings()
 
@@ -1306,13 +1357,16 @@ def test_keys_undo_and_ribbon(base):
     window.redo()
     assert toile.dealt == shuffled and 'rétabli' in window.toast_label.text()
     window.undo()
-    # In the grid, Mélanger is a state of the sort, and the names come back.
+    # In the grid, Mélanger is a state of the sort shared by the views, undone by Ctrl+Z, and the names come back.
     window.set_view('wall')
     wall = review.view()
     names = [p.relative_path for p in wall.ordered]
-    review.shuffle()
-    assert review.wall_sort.currentData() == 'shuffled'
-    review.wall_sort.setCurrentIndex(0)
+    window.shuffle_photos()
+    assert window.classic_sort.currentData() == 'shuffled' and review.mode == 'wall'
+    window.undo()
+    assert window.classic_order is None and [p.relative_path for p in wall.ordered] == names
+    window.shuffle_photos()
+    window.classic_sort.setCurrentIndex(0)
     assert wall.order_seed is None and [p.relative_path for p in wall.ordered] == names
     # Tindr follows the order of the names, until shuffled.
     window.set_view('swipe')
@@ -1352,16 +1406,31 @@ def test_views_and_filter_panel(base):
     review = window.review
     # One row of views: Classique is the page with the ribbon, the others follow.
     assert list(window.view_buttons) == ['classic', 'wall', 'toile', 'swipe', 'instagram']
-    # In the grid, Trier par leads to the sorts by color and back to the name.
+    # In the grid, the one Trier par of the panel leads to the sorts by color and back to the name.
     window.set_view('wall')
-    review.wall_sort.setCurrentIndex(review.wall_sort.findData('contrast'))
+    sort, way = window.classic_sort, window.classic_sort_button
+    assert window.sort_section.isVisibleTo(window.view_panel)
+    sort.setCurrentIndex(sort.findData('contrast'))
     assert review.mode == 'color' and review.views['color'].order == 'contrast' and window.view_buttons['wall'].isChecked()
-    assert review.order_combo.currentData() == 'contrast'
-    review.order_combo.setCurrentIndex(0)
-    assert review.mode == 'wall' and review.wall_sort_button.text() == 'Croissant'
-    review.wall_sort_button.click()
-    assert window.sort.currentData() == 'name_desc' and review.wall_sort_button.text() == 'Décroissant'
-    review.wall_sort_button.click()
+    # Sorted by color, the Grille keeps its layout and its settings, Sortie included.
+    assert review.views['color'].layout_kind == review.views['wall'].layout_kind == 'staggered'
+    assert review.drop_action.isVisibleTo(window.view_panel) and not review.groups_button.isVisibleTo(window.view_panel)
+    review.set_wall_layout('rows')
+    assert review.views['wall'].layout_kind == 'rows'
+    review.set_wall_layout('staggered')
+    # Tindr keeps the same order, and the Grille comes back to it.
+    window.set_view('swipe')
+    assert sort.currentData() == 'contrast' and window.classic_order == 'contrast'
+    window.set_view('wall')
+    assert review.mode == 'color'
+    sort.setCurrentIndex(0)
+    assert review.mode == 'wall' and way.text() == 'Croissant'
+    way.click()
+    assert window.sort.currentData() == 'name_desc' and way.text() == 'Décroissant'
+    way.click()
+    # Pêle-mêle deals at random: no Trier par there.
+    window.set_view('toile')
+    assert not window.sort_section.isVisibleTo(window.view_panel)
     window.set_view('classic')
     assert not window.bucket_strip.isVisible() and not window.bucket_mode
     assert window.home_button.isVisible()
@@ -1373,9 +1442,9 @@ def test_views_and_filter_panel(base):
     window.view_buttons['classic'].click()
     assert not window.review_active and window.view_buttons['classic'].isChecked()
     window.set_view('color')
-    assert window.view_buttons['wall'].isChecked(), 'the grid sorted by color'
-    review.set_mode('wall')
-    assert window.view_buttons['wall'].isChecked()
+    assert window.view_buttons['wall'].isChecked() and window.color_sorted(), 'the grid sorted by color'
+    window.classic_sort.setCurrentIndex(0)
+    assert review.mode == 'wall' and window.view_buttons['wall'].isChecked()
     # The same filter everywhere.
     assert review.note_filter is window.note_filter and review.marker_filter is window.marker_filter
     # The panel stands on the right of the views, the photos beside it, and stays.
@@ -1395,12 +1464,11 @@ def test_views_and_filter_panel(base):
     assert not panel.isVisible()
     window.filter_chip.click()
     assert panel.isVisible()
-    # Classique keeps its ribbon on the right: closed until asked for, and without the tools of the other views.
+    # The same choice in Classique: the panel does not come and go with the view, and Affichage is there too.
     window.set_view('classic')
-    assert not panel.isVisible() and window.filter_chip.isVisible()
+    assert panel.isVisible() and window.filter_chip.isVisible() and review.tools.isVisible()
     window.filter_chip.click()
-    assert panel.isVisible() and not review.tools.isVisibleTo(panel)
-    window.filter_chip.click()
+    assert not panel.isVisible()
     window.note_filter.buttons[0].click()
     assert '0 étoile' in window.filter_chip.toolTip()
     window.note_filter.buttons['all'].click()
@@ -1624,22 +1692,26 @@ def test_background_color(base):
     clear_settings()
     root = make_project(base/'background', 4)
     window = open_window(root)
-    # Presets and free color, from the Tri page and from the Revoir page.
-    window.viewer_picker.swatches[0].click()
-    assert window.viewer.background == '#ffffff' and window.review.picker.swatches[0].isChecked()
-    original = triphoto_review.QColorDialog.getColor
-    triphoto_review.QColorDialog.getColor = staticmethod(lambda *args, **kwargs: triphoto_review.QColor('#7a3b52'))
+    # One button, the same in every view, names the background and opens the presets and the free color.
+    picker = window.review.picker
+    menu = window.viewer.background_menu(window)
+    labels = [action.text() for action in menu.actions()]
+    assert labels == [label for label, _ in triphoto_qt.BACKGROUNDS]+['Autre couleur…']
+    menu.actions()[0].trigger()
+    assert window.viewer.background == '#ffffff' and picker.text() == 'Fond : Blanc' and picker.isVisible()
+    original = triphoto_qt.QColorDialog.getColor
+    triphoto_qt.QColorDialog.getColor = staticmethod(lambda *args, **kwargs: triphoto_qt.QColor('#7a3b52'))
     try:
-        window.viewer_picker.custom.click()
-        assert window.viewer.background == '#7a3b52'
-        assert window.viewer_picker.custom.isChecked() and window.review.picker.custom.color == '#7a3b52'
+        window.viewer.background_menu(window).actions()[-1].trigger()
+        assert window.viewer.background == '#7a3b52' and picker.text() == 'Fond : Personnalisé'
         window.set_review(True)
-        window.review.picker.swatches[4].click()
-        assert window.viewer.background == '#000000' and not window.review.picker.custom.color
-        window.review.picker.custom.click()
+        assert picker.isVisible()
+        window.viewer.background_menu(window).actions()[4].trigger()
+        assert window.viewer.background == '#000000' and picker.text() == 'Fond : Noir'
+        window.viewer.pick_background()
         assert window.viewer.background == '#7a3b52'
     finally:
-        triphoto_review.QColorDialog.getColor = original
+        triphoto_qt.QColorDialog.getColor = original
     # The painted surfaces read the same color, and it survives a restart.
     window.review.set_mode('wall')
     wait(60)
@@ -1886,10 +1958,10 @@ def test_color_orders(base):
     review = window.review
     window.set_view('color')
     color = review.views['color']
-    assert color.order == 'hue' and review.order_combo.currentText() == 'Couleur'
+    assert color.order == 'hue' and window.classic_sort.currentText() == 'Couleur'
     settle(window, lambda: len(review.info) == 3)
     names = lambda: [p.path.name for p in color.ordered]
-    # Classique sorts on the same scales, then one way or the other, and the grid keeps its own order.
+    # Classique sorts on the same scales, then one way or the other, and every view keeps that order.
     window.set_view('classic')
     listed = lambda: [p.path.name for p in window.photos]
     window.classic_sort.setCurrentIndex(window.classic_sort.findData('contrast'))
@@ -1899,7 +1971,9 @@ def test_color_orders(base):
     window.classic_sort.setCurrentIndex(window.classic_sort.findData('vivid'))
     assert listed()[0] == 'vivid.jpg'
     window.set_view('wall')
-    assert [p.path.name for p in window.photos] == ['flat.jpg', 'hard.jpg', 'vivid.jpg']
+    assert review.mode == 'color' and color.order == 'vivid' and names()[0] == 'vivid.jpg' and listed()[0] == 'vivid.jpg'
+    window.set_view('instagram')
+    assert listed()[0] == 'vivid.jpg' and window.sort_section.isVisibleTo(window.view_panel)
     window.set_view('classic')
     assert listed()[0] == 'vivid.jpg'
     window.classic_sort.setCurrentIndex(window.classic_sort.findData('shuffled'))
@@ -1911,12 +1985,12 @@ def test_color_orders(base):
     window.classic_sort_button.click()
     window.set_view('color')
     review.set_color_order('contrast')
-    assert names()[0] == 'hard.jpg' and review.order_button.text() == 'Décroissant'
+    assert names()[0] == 'hard.jpg' and window.classic_sort_button.text() == 'Décroissant'
     assert not review.groups_button.isVisibleTo(review.options['color'][0])
     review.flip_color_order()
     assert color.order == 'flat' and names()[-1] == 'hard.jpg'
     review.set_color_order('vivid')
-    assert names()[0] == 'vivid.jpg' and review.order_combo.currentText() == 'Saturation'
+    assert names()[0] == 'vivid.jpg' and window.classic_sort.currentText() == 'Saturation'
     review.set_color_order('light')
     # The cursor only varies along what is sorted: same grey scale, or the same strength of any hue.
     assert triphoto_review.order_tint({'light': 0}, 'light').name() == '#000000'
@@ -2457,9 +2531,11 @@ def test_custom_view(base):
     assert session.path.exists() and len(session.photos) == 3
     # Classique, with its ribbon and the filter beside the buckets.
     assert not window.custom_active and window.pages.currentIndex() == 1 and window.list.isVisible() and window.bucket_strip.isVisible()
+    assert window.filter_panel.isVisible()
     window.filter_chip.click()
-    assert window.filter_panel.isVisible() and window.list.isVisible() and window.bucket_strip.isVisible()
+    assert not window.filter_panel.isVisible() and window.list.isVisible() and window.bucket_strip.isVisible()
     window.filter_chip.click()
+    assert window.filter_panel.isVisible()
     # The large stage, still there for an empty selection.
     window.custom_active = True
     window.update_project_state()
@@ -2529,7 +2605,7 @@ def test_custom_view(base):
     assert stage.zoom == 1 and custom.zoom_button.text() == '100 %'
     # The background is that of the other views.
     window.set_background('#ffffff')
-    assert window.viewer_picker.swatches[0].isChecked()
+    assert window.review.picker.text() == 'Fond : Blanc'
     # A real drag from the photo to a bucket: it goes there, and the next photo comes.
     stage = custom.stage
     dragged = custom.current()['path']
@@ -2652,7 +2728,8 @@ def test_custom_view(base):
         window.go_home()
         custom.delete_session(doomed)
         triphoto_custom.move_to_trash = real_trash
-        assert moved == [doomed.path, doomed.path.with_suffix('')] and len(window.home.custom_cards) == 1
+        # Its backup copy goes with it: nothing is left behind in the data folder.
+        assert moved == [doomed.path, Path(str(doomed.path)+'.bak'), doomed.path.with_suffix('')] and len(window.home.custom_cards) == 1
     finally:
         triphoto_custom.ask = real_ask
     window.close()
@@ -3294,11 +3371,11 @@ def test_user_journey(base):
     assert sum(window.portfolio.contains(photo.path) for photo in window.session.photos) == 6
     # Never two sorts on screen, and the grid has the date too.
     assert not window.sort.isVisible()
-    window.review.wall_sort.setCurrentIndex(window.review.wall_sort.findData('date'))
+    window.classic_sort.setCurrentIndex(window.classic_sort.findData('date'))
     assert window.sort.currentData() == 'date_asc'
-    window.review.wall_sort_button.click()
-    assert window.sort.currentData() == 'date_desc' and window.review.wall_sort.currentData() == 'date'
-    window.review.wall_sort.setCurrentIndex(0)
+    window.classic_sort_button.click()
+    assert window.sort.currentData() == 'date_desc' and window.classic_sort.currentData() == 'date'
+    window.classic_sort.setCurrentIndex(0)
     assert window.sort.currentData() == 'name_desc'
     window.sort.setCurrentIndex(window.sort.findData('name_asc'))
     window.set_view('classic')
@@ -3364,7 +3441,7 @@ def main():
     app.setStyleSheet(triphoto_qt.STYLE)
     base = Path(tempfile.mkdtemp(prefix='triphoto-tests-'))
     tests = [test_legacy_session, test_nested_session_ignored, test_dominant_color, test_recents, test_shortcuts,
-             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_quick_export, test_add_to_by_right_click, test_blip, test_export_by_its_button, test_themed_dialog, test_update, test_keys_undo_and_ribbon, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_repair_links, test_buckets_in_a_project, test_same_words_everywhere, test_search_links, test_selection_review_and_health, test_defaults_and_viewer_room, test_user_journey]
+             test_window_rating_and_undo, test_review_modes, test_grid, test_anticipation, test_request_moves_up, test_preview_limit, test_cache_upkeep, test_layout_stable_during_analysis, test_toile_loading, test_tri_zoom, test_like, test_export, test_export_dialog, test_quick_export, test_add_to_by_right_click, test_blip, test_export_by_its_button, test_themed_dialog, test_update, test_keys_undo_and_ribbon, test_views_and_filter_panel, test_tri_filters, test_clear_stars, test_swipe_zoom, test_review_state_remembered, test_background_color, test_broken_file_does_not_stop_preload, test_recent_project_cycle, test_portfolio, test_real_trash_answer, test_trash_refused_brings_photo_back, test_portfolio_relocate, test_instagram, test_color_orders, test_rows_gap_and_captions, test_select_all, test_ribbon_portfolio_button, test_portfolio_without_copies, test_portfolio_older_copies, test_activity_bar, test_custom_sorting, test_custom_view, test_selection_views, test_repair_links, test_buckets_in_a_project, test_same_words_everywhere, test_search_links, test_selection_review_and_health, test_defaults_and_viewer_room, test_user_journey]
     failures = 0
     try:
         for test in tests:

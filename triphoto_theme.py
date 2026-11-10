@@ -61,6 +61,9 @@ QPushButton#seg:checked {{ background: {HOVER}; color: {TEXT}; }}
 QPushButton#mainseg {{ background: transparent; color: {MUTED}; border-radius: 6px; padding: 6px 10px; font-weight: 600; }}
 QPushButton#mainseg:hover {{ color: {TEXT}; }}
 QPushButton#mainseg:checked {{ background: {HOVER}; color: {TEXT}; }}
+QPushButton#toggle {{ background: transparent; color: {MUTED}; border: 1px solid {LINE}; border-radius: 7px; padding: 6px 12px; }}
+QPushButton#toggle:hover {{ color: {TEXT}; }}
+QPushButton#toggle:checked {{ background: {HOVER}; border-color: {HOVER}; color: {TEXT}; }}
 QFrame#segments {{ background: {RAISED}; border-radius: 8px; }}
 QFrame#customRow {{ background: {RAISED}; border-radius: 8px; }}
 QFrame#customRow:hover {{ background: {CONTROL}; }}

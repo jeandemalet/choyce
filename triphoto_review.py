@@ -14,7 +14,7 @@ import zlib
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QObject, QPointF, QRectF, QRunnable, QThreadPool, QTimer, QVariantAnimation, QEasingCurve, Signal
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup, QGridLayout, QStyle, QStyleOptionButton, QColorDialog, QComboBox, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QScrollBar, QSlider, QStackedWidget, QVBoxLayout, QWidget)
 from PIL import Image, ImageStat
@@ -342,73 +342,39 @@ class RatingBar(QWidget):
             self.marked.emit(PICK_NEUTRAL if photos[0].pick == PICK_REJECT else PICK_REJECT)
 
 
-class Swatch(QAbstractButton):
-    def __init__(self, color, label, parent=None):
-        super().__init__(parent)
-        self.color = color
-        self.setToolTip(label)
-        self.setCheckable(True)
-        self.setFixedSize(20, 20)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor(TEXT if self.isChecked() else '#5a5a5d'), 1.6 if self.isChecked() else 1))
-        painter.setBrush(QColor(self.color) if self.color else Qt.BrushStyle.NoBrush)
-        painter.drawEllipse(QRectF(2, 2, 16, 16))
-        if not self.color:
-            # The free choice shows the plus sign until a custom color is active.
-            painter.setPen(QPen(QColor(MUTED), 1.3))
-            painter.drawLine(QPointF(10, 6.5), QPointF(10, 13.5))
-            painter.drawLine(QPointF(6.5, 10), QPointF(13.5, 10))
+def swatch_icon(color, size=16):
+    """A round sample of a color, for the background button and its menu."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QPen(QColor('#6a6a6d'), 1))
+    painter.setBrush(QColor(color))
+    painter.drawEllipse(QRectF(1.5, 1.5, size-3, size-3))
+    painter.end()
+    return QIcon(pixmap)
 
 
-class BackgroundPicker(QFrame):
-    """Preset greys and any other color, shared by the Tri and Révision pages."""
+class BackgroundButton(QPushButton):
+    """The background of every view: one button that shows it and opens the choice."""
 
-    def __init__(self, window, parent=None, floating=False):
-        super().__init__(parent)
+    def __init__(self, window, parent=None):
+        super().__init__('Fond', parent)
         self.window = window
-        self.custom_tip = 'Autre couleur…'
-        row = QHBoxLayout(self)
-        row.setContentsMargins(12, 0, 12, 0) if floating else row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(4)
-        if floating:
-            self.setObjectName('pill')
-            self.setFixedHeight(46)
-        self.swatches = []
-        for label, color in BACKGROUNDS:
-            swatch = Swatch(color, label)
-            swatch.clicked.connect(lambda checked=False, value=color: self.window.set_background(value))
-            self.swatches.append(swatch)
-            row.addWidget(swatch)
-        self.custom = Swatch('', self.custom_tip)
-        self.custom.clicked.connect(self.pick_custom)
-        row.addWidget(self.custom)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setToolTip('Couleur du fond (clic droit sur la photo ou touche B)')
+        self.clicked.connect(self.open_menu)
         self.sync()
 
     def sync(self):
         background = self.window.viewer.background
-        presets = [swatch.color for swatch in self.swatches]
-        for swatch in self.swatches:
-            swatch.setChecked(swatch.color == background)
-        self.custom.color = '' if background in presets else background
-        self.custom.setChecked(background not in presets)
-        self.custom.update()
+        self.setIcon(swatch_icon(background))
+        name = next((label for label, color in BACKGROUNDS if color == background), 'Personnalisé')
+        self.setText(f'Fond : {name}')
 
-    def mousePressEvent(self, event):
-        # As for the bar: between two swatches, a click is not for the photo underneath.
-        event.accept()
-
-    def mouseDoubleClickEvent(self, event):
-        event.accept()
-
-    def pick_custom(self):
-        color = QColorDialog.getColor(QColor(self.window.viewer.background), self.window, 'Couleur du fond')
-        if color.isValid():
-            self.window.set_background(color.name())
+    def open_menu(self, *args):
+        menu = self.window.viewer.background_menu(self)
+        menu.exec(self.mapToGlobal(self.rect().bottomLeft()))
         self.sync()
 
 
@@ -676,18 +642,19 @@ class WallView(Surface):
         super().__init__(review)
         self.by_color = by_color
         settings = review.settings
-        self.height_setting = 'color_row_height' if by_color else 'wall_row_height'
+        # One Grille, whatever its order: the same layout, width and size, sorted by name or by color.
+        self.height_setting = 'wall_row_height'
         self.row_height = float(settings.value(self.height_setting, ROW_HEIGHT))
-        self.layout_kind = settings.value('color_layout', 'rows') if by_color else settings.value('wall_layout', 'staggered')
-        self.width_setting = 'color_width' if by_color else 'wall_width'
+        self.layout_kind = settings.value('wall_layout', 'staggered')
+        self.width_setting = 'wall_width'
         self.width_percent = int(settings.value(self.width_setting, WALL_WIDTH))
-        self.emphasis = 'equal' if by_color else settings.value('wall_emphasis', 'equal')
+        self.emphasis = settings.value('wall_emphasis', 'equal')
         # A new key: the former one may hold the lightness order, which used to be called contrast.
         self.order = settings.value('color_sort', 'hue')
         self.groups = settings.value('color_groups', False, type=bool)
         self.headings = []
         self.order_seed = None
-        self.set_aside = set()
+        self._aside = set()
         self.tiles = []
         # Where every photo of the current layout went, shown or not: one that leaves keeps its place.
         self.placed = []
@@ -699,6 +666,22 @@ class WallView(Surface):
         self.drag_position = QPointF()
         self.bar = QScrollBar(Qt.Orientation.Vertical, self)
         self.bar.valueChanged.connect(self.on_scroll)
+
+    @property
+    def set_aside(self):
+        """The photos taken out of the Grille, the same in both of its forms."""
+        views = getattr(self.review, 'views', None)
+        return views['wall']._aside if self.by_color and views else self._aside
+
+    @set_aside.setter
+    def set_aside(self, value):
+        views = getattr(self.review, 'views', None)
+        (views['wall'] if self.by_color and views else self)._aside = value
+
+    def sibling(self):
+        """The other form of the Grille, which follows its settings."""
+        views = getattr(self.review, 'views', {})
+        return views.get('wall' if self.by_color else 'color')
 
     def on_scroll(self, *args):
         self.update()
@@ -773,7 +756,7 @@ class WallView(Surface):
 
     def content_box(self):
         available = max(200, self.width()-2*18-10)
-        width = available*(100 if self.by_color and self.layout_kind == 'rows' else self.width_percent)/100
+        width = available*self.width_percent/100
         return (self.width()-10-width)/2, width
 
     def relayout(self):
@@ -1002,12 +985,16 @@ class WallView(Surface):
     def set_width(self, value):
         self.width_percent = max(35, min(100, int(value)))
         self.review.settings.setValue(self.width_setting, self.width_percent)
+        if self.sibling():
+            self.sibling().width_percent = self.width_percent
         self.relayout()
         self.review.sync_zoom()
 
     def set_row_height(self, value):
         self.row_height = value
         self.review.settings.setValue(self.height_setting, value)
+        if self.sibling():
+            self.sibling().row_height = value
         self.relayout()
         self.review.sync_zoom()
 
@@ -1780,26 +1767,50 @@ class NoteFilter(QFrame):
         self.and_more.set_count(str(sum(n for note, n in counts.items() if note >= chosen)) if counts and chosen in (1, 2, 3, 4) else '')
 
 
-class MarkerFilter(QComboBox):
-    """Choice of the markers shown, driving the same filter on both pages."""
+class MarkerFilter(QFrame):
+    """Choice of the markers shown, as buttons like the notes, driving the same filter everywhere."""
+    SHORT = {'flag': {'all': 'Tous', 'select': 'Avec drapeau', 'unflagged': 'Sans drapeau'},
+             'pick': {'all': 'Tous', 'select': 'Retenues', 'neutral': 'Neutres', 'reject': 'Rejetées', 'unrejected': 'Sans rejetées'}}
 
     def __init__(self, window):
-        super().__init__()
+        super().__init__(objectName='segments')
         self.window = window
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.setFixedWidth(150)
-        self.currentIndexChanged.connect(lambda index: self.window.flags.setCurrentIndex(index))
+        self.grid = QGridLayout(self)
+        self.grid.setContentsMargins(3, 3, 3, 3)
+        self.grid.setSpacing(2)
+        self.group = QButtonGroup(self)
+        self.buttons = {}
+        self.system = None
         self.sync()
+
+    def rebuild(self):
+        for button in self.buttons.values():
+            self.group.removeButton(button)
+            button.deleteLater()
+        self.buttons = {}
+        flags = self.window.flags
+        self.system = self.window.marker
+        short = self.SHORT.get(self.system, {})
+        for index in range(flags.count()):
+            key = flags.itemData(index)
+            button = QPushButton(short.get(key, flags.itemText(index)), objectName='seg', checkable=True)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.setToolTip(flags.itemText(index))
+            button.clicked.connect(lambda checked=False, value=index: self.window.flags.setCurrentIndex(value))
+            self.group.addButton(button)
+            self.grid.addWidget(button, *divmod(index, 3))
+            self.buttons[key] = button
+
+    def currentData(self):
+        return self.window.flags.currentData()
 
     def sync(self):
         flags = self.window.flags
-        self.blockSignals(True)
-        if [self.itemData(i) for i in range(self.count())] != [flags.itemData(i) for i in range(flags.count())]:
-            self.clear()
-            for index in range(flags.count()):
-                self.addItem(flags.itemText(index), flags.itemData(index))
-        self.setCurrentIndex(flags.currentIndex())
-        self.blockSignals(False)
+        if list(self.buttons) != [flags.itemData(i) for i in range(flags.count())] or self.system != self.window.marker:
+            self.rebuild()
+        button = self.buttons.get(flags.currentData())
+        if button:
+            button.setChecked(True)
 
 
 class ChoiceFilter(QFrame):
@@ -2279,15 +2290,14 @@ class ReviewPage(QWidget):
         self.sync_toolbar()
 
     def build_toolbar(self):
-        """What the other views share, in the side panel. Options of a view sit at the bottom."""
+        """Affichage, the same in every view, Classique included: black and white, zoom, background."""
         self.note_filter = self.window.note_filter
         self.marker_filter = self.window.marker_filter
         self.tools = QWidget()
         lines = QVBoxLayout(self.tools)
         lines.setContentsMargins(0, 0, 0, 0)
+        lines.setSpacing(5)
         lines.addWidget(QLabel('Affichage', objectName='muted'))
-        lines.setContentsMargins(0, 0, 0, 0)
-        lines.setSpacing(8)
         row = QHBoxLayout()
         row.setSpacing(4)
         lines.addLayout(row)
@@ -2301,12 +2311,12 @@ class ReviewPage(QWidget):
         mono_row.addWidget(self.mono_button)
         row.addWidget(mono_frame)
         row.addStretch(1)
-        self.option_button(row, '−', lambda *_: self.zoom(1/1.15)).setToolTip('Dézoomer')
-        self.zoom_label = self.option_button(row, '100 %', self.zoom_reset)
+        self.option_button(row, '−', lambda *_: self.window.zoom_by(1/1.15), style='ghost').setToolTip('Dézoomer')
+        self.zoom_label = self.option_button(row, '100 %', lambda *_: self.window.fit(), style='ghost')
         self.zoom_label.setFixedWidth(58)
         self.zoom_label.setToolTip('Revenir au zoom par défaut')
-        self.option_button(row, '+', lambda *_: self.zoom(1.15)).setToolTip('Zoomer')
-        self.picker = BackgroundPicker(self.window)
+        self.option_button(row, '+', lambda *_: self.window.zoom_by(1.15), style='ghost').setToolTip('Zoomer')
+        self.picker = BackgroundButton(self.window)
         lines.addWidget(self.picker)
         # Instagram has its own screen and post: there the background has no say.
         self.theme_row = QFrame(objectName='segments')
@@ -2318,7 +2328,7 @@ class ReviewPage(QWidget):
         lines.addWidget(self.theme_row)
 
     def theme_choice(self, row, group, text, light):
-        button = QPushButton(text, objectName='mainseg', checkable=True)
+        button = QPushButton(text, objectName='seg', checkable=True)
         button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         button.clicked.connect(lambda *_: self.views['instagram'].set_light(light))
         group.addButton(button)
@@ -2350,8 +2360,9 @@ class ReviewPage(QWidget):
         row.addWidget(combo)
         return combo
 
-    def option_button(self, row, text, slot, checkable=False, checked=False):
-        button = QPushButton(text, objectName='seg' if checkable else 'ghost', checkable=checkable)
+    def option_button(self, row, text, slot, checkable=False, checked=False, style=None):
+        """A toggle looks like the segments; an action looks like a button."""
+        button = QPushButton(text, objectName=style or ('toggle' if checkable else ''), checkable=checkable)
         button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         button.setChecked(checked)
         button.clicked.connect(slot)
@@ -2364,7 +2375,22 @@ class ReviewPage(QWidget):
         self.action_combos = []
         toile_pill, row = self.option_pill()
         self.option_button(row, 'Mélanger', self.shuffle)
-        self.straight_button = self.option_button(row, 'Photos droites', toile.set_straight, True, toile.straight)
+        row.addWidget(QLabel('Photos', objectName='muted'))
+        straight_row = QFrame(objectName='segments')
+        line = QHBoxLayout(straight_row)
+        line.setContentsMargins(3, 3, 3, 3)
+        line.setSpacing(2)
+        group = QButtonGroup(self)
+        for text, value in (('Droites', True), ('Penchées', False)):
+            button = QPushButton(text, objectName='seg', checkable=True)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.setChecked(toile.straight == value)
+            button.clicked.connect(lambda checked=False, v=value: toile.set_straight(v))
+            group.addButton(button)
+            line.addWidget(button, 1)
+            if value:
+                self.straight_button = button
+        row.addWidget(straight_row)
         row.addWidget(QLabel('En largeur', objectName='muted'))
         self.columns_slider = QSlider(Qt.Orientation.Horizontal)
         self.columns_slider.setRange(2, 16)
@@ -2393,18 +2419,11 @@ class ReviewPage(QWidget):
         hint.setWordWrap(True)
         row.addWidget(hint)
         self.swipe_bucket_pill.hide()
-        color_left, row = self.option_pill()
-        row.addWidget(QLabel('Disposition', objectName='muted'))
-        self.option_combo(row, [('staggered', 'Décalée'), ('rows', 'Rangées')], 'color_layout', 'rows', 100, self.set_color_layout)
-        self.groups_button = self.option_button(row, 'Blocs de couleur', self.set_color_groups, True, color.groups)
-        color_pill, row = self.option_pill()
-        self.order_combo, self.order_button = self.sort_controls(row)
-        self.close_color = self.option_button(row, 'Resserrer', self.close_gaps)
-        self.close_color.setToolTip('Referme les vides laissés par les photos retirées')
-        self.close_color.hide()
         wall_left, row = self.option_pill()
         row.addWidget(QLabel('Disposition', objectName='muted'))
         self.option_combo(row, [('staggered', 'Décalée'), ('rows', 'Rangées')], 'wall_layout', 'staggered', 100, self.set_wall_layout)
+        # Sorted by hue, the Grille can name its colors.
+        self.groups_button = self.option_button(row, 'Blocs de couleur', self.set_color_groups, True, color.groups)
         # The staggered layout follows its modules: this choice only applies to rows.
         self.emphasis_combo = self.option_combo(row, [('equal', 'Formats égaux'), ('landscape', 'Horizontales en avant'), ('portrait', 'Verticales en avant')],
                                                 'wall_emphasis', 'equal', 172, self.set_wall_emphasis)
@@ -2416,8 +2435,6 @@ class ReviewPage(QWidget):
         self.width_slider.setValue(wall.width_percent)
         self.width_slider.valueChanged.connect(self.set_wall_width)
         row.addWidget(self.width_slider)
-        self.option_button(row, 'Mélanger', self.shuffle)
-        self.wall_sort, self.wall_sort_button = self.sort_controls(row, shuffled=True)
         wall_right, row = self.option_pill()
         row.addWidget(QLabel('Sortie', objectName='muted'))
         self.drop_action = self.action_combo(row, 'drop_action')
@@ -2434,51 +2451,11 @@ class ReviewPage(QWidget):
         self.account_edit.returnPressed.connect(self.account_edit.clearFocus)
         row.addWidget(self.account_edit)
         self.sync_color_order()
-        self.options = {'toile': (None, toile_pill), 'swipe': (swipe_left, swipe_right), 'color': (color_left, color_pill), 'wall': (wall_left, wall_right),
+        # The Grille sorted by color is the same Grille: the same settings.
+        self.close_color = self.close_wall
+        self.options = {'toile': (None, toile_pill), 'swipe': (swipe_left, swipe_right), 'color': (wall_left, wall_right), 'wall': (wall_left, wall_right),
                         'instagram': (insta_left, None)}
         self.refresh_marker_options()
-
-    def sort_controls(self, row, shuffled=False):
-        """Trier par: the name is the plain grid, anything else its colored form. Offered in both."""
-        row.addWidget(QLabel('Trier par', objectName='muted'))
-        combo = QComboBox()
-        combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        combo.addItem('Nom', 'name')
-        combo.addItem('Date', 'date')
-        for label, one_way, *_ in COLOR_ORDERS:
-            combo.addItem(label, one_way)
-        if shuffled:
-            combo.addItem('Mélangé', 'shuffled')
-        combo.currentIndexChanged.connect(lambda *_: self.set_sort(combo.currentData()))
-        row.addWidget(combo)
-        button = self.option_button(row, '', self.flip_sort)
-        return combo, button
-
-    def set_sort(self, value):
-        if value == 'shuffled':
-            self.shuffle()
-        elif value in ('name', 'date'):
-            # Back to the plain order, after Mélanger too.
-            self.views['wall'].order_seed = None
-            sort = self.window.sort
-            way = sort.currentData().split('_')[1]
-            sort.setCurrentIndex(max(0, sort.findData(f'{value}_{way}')))
-            self.set_mode('wall')
-        else:
-            self.set_color_order(value)
-            if self.mode != 'color':
-                self.set_mode('color')
-        self.sync_color_order()
-
-    def flip_sort(self, *args):
-        if self.mode == 'color':
-            self.flip_color_order()
-        else:
-            self.views['wall'].order_seed = None
-            sort = self.window.sort
-            kind, way = sort.currentData().split('_')
-            sort.setCurrentIndex(max(0, sort.findData(f"{kind}_{'asc' if way == 'desc' else 'desc'}")))
-        self.sync_color_order()
 
     def sync_swipe_bucket(self):
         selection = self.window.buckets
@@ -2541,8 +2518,9 @@ class ReviewPage(QWidget):
 
     def sync_toolbar(self):
         self.picker.sync()
-        self.picker.setVisible(self.mode != 'instagram')
-        self.theme_row.setVisible(self.mode == 'instagram')
+        instagram = self.window.review_active and self.mode == 'instagram'
+        self.picker.setVisible(not instagram)
+        self.theme_row.setVisible(instagram)
         (self.light_button if self.views['instagram'].light else self.dark_button).setChecked(True)
         self.sync_zoom()
         self.place_overlays()
@@ -2560,9 +2538,12 @@ class ReviewPage(QWidget):
         # In a selection, a photo dragged out of the grid goes to a bucket: no action to choose.
         selection = self.window.bucket_mode
         current = self.mode if self.window.review_active else None
+        current = 'wall' if current == 'color' else current
         no_exit = options['wall'][1] if selection and 'wall' in options else None
         swiping = options.get('swipe', (None, None)) if selection else (None, None)
         for mode, group in options.items():
+            if mode == 'color':
+                continue
             for pill in group:
                 if pill is not None:
                     pill.setVisible(mode == current and pill is not no_exit and pill not in swiping)
@@ -2588,6 +2569,7 @@ class ReviewPage(QWidget):
         self.sync_swipe_bucket()
         self.window.update_bucket_bars()
         self.sync_toolbar()
+        self.sync_color_order()
         self.view().rebuild()
         self.sync_bar()
 
@@ -2645,7 +2627,14 @@ class ReviewPage(QWidget):
         self.view().zoom_reset()
 
     def sync_zoom(self):
-        self.zoom_label.setText(self.view().zoom_text())
+        window = self.window
+        if getattr(window, 'custom_active', False):
+            text = window.custom.zoom_button.text()
+        elif window.review_active:
+            text = self.view().zoom_text()
+        else:
+            text = f'{round(window.viewer.zoom*100)} %'
+        self.zoom_label.setText(text)
         self.width_slider.blockSignals(True)
         self.width_slider.setValue(self.views['wall'].width_percent)
         self.width_slider.blockSignals(False)
@@ -2666,6 +2655,7 @@ class ReviewPage(QWidget):
         self.mono = not self.mono
         self.mono_button.setChecked(self.mono)
         self.update_view()
+        self.window.viewer.update()
 
     def set_columns(self, value):
         self.settings.setValue('toile_columns', value)
@@ -2673,34 +2663,21 @@ class ReviewPage(QWidget):
         self.views['toile'].set_columns(value)
 
     def set_color_layout(self, value):
-        self.views['color'].layout_kind = value
-        self.views['color'].relayout()
-        self.sync_zoom()
+        self.set_wall_layout(value)
 
     def sync_color_order(self):
+        """Trier par lives in the window, for every view: here only what depends on it."""
         order = self.views['color'].order
         index = next((i for i, entry in enumerate(COLOR_ORDERS) if order in entry[1:3]), 0)
-        entry = COLOR_ORDERS[index]
-        other = order == entry[2]
-        kind, way = self.window.sort.currentData().split('_')
-        descending = way == 'desc'
-        for combo, button, by_name in ((self.order_combo, self.order_button, False), (self.wall_sort, self.wall_sort_button, True)):
-            combo.blockSignals(True)
-            combo.setCurrentIndex((combo.findData('shuffled') if self.views['wall'].order_seed is not None else combo.findData(kind)) if by_name else combo.findData(entry[1]))
-            combo.blockSignals(False)
-            button.setText(('Décroissant' if descending else 'Croissant') if by_name else entry[4 if other else 3])
-            plain = ('Du plus récent au plus ancien' if descending else 'Du plus ancien au plus récent') if kind == 'date' else 'De Z à A' if descending else 'De A à Z'
-            button.setToolTip(plain if by_name else entry[6 if other else 5])
-        # The blocks name colors: they mean nothing along another scale.
-        self.groups_button.setVisible(index == 0)
+        # The blocks name colors: they mean nothing along another scale, nor in name order.
+        self.groups_button.setVisible(index == 0 and self.mode == 'color')
+        self.window.sync_classic_sort()
 
     def set_color_order(self, value):
-        self.views['color'].order = value
-        self.settings.setValue('color_sort', value)
-        self.sync_color_order()
+        """The order is the window's, shared by every view."""
+        self.window.set_classic_sort(value)
         self.views['color'].rebuild()
         self.views['color'].bar.setValue(0)
-        self.place_overlays()
 
     def flip_color_order(self, *args):
         order = self.views['color'].order
@@ -2713,19 +2690,25 @@ class ReviewPage(QWidget):
         self.views['color'].relayout()
         self.views['color'].bar.setValue(0)
 
+    def grid(self):
+        return self.views['color' if self.mode == 'color' else 'wall']
+
     def set_wall_layout(self, value):
-        self.views['wall'].layout_kind = value
-        self.views['wall'].relayout()
+        self.settings.setValue('wall_layout', value)
+        for key in ('wall', 'color'):
+            self.views[key].layout_kind = value
+        self.grid().relayout()
         self.emphasis_combo.setVisible(value == 'rows')
         self.place_overlays()
         self.sync_zoom()
 
     def set_wall_emphasis(self, value):
-        self.views['wall'].emphasis = value
-        self.views['wall'].relayout()
+        for key in ('wall', 'color'):
+            self.views[key].emphasis = value
+        self.grid().relayout()
 
     def set_wall_width(self, value):
-        self.views['wall'].set_width(value)
+        self.grid().set_width(value)
 
     def apply_action(self, photo, action):
         if action == 'minus':
@@ -2757,7 +2740,7 @@ class ReviewPage(QWidget):
 
     def drop_out(self, photo):
         """A photo dragged out of the grid: apply the chosen action and take it away."""
-        wall = self.views['wall']
+        wall = self.views['color' if self.mode == 'color' else 'wall']
         index = next((i for i, (_, p) in enumerate(wall.tiles) if p is photo), 0)
         wall.set_aside.add(photo.relative_path)
         self.apply_action(photo, self.drop_action.currentData())
@@ -2770,8 +2753,8 @@ class ReviewPage(QWidget):
         count = len(self.views['wall'].set_aside)
         self.restore_button.setText(f'Réafficher ({count})')
         self.restore_button.setVisible(count > 0)
-        for view, button in ((self.views['wall'], self.close_wall), (self.views['color'], self.close_color)):
-            button.setVisible(len(view.placed) > len(view.tiles))
+        grid = self.views['color' if self.mode == 'color' else 'wall']
+        self.close_wall.setVisible(len(grid.placed) > len(grid.tiles))
         self.place_overlays()
 
     def close_gaps(self, *args):
@@ -2919,7 +2902,7 @@ class ReviewPage(QWidget):
             self.save_analysis()
             # Classique sorted on the colors: once, when all of them are known.
             window = self.window
-            if not window.review_active and window.classic_order not in (None, 'shuffled'):
+            if window.classic_order not in (None, 'shuffled'):
                 window.apply_filters()
         elif done % 160 == 0:
             self.save_analysis()
