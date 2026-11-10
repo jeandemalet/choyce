@@ -11,6 +11,8 @@ import sys
 import math
 import threading
 import time
+import random
+import zlib
 from io import BytesIO
 from pathlib import Path
 from collections import OrderedDict
@@ -26,7 +28,7 @@ from triphoto import (export_folder_name, APP_NAME, APP_VERSION, PhotoSession, s
 from triphoto_custom import ProjectBuckets, BucketFilter, BucketStrip, CustomPage, PopupMenu, SelectionSession
 from triphoto_portfolio import MANIFEST_FILE, Portfolio, PortfolioSession, RelocateJob, UNSORTED
 from triphoto_prefs import (ALIASES, LinkSearchJob, MARK_TIPS, PreferencesDialog, Recents, age_label, ask, inform, known_links, locate_photos, locate_project, moved_path, path_key, shortcut_map)
-from triphoto_review import MODES, BackgroundPicker, ChoiceFilter, MarkerFilter, NoteFilter, RatingBar, ReviewPage
+from triphoto_review import COLOR_ORDERS, MODES, BackgroundPicker, color_key, ChoiceFilter, MarkerFilter, NoteFilter, RatingBar, ReviewPage
 from triphoto_blip import BLIP_STORES, blip_executable, send_with_blip
 from triphoto_update import UpdateCheck, UpdateDownload, can_install, launch_installer, write_installer
 from triphoto_theme import (ACCENT, ASSETS, BACKGROUNDS, FAINT, INK, RAISED, REJECT, SELECT, STYLE, TEXT,
@@ -1245,6 +1247,9 @@ class Window(QMainWindow):
         self.project_path = None
         self.closing = False
         self.review_active = False
+        order = self.settings.value('classic_sort', '') or None
+        self.classic_order = order if order == 'shuffled' or any(order in entry[1:3] for entry in COLOR_ORDERS) else None
+        self.classic_seed = random.randrange(1 << 30)
         self.photos = []
         self.cache = OrderedDict()
         self.pending = {}
@@ -1674,9 +1679,26 @@ class Window(QMainWindow):
             inner.addWidget(widget)
             lines.addWidget(box)
             return box
-        self.sort.setMinimumWidth(0)
-        self.sort.setMaximumWidth(16777215)
-        self.sort_section = group('Trier par', self.sort)
+        # The same choices as the grid: what to sort on, then which way.
+        sorting = QWidget()
+        sort_lines = QVBoxLayout(sorting)
+        sort_lines.setContentsMargins(0, 0, 0, 0)
+        sort_lines.setSpacing(5)
+        self.classic_sort = QComboBox()
+        self.classic_sort.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.classic_sort.addItem('Nom', 'name')
+        self.classic_sort.addItem('Date', 'date')
+        for label, one_way, *_ in COLOR_ORDERS:
+            self.classic_sort.addItem(label, one_way)
+        self.classic_sort.addItem('Mélangé', 'shuffled')
+        self.classic_sort.currentIndexChanged.connect(lambda *_: self.set_classic_sort(self.classic_sort.currentData()))
+        sort_lines.addWidget(self.classic_sort)
+        self.classic_sort_button = self.button(sort_lines, '', self.flip_classic_sort, 'ghost')
+        # It still holds the name or date order the grid shares.
+        sort_lines.addWidget(self.sort)
+        self.sort.hide()
+        self.sort_section = group('Trier par', sorting)
+        self.sync_classic_sort()
         self.background_section = group('Fond', self.viewer_picker)
         stage = QWidget()
         stage_lines = QVBoxLayout(stage)
@@ -1699,6 +1721,67 @@ class Window(QMainWindow):
                 if pill is not None:
                     lines.addWidget(pill)
         lines.addStretch(1)
+
+    def set_classic_sort(self, value):
+        if value in ('name', 'date'):
+            self.classic_order = None
+            way = self.sort.currentData().split('_')[1]
+            self.sort.blockSignals(True)
+            self.sort.setCurrentIndex(max(0, self.sort.findData(f'{value}_{way}')))
+            self.sort.blockSignals(False)
+        elif value == 'shuffled':
+            self.classic_order = 'shuffled'
+            self.classic_seed = random.randrange(1 << 30)
+        else:
+            self.classic_order = value
+        self.settings.setValue('classic_sort', self.classic_order or '')
+        self.sync_classic_sort()
+        self.filters_changed()
+
+    def flip_classic_sort(self):
+        order = self.classic_order
+        if order == 'shuffled':
+            self.classic_seed = random.randrange(1 << 30)
+        elif order:
+            entry = next(entry for entry in COLOR_ORDERS if order in entry[1:3])
+            self.classic_order = entry[2] if order == entry[1] else entry[1]
+            self.settings.setValue('classic_sort', self.classic_order)
+        else:
+            kind, way = self.sort.currentData().split('_')
+            self.sort.blockSignals(True)
+            self.sort.setCurrentIndex(max(0, self.sort.findData(f"{kind}_{'asc' if way == 'desc' else 'desc'}")))
+            self.sort.blockSignals(False)
+        self.sync_classic_sort()
+        self.filters_changed()
+
+    def sync_classic_sort(self):
+        if not hasattr(self, 'classic_sort'):
+            return
+        order = self.classic_order
+        kind, way = self.sort.currentData().split('_')
+        if order == 'shuffled':
+            data, text, tip = 'shuffled', 'Remélanger', 'Un autre tirage au hasard'
+        elif order:
+            entry = next(entry for entry in COLOR_ORDERS if order in entry[1:3])
+            other = order == entry[2]
+            data, text, tip = entry[1], entry[4 if other else 3], entry[6 if other else 5]
+        else:
+            descending = way == 'desc'
+            data, text = kind, 'Décroissant' if descending else 'Croissant'
+            tip = ('Du plus récent au plus ancien' if descending else 'Du plus ancien au plus récent') if kind == 'date' else 'De Z à A' if descending else 'De A à Z'
+        self.classic_sort.blockSignals(True)
+        self.classic_sort.setCurrentIndex(max(0, self.classic_sort.findData(data)))
+        self.classic_sort.blockSignals(False)
+        self.classic_sort_button.setText(text)
+        self.classic_sort_button.setToolTip(tip)
+
+    def classic_sorted(self, photos):
+        """Classique only: the grid and the other views keep their own order."""
+        if self.classic_order == 'shuffled':
+            # Hashed, so that a photo leaving leaves the others where they are.
+            return sorted(photos, key=lambda p: zlib.crc32(f'{self.classic_seed}|{p.relative_path}'.encode()))
+        info = self.review.info
+        return sorted(photos, key=lambda p: color_key(info.get(p.relative_path), self.classic_order))
 
     def sync_view_panel(self):
         has_photos = bool(self.session and self.session.photos)
@@ -1988,6 +2071,9 @@ class Window(QMainWindow):
             active = False
         changed = active != self.review_active
         self.review_active = active
+        if changed and self.classic_order:
+            # The views take the name order; Classique gets its own back.
+            self.apply_filters()
         self.update_project_state()
         if changed and active:
             self.review.enter()
@@ -2500,6 +2586,9 @@ class Window(QMainWindow):
         self.session.photos = sort_photos(self.session.photos, self.session.sort_mode)
         stars, flag = self.stars.currentData(), self.flags.currentData()
         filtered = [p for p in self.session.photos if stars_match(p, stars) and marker_matches(p, flag) and self.choices_match(p)]
+        if self.classic_order and not self.review_active:
+            filtered = self.classic_sorted(filtered)
+        self.sync_classic_sort()
         if len(filtered) == len(self.photos) and all(a is b for a, b in zip(filtered, self.photos)):
             # Ratings and flags usually change only the decoration. Rebuilding
             # the list makes Qt scroll the current item back into view.

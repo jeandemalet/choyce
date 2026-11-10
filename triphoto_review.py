@@ -2917,6 +2917,10 @@ class ReviewPage(QWidget):
         if done >= total:
             self.analysis = None
             self.save_analysis()
+            # Classique sorted on the colors: once, when all of them are known.
+            window = self.window
+            if not window.review_active and window.classic_order not in (None, 'shuffled'):
+                window.apply_filters()
         elif done % 160 == 0:
             self.save_analysis()
         self.update_view()

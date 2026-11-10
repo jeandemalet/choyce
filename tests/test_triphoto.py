@@ -1889,6 +1889,27 @@ def test_color_orders(base):
     assert color.order == 'hue' and review.order_combo.currentText() == 'Couleur'
     settle(window, lambda: len(review.info) == 3)
     names = lambda: [p.path.name for p in color.ordered]
+    # Classique sorts on the same scales, then one way or the other, and the grid keeps its own order.
+    window.set_view('classic')
+    listed = lambda: [p.path.name for p in window.photos]
+    window.classic_sort.setCurrentIndex(window.classic_sort.findData('contrast'))
+    assert listed()[0] == 'hard.jpg' and window.classic_sort_button.text() == 'Décroissant'
+    window.classic_sort_button.click()
+    assert window.classic_order == 'flat' and listed()[-1] == 'hard.jpg' and window.classic_sort_button.text() == 'Croissant'
+    window.classic_sort.setCurrentIndex(window.classic_sort.findData('vivid'))
+    assert listed()[0] == 'vivid.jpg'
+    window.set_view('wall')
+    assert [p.path.name for p in window.photos] == ['flat.jpg', 'hard.jpg', 'vivid.jpg']
+    window.set_view('classic')
+    assert listed()[0] == 'vivid.jpg'
+    window.classic_sort.setCurrentIndex(window.classic_sort.findData('shuffled'))
+    assert sorted(listed()) == ['flat.jpg', 'hard.jpg', 'vivid.jpg'] and window.classic_sort_button.text() == 'Remélanger'
+    window.classic_sort.setCurrentIndex(window.classic_sort.findData('name'))
+    assert listed() == ['flat.jpg', 'hard.jpg', 'vivid.jpg'] and window.classic_sort_button.text() == 'Croissant'
+    window.classic_sort_button.click()
+    assert window.sort.currentData() == 'name_desc' and listed()[0] == 'vivid.jpg'
+    window.classic_sort_button.click()
+    window.set_view('color')
     review.set_color_order('contrast')
     assert names()[0] == 'hard.jpg' and review.order_button.text() == 'Décroissant'
     assert not review.groups_button.isVisibleTo(review.options['color'][0])
@@ -3281,7 +3302,7 @@ def test_user_journey(base):
     assert window.sort.currentData() == 'name_desc'
     window.sort.setCurrentIndex(window.sort.findData('name_asc'))
     window.set_view('classic')
-    assert window.sort.isVisible()
+    assert window.classic_sort.isVisible() and not window.sort.isVisible()
     window.set_view('wall')
     # A selection from these photos: the project is checked with its filters, and cancelling comes back here.
     window.kept_selection.click()
