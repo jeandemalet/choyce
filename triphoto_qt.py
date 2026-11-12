@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (QToolTip, QApplication, QMainWindow, QWidget, QVB
     QLabel, QPushButton, QComboBox, QSplitter, QListWidget, QListWidgetItem, QFrame, QScrollArea, QButtonGroup,
     QStackedWidget, QAbstractItemView, QDialog, QFileDialog, QLineEdit, QProgressBar, QStyledItemDelegate, QStyle, QMenu, QColorDialog)
 from PIL import Image, ImageCms, ImageWin
-from triphoto import (export_folder_name, APP_NAME, APP_VERSION, PhotoSession, sort_photos, SORT_OPTIONS, load_screen_preview, original_inventory,
+from triphoto import (export_folder_name, shooting_info, APP_NAME, APP_VERSION, PhotoSession, sort_photos, SORT_OPTIONS, load_screen_preview, original_inventory,
     export_original_copy, EXPORT_DIR_NAME, PICK_NEUTRAL, PICK_REJECT, PICK_SELECT, SESSION_DIR_NAME)
 from triphoto_custom import ProjectBuckets, BucketFilter, BucketStrip, CustomPage, PopupMenu, SelectionSession, Store
 from triphoto_cache import DAY, SHARED_LIMIT, clean_caches
@@ -274,6 +274,8 @@ class Viewer(QWidget):
         # Black and white, shared with the other views.
         self.transform = lambda image: image
         self.liked = lambda: None
+        # Shooting settings under the photo, empty when the file says nothing.
+        self.caption = lambda: ''
         self.add_export_action = lambda menu: None
         self.zoom = 1.0
         self.pan = QPointF()
@@ -296,6 +298,13 @@ class Viewer(QWidget):
         liked = self.liked()
         if liked is not None:
             draw_heart(painter, self.heart_rect(), liked)
+        caption = self.caption()
+        if caption:
+            shown = self.image_rect().intersected(QRectF(self.rect()))
+            top = min(shown.bottom()+4, self.height()-16)
+            painter.setFont(QFont(self.font().family(), 7))
+            painter.setPen(QColor('#000000' if QColor(self.background).lightnessF() > .35 else contrast_on(self.background)))
+            painter.drawText(QRectF(shown.left(), top, max(shown.width(), 240), 14), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, caption)
 
     def image_rect(self):
         fit = min(max(1, self.width()-24)/self.image.width(), max(1, self.height()-12-BAR_ROOM)/self.image.height())
@@ -1381,6 +1390,8 @@ class Window(QMainWindow):
         self.viewer = Viewer()
         self.viewer.backgroundChanged.connect(self.background_changed)
         self.viewer.liked = lambda: self.current_photo().liked if self.current_photo() else None
+        self.shooting = {}
+        self.viewer.caption = self.current_shooting_info
         self.viewer.add_export_action = lambda menu: self.add_export_action(menu, self.clicked_photos())
         self.viewer.heartClicked.connect(self.toggle_like)
         self.viewer.transform = lambda image: self.review.transformed(image)
@@ -2821,6 +2832,15 @@ class Window(QMainWindow):
                 self.load_visible()
                 if self.review_active:
                     self.review.update_view()
+
+    def current_shooting_info(self):
+        photo = self.current_photo()
+        if photo is None:
+            return ''
+        key = str(photo.path)
+        if key not in self.shooting:
+            self.shooting[key] = shooting_info(photo.path)
+        return self.shooting[key]
 
     def display_best(self):
         row = self.list.currentRow()

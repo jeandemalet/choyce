@@ -23,7 +23,7 @@ from PIL import Image, ImageCms, ImageOps, ImageTk
 
 # The folder keeps its name: every existing project, export and note refers to it.
 APP_NAME = "Choyce"
-APP_VERSION = "0.27.0"
+APP_VERSION = "0.28.0"
 SESSION_DIR_NAME = "TriPhoto_Session"
 SESSION_FILE_NAME = "session.json"
 SESSION_VERSION = 2
@@ -240,6 +240,40 @@ def export_original_copy(source_path: Path, destination_path: Path) -> None:
 def export_folder_name(text: str) -> str:
     """What Windows accepts as the name of a folder."""
     return re.sub(r'[<>:"/\\|?*]', '-', text).strip(' .')
+
+
+def shooting_info(path: Path) -> str:
+    """Shutter speed, aperture, ISO and focal length from the EXIF, or '' when none is known."""
+    try:
+        with Image.open(path) as image:
+            exif = image.getexif().get_ifd(0x8769)
+    except Exception:
+        return ""
+
+    def number(tag):
+        value = exif.get(tag)
+        if isinstance(value, (tuple, list)):
+            value = value[0] if value else None
+        try:
+            value = float(value)
+        except (TypeError, ValueError, ZeroDivisionError):
+            return None
+        return value if value > 0 else None
+
+    parts = []
+    exposure = number(33434)
+    if exposure:
+        parts.append(f"{exposure:g} s".replace(".", ",") if exposure >= 0.3 else f"1/{round(1 / exposure)} s")
+    aperture = number(33437)
+    if aperture:
+        parts.append("f/" + f"{aperture:.1f}".rstrip("0").rstrip(".").replace(".", ","))
+    iso = number(34855)
+    if iso:
+        parts.append(f"ISO {round(iso)}")
+    focal = number(37386)
+    if focal:
+        parts.append(f"{round(focal)} mm")
+    return " · ".join(parts)
 
 
 def write_json_atomic(path: Path, data: dict) -> None:
